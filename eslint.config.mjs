@@ -1,5 +1,6 @@
 import js from '@eslint/js'
 import prettier from 'eslint-config-prettier'
+import pluginVue from 'eslint-plugin-vue'
 import tseslint from 'typescript-eslint'
 
 export default tseslint.config(
@@ -8,6 +9,37 @@ export default tseslint.config(
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  // Vue 单文件组件 —— 不配的话 .vue 文件会被 ESLint 静默跳过
+  ...pluginVue.configs['flat/recommended'],
+  {
+    files: ['**/*.vue'],
+    languageOptions: {
+      parserOptions: { parser: tseslint.parser },
+      // .vue 里的 <script setup lang="ts"> 不会像 .ts 那样被自动关掉 no-undef，
+      // 所以浏览器全局要显式声明一遍
+      globals: {
+        window: 'readonly',
+        document: 'readonly',
+        navigator: 'readonly',
+        location: 'readonly',
+        console: 'readonly',
+        setTimeout: 'readonly',
+        clearTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearInterval: 'readonly',
+        fetch: 'readonly',
+        Blob: 'readonly',
+        FormData: 'readonly',
+        performance: 'readonly',
+        crypto: 'readonly',
+        sessionStorage: 'readonly',
+        localStorage: 'readonly',
+        history: 'readonly',
+        screen: 'readonly',
+        requestAnimationFrame: 'readonly'
+      }
+    }
+  },
   prettier,
   {
     rules: {

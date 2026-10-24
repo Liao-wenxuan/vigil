@@ -20,7 +20,11 @@
     "format": "prettier --write \"**/*.{ts,mjs,json,md,css,vue}\"",
     "format:check": "prettier --check \"**/*.{ts,mjs,json,md,css,vue}\"",
     "dev:collector": "npm --prefix packages/collector run dev",
+    "dev:dashboard": "npm --prefix packages/dashboard run dev",
+    "seed:demo": "tsx scripts/seed-demo.ts",
+    "demo": "powershell -ExecutionPolicy Bypass -File scripts/start-demo.ps1",
     "verify": "npm run build --workspace @vigil/sdk && tsx scripts/verify-pipeline.ts",
+    "verify:dashboard": "tsx scripts/verify-dashboard.ts --url http://localhost:5174",
     "prepare": "husky"
   },
   "devDependencies": {
@@ -30,6 +34,7 @@
     "@types/node": "^22.10.0",
     "eslint": "^9.17.0",
     "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-vue": "^10.0.0",
     "husky": "^9.1.6",
     "lint-staged": "^15.2.10",
     "playwright": "^1.63.0",
