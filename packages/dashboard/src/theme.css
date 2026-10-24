@@ -1,0 +1,168 @@
+/**
+ * 设计 token。
+ *
+ * 沿用「工业 HUD 调性」：深炭底 + 唯一强调色 + 纯色底 + 1px 描边 + 无阴影。
+ *
+ * 两条硬规则：
+ * 1. **强调色只用于状态**（主按钮、选中态、状态标签），
+ *    **不用于显示数据** —— 数字、计数、错误次数一律用白色系。
+ *    否则一屏数字全黄绿，扫一眼分不出哪个是重点。
+ * 2. **文字用同一白的三档透明度**，不用灰阶。
+ *    灰阶偏冷，和暖炭底不搭；透明度叠在底色上更协调。
+ */
+
+:root {
+  /* ---- 底色 ---- */
+  --vigil-bg: #19191b;
+  --vigil-bg-raised: #202023;
+  --vigil-bg-sunken: #121214;
+
+  /* ---- 唯一强调色 ---- */
+  --vigil-accent: #c6ca4c;
+  /* 浅色场景下同一个色在浅底上只有 1.7:1，必须换暗态 */
+  --vigil-accent-dim: #7d8220;
+
+  /* ---- 文字：同一白的三档透明度 ---- */
+  --vigil-text-1: rgba(255, 255, 255, 0.94);
+  --vigil-text-2: rgba(255, 255, 255, 0.66);
+  --vigil-text-3: rgba(255, 255, 255, 0.42);
+
+  /* ---- 描边 ---- */
+  --vigil-border: rgba(255, 255, 255, 0.1);
+  --vigil-border-strong: rgba(255, 255, 255, 0.18);
+
+  /* ---- 状态色 ---- */
+  --vigil-danger: #d9534f;
+  --vigil-warn: #d8a13a;
+  --vigil-ok: #4fa85f;
+}
+
+/* Element Plus 的暗色变量覆盖。
+   EP 自带的暗色主题是通用深灰，和上面的暖炭底不是一回事，
+   所以这里把关键变量重新指一遍。 */
+html.dark {
+  --el-color-primary: var(--vigil-accent);
+  --el-color-primary-light-3: #a9ad44;
+  --el-color-primary-light-5: #8f9339;
+  --el-color-primary-light-7: #767a2e;
+  --el-color-primary-light-8: #656823;
+  --el-color-primary-light-9: #43461a;
+  --el-color-primary-dark-2: #a2a641;
+
+  --el-bg-color: var(--vigil-bg-raised);
+  --el-bg-color-page: var(--vigil-bg);
+  --el-bg-color-overlay: var(--vigil-bg-raised);
+
+  --el-text-color-primary: var(--vigil-text-1);
+  --el-text-color-regular: var(--vigil-text-2);
+  --el-text-color-secondary: var(--vigil-text-3);
+  --el-text-color-placeholder: var(--vigil-text-3);
+
+  --el-border-color: var(--vigil-border-strong);
+  --el-border-color-light: var(--vigil-border);
+  --el-border-color-lighter: var(--vigil-border);
+  --el-border-color-extra-light: var(--vigil-border);
+
+  --el-fill-color: var(--vigil-bg-raised);
+  --el-fill-color-light: #242428;
+  --el-fill-color-lighter: #26262b;
+  --el-fill-color-blank: var(--vigil-bg);
+  --el-fill-color-dark: #2c2c31;
+  --el-fill-color-darker: #333338;
+
+  --el-mask-color: rgba(0, 0, 0, 0.72);
+  --el-disabled-bg-color: #232327;
+  --el-disabled-text-color: var(--vigil-text-3);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--vigil-bg);
+  color: var(--vigil-text-1);
+  font-family:
+    'Inter',
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数字用等宽 —— 列表里的计数要能上下对齐地扫 */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* 滚动条：默认的亮色滚动条在深底上很刺眼 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  background-clip: content-box;
+}
+
+/* Element Plus 细节修正 */
+.el-table {
+  --el-table-border-color: var(--vigil-border);
+  --el-table-header-bg-color: var(--vigil-bg-sunken);
+  --el-table-tr-bg-color: transparent;
+  --el-table-row-hover-bg-color: rgba(255, 255, 255, 0.035);
+  background: transparent;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 500;
+  color: var(--vigil-text-3);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.el-table .cell {
+  line-height: 1.5;
+}
+
+.el-drawer {
+  --el-drawer-bg-color: var(--vigil-bg-raised);
+}
+
+.el-card {
+  --el-card-bg-color: var(--vigil-bg-raised);
+  border-color: var(--vigil-border);
+  box-shadow: none !important;
+}
+
+.el-tabs__item {
+  color: var(--vigil-text-2);
+}
+.el-tabs__item.is-active {
+  color: var(--vigil-text-1);
+}
+.el-tabs__nav-wrap::after {
+  background-color: var(--vigil-border);
+}
