@@ -21,18 +21,22 @@ D:\my\vigil
 
 ```bash
 npm install
-npm run typecheck    # tsc --noEmit，两个包
-npm run lint         # eslint
-npm run test         # vitest，105 条
-npm run verify       # 端到端闭环验证，14 条断言（会先构建 SDK）
-npm run build        # 构建 SDK 产物
-npm run dev:collector # 启动采集服务，:4318
+npm run demo                # 一键演示：种子数据 + 采集服务(:4318) + 面板(:5174)
+npm run dev:collector       # 采集服务
+npm run dev:dashboard       # 管理面板
+npm run seed:demo -- --reset # 重置演示数据
+npm run typecheck           # tsc --noEmit，所有包
+npm run lint                # eslint（含 .vue）
+npm run test                # vitest，107 条
+npm run verify              # 端到端闭环验证，14 条断言（会先构建 SDK）
+npm run verify:dashboard    # 面板渲染验证，13 条断言（需要面板已启动）
+npm run build               # 构建 SDK 产物
 
 # 注册应用（拿 appId / token / uploadToken）
 npm --prefix packages/collector run app:create -- create "应用名"
 ```
 
-**验证一律用数字，不看截图。** `npm run verify` 的输出全是计数和尺寸。
+**验证一律用数字，不看截图。** `npm run verify` / `verify:dashboard` 的输出全是计数和尺寸。
 
 ## 包结构
 
@@ -41,6 +45,7 @@ npm --prefix packages/collector run app:create -- create "应用名"
 | `packages/protocol` | 上报协议类型契约 | **纯类型，零运行时**。只有 `import type` 能从它导入 |
 | `packages/sdk` | 浏览器采集 SDK | 无框架依赖。Vue 适配器单独一个入口 `src/vue.ts` |
 | `packages/collector` | 采集服务 | Fastify + better-sqlite3。ESM，NodeNext，相对导入**必须带 `.js` 后缀** |
+| `packages/dashboard` | 管理面板 | Vue 3 + Element Plus。管理 token 由 Vite 代理层注入，**不进前端代码** |
 
 ## 不能破坏的不变量
 
@@ -64,6 +69,17 @@ Vue 捕获和全局捕获到同一个错误必须是**同一条**。
 
 `errors` 表有 `UNIQUE (app_id, fingerprint)`，写入走 UPSERT。
 改成「先 SELECT 再 INSERT」在并发下必然出重复行。
+
+### 3.1 指纹要校验，缺失时服务端兜底
+
+指纹是聚合主键。照单全收客户端的值，一个**空串**就能让该应用的所有错误
+塌成一行 —— 表面上有数据，实际全是同一条错误。
+
+`ingest.ts` 里 `isValidFingerprint` 校验 16 位十六进制格式，
+不合法时走 `fallbackFingerprint`（分类 + kind + 首帧函数名 + 消息）。
+
+**测试夹具必须用合法格式的指纹**（`tests/helpers.ts` 里的 `fp(label)`）——
+用 `fp_1` 这种假格式会静默走兜底路径，测的就不是客户端指纹了。
 
 ### 4. 两个 token 严格分离
 
@@ -105,13 +121,33 @@ IIFE 放 `<head>` 同步初始化才能收到。改动 vite 配置时别把 IIFE
 ## 验证
 
 ```bash
-npm run test      # 105 条
-npm run verify    # 14 条端到端断言
+npm run test              # 107 条
+npm run verify            # 14 条端到端断言
+npm run verify:dashboard  # 13 条面板渲染断言
 ```
 
 `npm run verify` 跑的是**真实链路**：真 Chromium → 真 SDK 产物 → 真 HTTP → 真 Collector → 真 SQLite → 真查询 API。
 
-它依赖本机 Playwright 浏览器缓存；缓存里没有时会打印实际使用的可执行文件路径。
+`npm run verify:dashboard` 断言**渲染出来的 DOM 文本**（卡片数字、行数、抽屉内容），
+不是「看起来对」。它需要面板已经跑起来。
+
+### 面板断言的两个坑（都踩过）
+
+1. **Element Plus 把所有下拉的 popper 都挂在 body 上**，未展开的也在 DOM 里。
+   数选项必须限定 `.el-select__popper:visible`，否则会把分类下拉的 3 个选项一起数进去。
+2. **资源错误本来就没有栈**。对它断言「有原始栈」是在断言一件不存在的事 ——
+   断言要落在**有栈的那一行**（JS 错误）上。
+
+## 端口
+
+| 端口 | 用途 |
+|---|---|
+| 4318 | Vigil 采集服务 |
+| 5174 | Vigil 管理面板 |
+| 5173 | **content-sharing-platform 的前端**（别动） |
+
+面板的 `vite.config.ts` 用了 `strictPort: true` —— 端口被占用时直接报错，
+而不是像 Vite 默认那样静默递增到 5175。
 
 ## 提交约定
 

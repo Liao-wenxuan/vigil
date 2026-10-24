@@ -23,19 +23,26 @@
    （运行时）                     │  errors      聚合结果      │
                                 │  error_events 原始明细     │
                                 │  sourcemaps  栈还原索引    │
-                                └──────────────────────────┘
+                                └────────────┬─────────────┘
+                                             │ 管理 API
+                                             ▼
+                                    ┌─────────────────┐
+                                    │  Vigil Dashboard │
+                                    │  Vue3 + Element  │
+                                    └─────────────────┘
 
    独立 token  ──────────────▶  ↑ uploadToken 只在 CI 里
    （上传）                      map 存服务端，不进静态资源目录
 ```
 
-**三个包**：
+**四个包**：
 
 | 包 | 作用 | 依赖 |
 |---|---|---|
 | `@vigil/protocol` | 上报协议的类型契约（纯类型，零运行时） | 无 |
 | `@vigil/sdk` | 浏览器端采集 SDK | 无框架依赖 |
 | `@vigil/collector` | 采集服务 + 管理 API | Fastify、better-sqlite3 |
+| `@vigil/dashboard` | 管理面板 | Vue 3、Element Plus |
 
 ---
 
@@ -44,14 +51,24 @@
 ```bash
 npm install
 
-# 1. 启动采集服务
-npm run dev:collector
-# → http://0.0.0.0:4318
+# 一键起演示环境（写种子数据 + 采集服务 + 面板）
+npm run demo
+# → 面板  http://localhost:5174
+# → 接口  http://localhost:4318
+```
 
-# 2. 注册一个应用（拿到 appId / token / uploadToken）
+分开起：
+
+```bash
+npm run dev:collector        # 采集服务，:4318
+npm run dev:dashboard        # 管理面板，:5174
+npm run seed:demo -- --reset # 重置演示数据
+```
+
+注册一个应用（拿 appId / token / uploadToken）：
+
+```bash
 npm --prefix packages/collector run app:create -- create "我的应用"
-
-# 3. 接入 SDK（详见 docs/integration.md）
 ```
 
 ---
@@ -96,8 +113,9 @@ installVueErrorHandler(app, (err) => vigil.captureException(err))
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test      # 105 条单元测试
-npm run verify    # 14 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
+npm run test              # 107 条单元测试
+npm run verify            # 14 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
+npm run verify:dashboard  # 13 条面板断言（断言渲染出来的 DOM 文本）
 npm run typecheck
 npm run lint
 ```
@@ -109,6 +127,14 @@ npm run lint
 - 压缩产物的栈还原回源码（`app.min.js:1:20` → `src/user-profile.ts:1`）
 - URL 里的 token 被脱敏（`token=***`）
 - 上报请求自身不被当成错误（无递归）
+
+`npm run verify:dashboard` 断言**渲染出来的数字**，不是「看起来对」：
+
+- 应用下拉里有 2 个应用
+- 「去重错误」卡片显示 8、「累计发生」显示 107
+- 表格渲染了 8 行，聚合最多的那条显示 59 次
+- 点开详情有原始栈、指纹、发生次数
+- 页面没有 JS 报错
 
 ---
 
@@ -145,6 +171,14 @@ UNIQUE (app_id, fingerprint)
 ```
 
 UPSERT 一行 SQL 搞定。应用层「先查再插」在并发下必然出重复行。
+
+### 指纹：服务端要兜底
+
+指纹是聚合主键。照单全收客户端的值，一个**空串**就能让该应用的所有错误
+塌成一行 —— 表面上有数据，实际全是同一条错误。
+
+所以服务端校验指纹格式（16 位十六进制），不合法就自己算一个兜底指纹。
+SDK 产出的指纹永远是合法格式，兜底路径只在异常情况下触发。
 
 ### 限流：按 appId 而不是 IP
 
@@ -187,9 +221,18 @@ packages/
       sourcemap.ts  栈还原
       auth.ts       鉴权
       rate-limit.ts 令牌桶限流
+  dashboard/   管理面板
+    src/
+      App.vue            布局 + 统计卡片 + 错误列表 + 分布
+      components/        详情抽屉
+      api.ts             管理 API 客户端
+      theme.css          设计 token
 scripts/
   verify-pipeline.ts    端到端闭环验证
+  verify-dashboard.ts   面板渲染验证
+  seed-demo.ts          演示数据种子
   upload-sourcemaps.mjs CI 里上传 sourcemap
+  start-demo.ps1        一键起演示环境
 docs/
   integration.md   接入文档
   architecture.md  架构与取舍
@@ -220,11 +263,12 @@ docs/
 - [x] 多应用隔离 + 双 token 分离（运行时 / 上传）
 - [x] 采集端脱敏
 - [x] 令牌桶限流
-- [x] 105 条单元测试 + 14 条端到端断言
+- [x] 管理面板（Vue 3 + Element Plus）
+- [x] 107 条单元测试 + 14 条端到端断言 + 13 条面板断言
 
 待做：
 
-- [ ] 管理面板（Vue 3 + Element Plus）
 - [ ] npm 发布（`@vigil/sdk`）
 - [ ] L2 性能 RUM（Web Vitals）
 - [ ] 告警规则与 webhook
+- [ ] 面板：错误趋势图、时间范围筛选、错误「已解决」状态
