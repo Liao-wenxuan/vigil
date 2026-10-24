@@ -1,0 +1,17 @@
+{
+  "name": "@vigil/protocol",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vigil 上报协议：SDK 与 Collector 共用的类型契约（纯类型，无运行时）",
+  "license": "MIT",
+  "type": "module",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts"
+    }
+  },
+  "files": [
+    "src"
+  ]
+}
