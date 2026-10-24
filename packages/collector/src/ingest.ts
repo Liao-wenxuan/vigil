@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Database } from 'better-sqlite3'
 import type { ErrorEvent } from '@vigil/protocol'
 import { SourcemapResolver, type ResolvedFrame } from './sourcemap.js'
@@ -37,6 +38,34 @@ export interface IngestResult {
 /** 每个错误保留多少条明细 */
 const DEFAULT_MAX_EVENTS_PER_ERROR = 20
 
+/** 合法指纹：16 位十六进制 */
+const FINGERPRINT_PATTERN = /^[0-9a-f]{16}$/
+
+/**
+ * 校验客户端给的指纹。
+ *
+ * 指纹是**聚合主键**。如果照单全收，一个空串就能让该应用的所有错误
+ * 塌成一行 —— 表面上「有数据」，实际全是同一条错误，监控直接失去意义。
+ *
+ * 所以服务端必须兜一层：指纹缺失或格式不对时，自己算一个。
+ */
+function isValidFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && FINGERPRINT_PATTERN.test(value)
+}
+
+/**
+ * 服务端兜底指纹。
+ *
+ * 不复用客户端那套算法（跨包依赖不值得），但保证「不同的错误不会塌成一条」。
+ * 带上首帧的函数名 —— 只用消息的话，用户 ID 之类的动态值会让分组不稳定。
+ */
+function fallbackFingerprint(event: ErrorEvent): string {
+  const first = event.frames?.[0]
+  const key = [event.category, event.kind, first?.functionName ?? '', event.message].join('|')
+
+  return createHash('sha256').update(key).digest('hex').slice(0, 16)
+}
+
 export class Ingestor {
   constructor(
     private readonly db: Database,
@@ -67,6 +96,11 @@ export class Ingestor {
     const occurredAt = event.occurredAt ?? Date.now()
     const receivedAt = Date.now()
     const release = event.release
+
+    // 指纹缺失或格式不对时服务端兜底，避免所有错误塌成一行
+    const fingerprint = isValidFingerprint(event.fingerprint)
+      ? event.fingerprint
+      : fallbackFingerprint(event)
 
     const ua = parseUserAgent(event.userAgent ?? '')
     const resolvedFrames: ResolvedFrame[] = this.resolver.resolve(
@@ -101,7 +135,7 @@ export class Ingestor {
 
     const row = upsert.get({
       appId,
-      fingerprint: event.fingerprint,
+      fingerprint,
       category: event.category,
       kind: event.kind,
       name: event.name ?? null,
@@ -134,9 +168,9 @@ export class Ingestor {
            (app_id, fingerprint, error_id, occurred_at, received_at, payload_json)
          VALUES (?, ?, ?, ?, ?, ?)`
       )
-      .run(appId, event.fingerprint, errorId, occurredAt, receivedAt, JSON.stringify(event))
+      .run(appId, fingerprint, errorId, occurredAt, receivedAt, JSON.stringify(event))
 
-    this.pruneEvents(appId, event.fingerprint)
+    this.pruneEvents(appId, fingerprint)
 
     return errorId
   }

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { createApp } from '../src/apps.js'
 import { Ingestor } from '../src/ingest.js'
 import { SourcemapResolver } from '../src/sourcemap.js'
-import { makeEvent, setupDb } from './helpers.js'
+import { fp, makeEvent, setupDb } from './helpers.js'
 
 function makeIngestor(db: ReturnType<typeof setupDb>['db']) {
   return new Ingestor(db, new SourcemapResolver(db))
@@ -13,7 +13,7 @@ describe('Ingestor 聚合', () => {
     const { db, app } = setupDb()
     const ingestor = makeIngestor(db)
 
-    const event = makeEvent({ fingerprint: 'fp_1' })
+    const event = makeEvent({ fingerprint: fp('one') })
     ingestor.ingest(app.appId, [event, { ...event }, { ...event }])
 
     const row = db
@@ -30,9 +30,9 @@ describe('Ingestor 聚合', () => {
     const ingestor = makeIngestor(db)
 
     ingestor.ingest(app.appId, [
-      makeEvent({ fingerprint: 'fp_a' }),
-      makeEvent({ fingerprint: 'fp_b' }),
-      makeEvent({ fingerprint: 'fp_a' })
+      makeEvent({ fingerprint: fp('a') }),
+      makeEvent({ fingerprint: fp('b') }),
+      makeEvent({ fingerprint: fp('a') })
     ])
 
     const row = db
@@ -49,12 +49,12 @@ describe('Ingestor 聚合', () => {
     const ingestor = makeIngestor(db)
 
     for (let i = 0; i < 5; i++) {
-      ingestor.ingest(app.appId, [makeEvent({ fingerprint: 'fp_same' })])
+      ingestor.ingest(app.appId, [makeEvent({ fingerprint: fp('same') })])
     }
 
     const rows = db
       .prepare('SELECT COUNT(*) AS n FROM errors WHERE app_id = ? AND fingerprint = ?')
-      .all(app.appId, 'fp_same') as Array<{ n: number }>
+      .all(app.appId, fp('same')) as Array<{ n: number }>
 
     expect(rows).toHaveLength(1)
     expect(rows[0].n).toBe(1)
@@ -65,7 +65,7 @@ describe('Ingestor 聚合', () => {
     const { db, app } = setupDb()
     const ingestor = makeIngestor(db)
 
-    const event = makeEvent({ fingerprint: 'fp_detail' })
+    const event = makeEvent({ fingerprint: fp('detail') })
     ingestor.ingest(app.appId, [event, { ...event }])
 
     const rows = db
@@ -81,12 +81,12 @@ describe('Ingestor 聚合', () => {
     const ingestor = makeIngestor(db)
 
     for (let i = 0; i < 25; i++) {
-      ingestor.ingest(app.appId, [makeEvent({ fingerprint: 'fp_prune' })])
+      ingestor.ingest(app.appId, [makeEvent({ fingerprint: fp('prune') })])
     }
 
     const row = db
       .prepare('SELECT COUNT(*) AS n FROM error_events WHERE app_id = ? AND fingerprint = ?')
-      .get(app.appId, 'fp_prune') as { n: number }
+      .get(app.appId, fp('prune')) as { n: number }
 
     expect(row.n).toBe(20)
     db.close()
@@ -97,8 +97,8 @@ describe('Ingestor 聚合', () => {
     const appB = createApp(db, '另一个应用')
     const ingestor = makeIngestor(db)
 
-    ingestor.ingest(appA.appId, [makeEvent({ fingerprint: 'shared_fp' })])
-    ingestor.ingest(appB.appId, [makeEvent({ fingerprint: 'shared_fp' })])
+    ingestor.ingest(appA.appId, [makeEvent({ fingerprint: fp('shared') })])
+    ingestor.ingest(appB.appId, [makeEvent({ fingerprint: fp('shared') })])
 
     const a = db.prepare('SELECT COUNT(*) AS n FROM errors WHERE app_id = ?').get(appA.appId) as {
       n: number
@@ -117,7 +117,7 @@ describe('Ingestor 聚合', () => {
     const { db, app } = setupDb()
     const ingestor = makeIngestor(db)
 
-    ingestor.ingest(app.appId, [makeEvent({ fingerprint: 'fp_ua' })])
+    ingestor.ingest(app.appId, [makeEvent({ fingerprint: fp('ua') })])
 
     const row = db
       .prepare('SELECT browser, os, device FROM errors WHERE app_id = ?')
@@ -126,6 +126,44 @@ describe('Ingestor 聚合', () => {
     expect(row.browser).toBe('Chrome')
     expect(row.os).toBe('Windows 10+')
     expect(row.device).toBe('desktop')
+    db.close()
+  })
+
+  it('指纹缺失时服务端兜底，不同的错误不会塌成一条', () => {
+    const { db, app } = setupDb()
+    const ingestor = makeIngestor(db)
+
+    // 客户端没给指纹（SDK 有 bug / 版本不兼容 / 被篡改）
+    ingestor.ingest(app.appId, [
+      makeEvent({ fingerprint: '', message: '错误 A' }),
+      makeEvent({ fingerprint: '', message: '错误 B' })
+    ])
+
+    const rows = db.prepare('SELECT COUNT(*) AS n FROM errors WHERE app_id = ?').get(app.appId) as {
+      n: number
+    }
+
+    // 如果照单全收空串，这两条会塌成 1 行
+    expect(rows.n).toBe(2)
+    db.close()
+  })
+
+  it('指纹格式非法时同样走兜底', () => {
+    const { db, app } = setupDb()
+    const ingestor = makeIngestor(db)
+
+    ingestor.ingest(app.appId, [
+      makeEvent({ fingerprint: 'not-a-valid-fingerprint' }),
+      makeEvent({ fingerprint: 'not-a-valid-fingerprint' })
+    ])
+
+    const rows = db
+      .prepare('SELECT COUNT(*) AS n, SUM(count) AS c FROM errors WHERE app_id = ?')
+      .get(app.appId) as { n: number; c: number }
+
+    // 同一条非法指纹的相同错误仍然聚合成一条
+    expect(rows.n).toBe(1)
+    expect(rows.c).toBe(2)
     db.close()
   })
 

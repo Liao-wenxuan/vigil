@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { buildApp } from '../src/app.js'
-import { makeEvent, setupDb } from './helpers.js'
+import { fp, makeEvent, setupDb } from './helpers.js'
 
 const ADMIN_TOKEN = 'admin_test_token'
 
@@ -172,7 +172,7 @@ describe('管理接口', () => {
       method: 'POST',
       url: '/api/v1/collect',
       headers: { 'x-vigil-app-id': app.appId, 'x-vigil-token': app.token },
-      payload: { appId: app.appId, events: [makeEvent({ fingerprint: 'fp_list' })] }
+      payload: { appId: app.appId, events: [makeEvent({ fingerprint: fp('list') })] }
     })
 
     const list = await server.inject({
@@ -182,7 +182,7 @@ describe('管理接口', () => {
     })
     expect(list.statusCode).toBe(200)
     expect(list.json().total).toBe(1)
-    expect(list.json().errors[0].fingerprint).toBe('fp_list')
+    expect(list.json().errors[0].fingerprint).toBe(fp('list'))
 
     const stats = await server.inject({
       method: 'GET',
@@ -202,16 +202,16 @@ describe('管理接口', () => {
       method: 'POST',
       url: '/api/v1/collect',
       headers: { 'x-vigil-app-id': app.appId, 'x-vigil-token': app.token },
-      payload: { appId: app.appId, events: [makeEvent({ fingerprint: 'fp_detail' })] }
+      payload: { appId: app.appId, events: [makeEvent({ fingerprint: fp('detail') })] }
     })
 
     const detail = await server.inject({
       method: 'GET',
-      url: `/api/v1/apps/${app.appId}/errors/fp_detail`,
+      url: `/api/v1/apps/${app.appId}/errors/${fp('detail')}`,
       headers: { 'x-vigil-admin-token': ADMIN_TOKEN }
     })
     expect(detail.statusCode).toBe(200)
-    expect(detail.json().error.fingerprint).toBe('fp_detail')
+    expect(detail.json().error.fingerprint).toBe(fp('detail'))
     expect(detail.json().events.length).toBe(1)
     db.close()
   })
@@ -225,7 +225,7 @@ describe('管理接口', () => {
       method: 'POST',
       url: '/api/v1/collect',
       headers: { 'x-vigil-app-id': appA.appId, 'x-vigil-token': appA.token },
-      payload: { appId: appA.appId, events: [makeEvent({ fingerprint: 'fp_x' })] }
+      payload: { appId: appA.appId, events: [makeEvent({ fingerprint: fp('x') })] }
     })
 
     const response = await server.inject({
