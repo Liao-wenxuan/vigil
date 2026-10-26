@@ -2,7 +2,7 @@
   "name": "@vigil/collector",
   "version": "0.1.0",
   "private": true,
-  "description": "Vigil 采集服务：接收上报、鉴权、聚合、sourcemap 还原",
+  "description": "Vigil 采集服务：模块化单体（租户 / 问题 / 性能 / 告警 / 制品）",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -12,18 +12,20 @@
     "start": "node dist/index.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "app:create": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts"
   },
   "dependencies": {
     "@jridgewell/trace-mapping": "^0.3.31",
     "@vigil/protocol": "*",
     "better-sqlite3": "^13.0.3",
-    "fastify": "^5.2.0"
+    "fastify": "^5.2.0",
+    "nodemailer": "^7.0.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.0",
-    "tsx": "^4.19.2",
+    "@types/nodemailer": "^7.0.0",
+    "tsx": "^4.23.13",
     "typescript": "^5.7.2",
     "vitest": "^5.0.1"
   }
