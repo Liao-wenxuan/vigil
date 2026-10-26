@@ -1,0 +1,177 @@
+import type { EventContext, Tag } from './common.js'
+
+/**
+ * 错误事件的线上契约。
+ */
+
+/**
+ * 错误分类 —— 决定指纹怎么算、后台怎么分组。
+ *
+ * 与 ErrorKind 的区别是**分组维度**：
+ * 一个 Vue 组件里抛出的错误，kind 是 'vue'，category 是 'javascript'。
+ * 如果 kind 进了指纹，同一个 bug 走 Vue 捕获和走全局捕获会分成两条。
+ */
+export type ErrorCategory = 'javascript' | 'resource' | 'http'
+
+/** 采集来源 —— 只用于说明「这条是谁抓到的」，**不参与指纹计算** */
+export type ErrorKind = 'js' | 'promise' | 'resource' | 'http' | 'vue' | 'manual'
+
+/** 面包屑类型 */
+export type BreadcrumbType = 'navigation' | 'click' | 'console' | 'xhr' | 'fetch' | 'custom' | 'vue'
+
+export interface Breadcrumb {
+  type: BreadcrumbType
+  category: string
+  message?: string
+  data?: Record<string, unknown>
+  timestamp: number
+}
+
+/** 上报前解析出来的栈帧（未做 sourcemap 还原） */
+export interface StackFrame {
+  filename: string
+  lineno?: number
+  colno?: number
+  functionName?: string
+}
+
+/** Collector 用 sourcemap 还原后的原始位置 */
+export interface ResolvedPosition {
+  filename: string
+  lineno: number
+  colno: number
+  functionName?: string
+  source?: string
+}
+
+export interface ResourceInfo {
+  /** 标签名：img / script / link / video … */
+  tag: string
+  /** 已脱敏的资源地址 */
+  src: string
+  /** 推断出的资源类型：script / stylesheet / image / media / font */
+  type: string
+}
+
+export interface HttpInfo {
+  method: string
+  /** 已脱敏的请求地址（不含 query） */
+  url: string
+  status: number
+  durationMs?: number
+}
+
+/**
+ * 报错瞬间的性能快照。
+ *
+ * 这是**错误与性能关联**的关键：很多「页面卡」表面看是性能问题，
+ * 根因却是没捕获的 Promise 异常或资源重试风暴。
+ * 把报错当下的 LCP/FCP/长任务数带上，才能判断「这个错误是不是拖慢了这页」。
+ */
+export interface ErrorVitals {
+  fcp?: number
+  lcp?: number
+  cls?: number
+  inp?: number
+  ttfb?: number
+  tbt?: number
+  longTaskCount?: number
+}
+
+/**
+ * 一条错误事件。
+ *
+ * 设计取舍：
+ * - `stack` 保留**原始字符串**，服务端用它做 sourcemap 还原。
+ *   浏览器端的栈是压缩过的（index-abc123.js:1:2345），不还原等于没有栈。
+ * - `frames` 是尽力解析出来的结构化帧，作为没有 sourcemap 时的降级展示。
+ * - 所有可能含用户数据的字段（url / referrer / message / stack）都已在 SDK 侧脱敏。
+ */
+export interface ErrorEvent {
+  category: ErrorCategory
+  kind: ErrorKind
+  /**
+   * 事件唯一 ID（UUID）。
+   *
+   * 服务端用它**去重**：同一条事件因为网络重试被上报两次时，
+   * 第二次会被唯一索引挡下来，count 不会虚高。
+   */
+  eventId?: string
+  /** 错误名，如 TypeError / ReferenceError */
+  name?: string
+  message: string
+  stack?: string
+  frames: StackFrame[]
+  /** 客户端算好的指纹，服务端直接用它做聚合键 */
+  fingerprint: string
+
+  /** 触发时的页面地址（已脱敏） */
+  url: string
+  referrer?: string
+  userAgent: string
+  locale?: string
+  timezone?: string
+  viewport?: { width: number; height: number }
+  screen?: { width: number; height: number }
+  connection?: {
+    effectiveType?: string
+    downlink?: number
+    rtt?: number
+    type?: string
+  }
+
+  /** 会话 ID：同一个标签页内跨路由保持不变 */
+  sessionId: string
+  userId?: string
+  release?: string
+  environment?: string
+
+  /** 事件发生时刻（epoch ms） */
+  occurredAt: number
+
+  /** 业务自定义上下文（不可搜索） */
+  context?: Record<string, unknown>
+  /** 出错前的操作轨迹 */
+  breadcrumbs?: Breadcrumb[]
+  extra?: Record<string, unknown>
+  /** 可搜索的结构化标签 */
+  tags?: Tag[]
+
+  /** 报错瞬间的性能快照 */
+  vitals?: ErrorVitals
+
+  resource?: ResourceInfo
+  http?: HttpInfo
+}
+
+/** 上报信封 */
+export interface CollectEnvelope {
+  appId: string
+  /**
+   * 运行时 token。
+   *
+   * 只有 beacon 通道才会出现在 body 里 —— beacon 不能自定义 header。
+   * fetch 通道把它放在 header，不进 body，避免被服务端访问日志记下来。
+   */
+  token?: string
+  sdk: {
+    name: string
+    version: string
+  }
+  events: ErrorEvent[]
+}
+
+/** Collector 返回给 SDK 的响应 */
+export interface CollectResponse {
+  ok: boolean
+  /** 成功入库的事件数 */
+  accepted?: number
+  /** 因限流被丢弃的事件数 */
+  dropped?: number
+  /** 事件序号 → 服务端错误 id 的映射 */
+  ids?: Record<string, number>
+  error?: string
+}
+
+/** 供其它模块复用的上下文类型别名 */
+export type ErrorEventContext = EventContext
