@@ -1,38 +1,50 @@
-# Vigil · 前端错误监控平台
+# Vigil · 前端可观测性平台
 
-多应用可接入的前端错误监控系统：**浏览器 SDK + 采集服务 + 管理面板**。
+多应用可接入的前端监控：**浏览器 SDK + 采集服务 + 管理面板**。
 
-- 采集：JS 运行时错误、Promise 拒绝、资源加载失败、接口错误、Vue 组件错误
-- 聚合：按**指纹**（fingerprint）归并同类错误，看的是「有多少次」而不是「有多少条」
-- 还原：生产环境的压缩栈通过 sourcemap **还原回源码位置**
-- 隐私：URL / 消息 / 栈在**采集端**就脱敏，token、手机号不会进数据库
+不只是"错误日志"—— 错误、性能、行为三者在同一个 Issue 上打通，
+能回答"这个错误是不是拖慢了这页"。
+
+---
+
+## 它解决什么
+
+| 能力 | 说明 |
+|---|---|
+| **Issue 生命周期** | 错误不是一条记录，是**一个工单**：有状态、负责人、评论、活动历史 |
+| **Resolve with Release** | 在 `1.4.3` 上解决的问题，只有 `1.4.4+` 出现才算**回归** |
+| **性能 RUM** | Web Vitals（LCP/CLS/INP/TTFB）、长任务/TBT、接口 span、路由事务 |
+| **错误与性能关联** | 报错事件带上**当刻的 LCP/FCP/长任务数** |
+| **告警引擎** | 6 类规则 × 5 种通道，带去重静默（避免告警疲劳） |
+| **多租户** | 组织 → 团队 → 项目 → 环境 / 版本，三层隔离 |
+| **安全** | 双密钥分离、采集端脱敏、sourcemap 不出服务端 |
 
 ---
 
 ## 架构
 
 ```
-┌──────────────┐   fetch / sendBeacon   ┌─────────────────┐
-│   浏览器页面  │ ──────────────────────▶ │  Vigil Collector │
-│  @vigil/sdk   │                         │   Fastify + SQLite│
-└──────────────┘                         └────────┬────────┘
-        │                                          │
-        │  上报：appId + token                     │  聚合 / 指纹
-        ▼                                          ▼
-   独立 token  ──────────────▶  ┌──────────────────────────┐
-   （运行时）                     │  errors      聚合结果      │
-                                │  error_events 原始明细     │
-                                │  sourcemaps  栈还原索引    │
-                                └────────────┬─────────────┘
-                                             │ 管理 API
-                                             ▼
-                                    ┌─────────────────┐
-                                    │  Vigil Dashboard │
-                                    │  Vue3 + Element  │
-                                    └─────────────────┘
-
-   独立 token  ──────────────▶  ↑ uploadToken 只在 CI 里
-   （上传）                      map 存服务端，不进静态资源目录
+┌──────────────┐   /collect（错误·全量）    ┌──────────────────────┐
+│              │ ─────────────────────────▶ │                      │
+│   浏览器页面  │   /performance（性能·采样）  │   Vigil Collector    │
+│  @vigil/sdk  │ ─────────────────────────▶ │  Fastify + SQLite    │
+│              │   /sourcemaps（仅 CI）      │  模块化单体           │
+└──────────────┘ ─────────────────────────▶ └──────────┬───────────┘
+                                                        │
+                              ┌─────────────────────────┼──────────────────────┐
+                              ▼                         ▼                      ▼
+                      ┌───────────────┐         ┌──────────────┐      ┌─────────────┐
+                      │  问题域        │         │  性能域       │      │  告警域      │
+                      │  Issue 状态机  │         │  事务/span    │      │  规则/通道   │
+                      │  活动流/回归   │         │  分位数聚合    │      │  评估/去重   │
+                      └───────────────┘         └──────────────┘      └─────────────┘
+                              │                         │                      │
+                              └─────────────────────────┴──────────────────────┘
+                                                        │
+                                              ┌──────────────────────┐
+                                              │   Vigil Dashboard     │
+                                              │  Vue3 + Element Plus  │
+                                              └──────────────────────┘
 ```
 
 **四个包**：
@@ -40,9 +52,9 @@
 | 包 | 作用 | 依赖 |
 |---|---|---|
 | `@vigil/protocol` | 上报协议的类型契约（纯类型，零运行时） | 无 |
-| `@vigil/sdk` | 浏览器端采集 SDK | 无框架依赖 |
+| `@vigil/sdk` | 浏览器采集 SDK（ESM + IIFE 两个产物） | 无框架依赖 |
 | `@vigil/collector` | 采集服务 + 管理 API | Fastify、better-sqlite3 |
-| `@vigil/dashboard` | 管理面板 | Vue 3、Element Plus |
+| `@vigil/dashboard` | 管理面板 | Vue 3、Element Plus、vue-router |
 
 ---
 
@@ -50,8 +62,6 @@
 
 ```bash
 npm install
-
-# 一键起演示环境（写种子数据 + 采集服务 + 面板）
 npm run demo
 # → 面板  http://localhost:5174
 # → 接口  http://localhost:4318
@@ -60,51 +70,97 @@ npm run demo
 分开起：
 
 ```bash
-npm run dev:collector        # 采集服务，:4318
-npm run dev:dashboard        # 管理面板，:5174
+npm run dev:collector       # 采集服务，:4318
+npm run dev:dashboard       # 管理面板，:5174
 npm run seed:demo -- --reset # 重置演示数据
 ```
 
-注册一个应用（拿 appId / token / uploadToken）：
+建组织 / 项目 / 环境 / 版本：
 
 ```bash
-npm --prefix packages/collector run app:create -- create "我的应用"
+npm --prefix packages/collector run cli -- org create "我的组织"
+npm --prefix packages/collector run cli -- project create 1 "我的应用"
+npm --prefix packages/collector run cli -- env add 1 production "生产环境" --production
+npm --prefix packages/collector run cli -- release add 1 1.4.2
 ```
 
 ---
 
-## 接入 SDK（30 秒版）
+## 接入 SDK
 
 ```html
 <head>
-  <!-- ⚠️ 放在 <head> 里同步加载：ESM 的 module script 是 defer 的，
-       初始化会晚于首屏静态资源的加载失败 -->
+  <!-- ⚠️ 放 <head> 同步加载：ESM 的 module script 是 defer 的，
+       初始化会晚于首屏静态资源的加载失败（那样一条都收不到） -->
   <script src="https://cdn.example.com/vigil.iife.js"></script>
   <script>
     Vigil.init({
       endpoint: 'https://collector.example.com/api/v1/collect',
-      appId: 'app_xxx',
+      appId: 'shop-miniapp',
       token: 'vsk_xxx',
-      release: '1.0.0',
-      environment: 'production'
+      release: '1.4.2',
+      environment: 'production',
+      userId: 'u_123',
+      performanceSampleRate: 0.1
     })
   </script>
 </head>
 ```
 
-用 bundler 的话走 ESM：
+bundler 项目走 ESM：
 
 ```ts
 import { init } from '@vigil/sdk'
-init({ endpoint, appId, token, release })
+const vigil = init({ endpoint, appId, token, release })
+
+// SPA 路由切换时上报一个路由事务
+vigil.startRoute('/orders')
 ```
 
-Vue 项目额外接一下组件错误：
+Vue 项目接组件错误：
 
 ```ts
 import { installVueErrorHandler } from '@vigil/sdk/vue'
 installVueErrorHandler(app, (err) => vigil.captureException(err))
 ```
+
+详见 [`docs/integration.md`](docs/integration.md)。
+
+---
+
+## Issue 生命周期
+
+这是本项目和"错误日志"最大的区别。
+
+```
+                        ┌──────────────────────────┐
+                        │                          │
+   [新事件] ──▶ unresolved(new)                 │
+                        │                          │
+                  7 天无新事件 / 人工已阅           │
+                        ▼                          │
+                 unresolved(ongoing)              │
+                        │                          │
+        ┌───────────────┼───────────────┐          │
+        ▼               ▼               ▼          │
+   resolved        archived    (escalating) ────────┘
+        │               │
+        │          事件量超基线
+        │               ▼
+        │          escalating ──▶ unresolved(ongoing)
+        │
+   新事件且 release > 解决它的 release
+        │
+        ▼
+   regressed ──(7 天)──▶ unresolved(ongoing)
+```
+
+**Resolve with Release** 是精华：在 `1.4.3` 标为已解决后，
+`1.4.3` 及更早版本再报都算噪音，只有 `1.4.4+` 出现才算回归。
+这直接回答"这个 bug 是不是我上次的修复引入的"。
+
+每一次状态变化都写**活动流**，记录 actor（人 or SYSTEM）和原因 ——
+系统改自己的主意时也留痕。
 
 ---
 
@@ -113,28 +169,30 @@ installVueErrorHandler(app, (err) => vigil.captureException(err))
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 107 条单元测试
-npm run verify            # 14 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
-npm run verify:dashboard  # 13 条面板断言（断言渲染出来的 DOM 文本）
+npm run test              # 125 条单元测试
+npm run verify            # 20 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
+npm run verify:dashboard  # 面板渲染断言
 npm run typecheck
 npm run lint
 ```
 
-`npm run verify` 跑的是**真实链路**：真 Chromium 打开页面 → 真的抛错 → 真 SDK 产物上报 → 真 Collector 接收 → 真 SQLite 落库 → 真管理 API 查出来。断言覆盖：
+`npm run verify` 跑的是**真实链路**，断言覆盖：
 
-- 五类错误源全部采到
-- 同一错误报两次聚合成一条（`count = 2`）
-- 压缩产物的栈还原回源码（`app.min.js:1:20` → `src/user-profile.ts:1`）
-- URL 里的 token 被脱敏（`token=***`）
-- 上报请求自身不被当成错误（无递归）
-
-`npm run verify:dashboard` 断言**渲染出来的数字**，不是「看起来对」：
-
-- 应用下拉里有 2 个应用
-- 「去重错误」卡片显示 8、「累计发生」显示 107
-- 表格渲染了 8 行，聚合最多的那条显示 59 次
-- 点开详情有原始栈、指纹、发生次数
-- 页面没有 JS 报错
+```
+✓ 五类错误都落库了 — 去重后 5 条 / 累计 6 次
+✓ 同一个错误报两次聚合成一条 — count=2
+✓ 标记已解决 → 状态 resolved 且记录了版本 — resolvedInRelease=1.0.0
+✓ 在更新版本重新出现 → 判为回归 — substatus=regressed
+✓ 在同版本重新出现 → 保持 resolved（是噪音不是回归）
+✓ 活动流记录状态变化 — created → resolved → regressed
+✓ 压缩产物的栈被 sourcemap 还原 — app.min.js:1:20 → src/user-profile.ts:1
+✓ URL 里的 token 被脱敏 — token=***
+✓ 上报请求自身没被当成错误（无递归）— 0 条
+✓ 性能事务入库且分位数可查 — LCP P95=2100ms
+✓ 错误事件带上了性能快照 — 6 条事件带 vitals
+✓ 告警规则能触发并落库 / 去重生效
+✓ 页面卸载后事件仍能送达（beacon 通道）
+```
 
 ---
 
@@ -142,62 +200,67 @@ npm run lint
 
 ### 指纹：用 category 不用 kind
 
-`ErrorKind`（js / promise / vue / manual）只说明「谁抓到的」，
-`ErrorCategory`（javascript / resource / http）才是分组维度。
-Vue 捕获和全局捕获到同一个错误，应该是**同一条**。
+`ErrorKind`（js/promise/vue/manual）只说明"谁抓到的"；
+`ErrorCategory`（javascript/resource/http）才是分组维度。
+Vue 捕获和全局捕获到同一个错误，必须是**同一条**。
 
-### 指纹不含行号列号
+### 指纹不含行号列号，也不含构建 hash
 
-改一行代码不该让这条错误的「历史」断掉。指纹里放行号的话，
-每次发版都会产生一批「新错误」，后台的已解决/未解决状态全部失效。
+改一行代码不该让错误的"历史"断掉；每次发版也不该让所有错误都变成新的。
 
-同理**剥掉构建 hash**（`index-DnB3xK2l.js` → `index.js`），
-否则指纹跟构建产物绑定，等于每发一次版所有错误都变成新的。
-
-### 上报：两条通道，token 位置不同
-
-| 通道 | 何时用 | token 放哪 | 限制 |
-|---|---|---|---|
-| `fetch` | 正常 | **header**（不进 body，不进访问日志） | keepalive body ≤ 64KB |
-| `sendBeacon` | 页面卸载 | **body**（beacon 不能自定义 header） | payload ≤ 64KB |
-
-单批上限取 48KB，留信封开销余量。超限会被浏览器**静默丢弃** ——
-不报错、不重试，所以宁可多发几个小请求。
-
-### 聚合：靠数据库唯一约束
-
-```sql
-UNIQUE (app_id, fingerprint)
-```
-
-UPSERT 一行 SQL 搞定。应用层「先查再插」在并发下必然出重复行。
-
-### 指纹：服务端要兜底
+### 指纹要校验，缺失时服务端兜底
 
 指纹是聚合主键。照单全收客户端的值，一个**空串**就能让该应用的所有错误
 塌成一行 —— 表面上有数据，实际全是同一条错误。
 
-所以服务端校验指纹格式（16 位十六进制），不合法就自己算一个兜底指纹。
-SDK 产出的指纹永远是合法格式，兜底路径只在异常情况下触发。
+### 聚合靠数据库 UNIQUE 约束
 
-### 限流：按 appId 而不是 IP
+`UNIQUE (app_id, fingerprint)` + UPSERT。应用层"先查再插"在并发下必然出重复行。
 
-上报请求来自**用户的浏览器**，IP 是用户的不是应用的。
-按 IP 限流会误伤同一出口 IP 后的所有用户；
-按 appId 才能精确隔离「谁把服务打满了」。
+### 限流按项目，不按 IP
 
-### 栈还原：map 存服务端
+上报请求来自**用户的浏览器**，IP 是用户的不是项目的。
+按 IP 限流会误伤同一出口 IP 后的所有用户。
 
-浏览器能下载到的文件，攻击者也能下载到 —— sourcemap 等于公开源码。
-map 只上传到 Collector，服务端还原后只把「原始位置」写进数据库。
+### 告警去重
 
-### 脱敏：在采集端做
+同一个（规则, 问题, 时间窗）只发一次。告警疲劳是监控系统最大的敌人 ——
+同一个错误每分钟报 100 次，没有人��去看。
+
+### 两条上报通道
+
+| | 错误 | 性能 |
+|---|---|---|
+| 端点 | `/api/v1/collect` | `/api/v1/performance` |
+| 采样 | 全量 | 10% |
+
+性能数据量大且绝大多数正常，混在一起就没法"错误全量、性能采样"。
+
+### 双密钥分离
+
+| 密钥 | 用途 | 放在哪 |
+|---|---|---|
+| `vsk_` | 上报 | 前端代码里 |
+| `vup_` | 上传 sourcemap | **只在 CI 里** |
+
+数据库只存哈希，明文只在创建时返回一次。
+
+### 脱敏在采集端
 
 监控系统会原样收集用户页面上的东西。采集端不脱敏，
-就等于把用户隐私复制进了一份新的数据库。
+等于把用户隐私复制进了一份新的数据库。
+敏感键按**词段**匹配：`userPassword` 命中，`monkey` / `statusCode` 不命中。
 
-敏感键按**词段**匹配而不是子串 —— 否则 `monkey` 会被 `key` 命中、
-`statusCode` 会被 `code` 命中。
+### 模块化单体，不是微服务
+
+三个域紧耦合（告警要读问题状态，性能要关联错误上下文）。
+拆成进程就要处理跨进程查询、事务边界、最终一致性 ——
+复杂度换来的收益在这个量级用不上。域的边界已经是现成的切缝。
+
+### 数据层可换库
+
+本机 Docker 跑不起来（缺 WSL2），只能用 SQLite。
+但 schema 用方言层生成，PG 也能跑，**领域代码一行不用改**。
 
 ---
 
@@ -208,50 +271,43 @@ packages/
   protocol/    上报协议类型契约（纯类型）
   sdk/         浏览器采集 SDK
     src/
-      collectors/   global / promise / network / breadcrumbs
+      collectors/   global / promise / network / performance / breadcrumbs
       fingerprint.ts  指纹计算
       mask.ts         脱敏
       parse-stack.ts  栈解析
       transport.ts    批量 + 双通道上报
       queue.ts        队列
-  collector/   采集服务
+  collector/   采集服务（模块化单体）
     src/
       app.ts        Fastify 路由
-      ingest.ts     聚合落库
-      sourcemap.ts  栈还原
-      auth.ts       鉴权
-      rate-limit.ts 令牌桶限流
+      domains/      tenancy / issues / performance / alerting / artifacts / ingestion
+      infra/        db（client·schema·migrate·dialect）/ ratelimit
   dashboard/   管理面板
-    src/
-      App.vue            布局 + 统计卡片 + 错误列表 + 分布
-      components/        详情抽屉
-      api.ts             管理 API 客户端
-      theme.css          设计 token
 scripts/
   verify-pipeline.ts    端到端闭环验证
   verify-dashboard.ts   面板渲染验证
   seed-demo.ts          演示数据种子
   upload-sourcemaps.mjs CI 里上传 sourcemap
-  start-demo.ps1        一键起演示环境
+deploy/
+  nginx/        面板的 nginx 配置
+  k8s/          namespace / deployment / service / ingress / hpa / pdb
 docs/
   integration.md   接入文档
-  architecture.md  架构与取舍
 ```
 
 ---
 
-## 管理 API
+## 部署
 
-全部需要 `x-vigil-admin-token`（启动时打印，或用 `VIGIL_ADMIN_TOKEN` 指定）。
+```bash
+docker compose up --build
+# → 面板  http://localhost:8080
+```
 
-| 方法 | 路径 | 说明 |
-|---|---|---|
-| `POST` | `/api/v1/apps` | 创建应用，返回两个 token（只此一次可见） |
-| `GET` | `/api/v1/apps` | 应用列表 |
-| `PATCH` | `/api/v1/apps/:appId` | 启用/停用 |
-| `GET` | `/api/v1/apps/:appId/errors` | 错误列表 |
-| `GET` | `/api/v1/apps/:appId/errors/:fingerprint` | 错误详情 + 最近事件 |
-| `GET` | `/api/v1/apps/:appId/stats` | 统计：分类分布、Top 错误、Top 接口 |
+- `Dockerfile` 多阶段，两个 target（collector / dashboard）
+- `deploy/k8s/` 含 namespace / deployment / service / ingress / HPA / PDB
+- ⚠️ **容器实跑未验证**（本机 Docker 因缺 WSL2 起不来）
+- ⚠️ **多副本前必须换 PostgreSQL** —— SQLite 是单文件，多进程写会锁竞争
 
 ---
 
@@ -260,15 +316,19 @@ docs/
 已完成：
 
 - [x] L1 错误监控全链路（SDK → Collector → 聚合 → 还原 → 查询）
-- [x] 多应用隔离 + 双 token 分离（运行时 / 上传）
+- [x] Issue 完整生命周期（状态机 + 活动流 + 回归检测）
+- [x] 多租户模型（组织/团队/项目/环境/版本）+ 双密钥
+- [x] 告警引擎（6 类规则 × 5 种通道 + 去重静默）
+- [x] 性能 RUM（Web Vitals / 长任务 / span / 路由事务 / 分位数）
+- [x] 错误与性能关联
 - [x] 采集端脱敏
-- [x] 令牌桶限流
-- [x] 管理面板（Vue 3 + Element Plus）
-- [x] 107 条单元测试 + 14 条端到端断言 + 13 条面板断言
+- [x] 管理面板（总览/问题/详情/性能/告警/设置）
+- [x] Docker / K8s 部署形态
+- [x] 125 条单元测试 + 20 条端到端断言 + 面板渲染断言
 
 待做：
 
-- [ ] npm 发布（`@vigil/sdk`）
-- [ ] L2 性能 RUM（Web Vitals）
-- [ ] 告警规则与 webhook
-- [ ] 面板：错误趋势图、时间范围筛选、错误「已解决」状态
+- [ ] npm 发布（`@vigil/sdk` / `@vigil/protocol`）
+- [ ] 会话回放（rrweb）
+- [ ] PostgreSQL 落地 + 真正的多副本
+- [ ] 告警通道：邮件需要 `nodemailer`（已装，配置 SMTP 后可用）
