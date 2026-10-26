@@ -192,7 +192,12 @@ function transaction(options: {
   cls: number
   durationMs: number
   browser?: string
-  spans?: Array<{ name: string; durationMs: number; statusCode?: number }>
+  spans?: Array<{
+    name: string
+    type: 'http' | 'resource' | 'dom' | 'custom'
+    durationMs: number
+    statusCode?: number
+  }>
 }): PerformanceEvent {
   return {
     name: options.name,
@@ -457,9 +462,9 @@ for (let i = 0; i < 160; i++) {
       durationMs: slow ? 4200 + (i % 2000) : 1500 + (i % 900),
       browser: i % 5 === 0 ? SAFARI_UA : i % 7 === 0 ? ANDROID_UA : CHROME_UA,
       spans: [
-        { name: 'GET /api/products', durationMs: 120 + (i % 300), statusCode: 200 },
-        { name: 'GET /api/recommend', durationMs: 260 + (i % 900), statusCode: 200 },
-        { name: 'POST /api/orders', durationMs: 400 + (i % 1200), statusCode: 200 }
+        { name: 'GET /api/products', type: 'http', durationMs: 120 + (i % 300), statusCode: 200 },
+        { name: 'GET /api/recommend', type: 'http', durationMs: 260 + (i % 900), statusCode: 200 },
+        { name: 'POST /api/orders', type: 'http', durationMs: 400 + (i % 1200), statusCode: 200 }
       ]
     })
   )

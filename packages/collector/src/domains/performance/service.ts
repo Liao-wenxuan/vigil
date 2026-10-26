@@ -165,7 +165,8 @@ export class PerformanceService {
             transactionId,
             projectId,
             span.name,
-            span.type,
+            // 老客户端可能不发 type —— 兜底成 custom，别让它把整批事务弄挂
+            span.type ?? 'custom',
             Math.round(span.durationMs),
             span.startedAt ?? null,
             span.statusCode ?? null,
