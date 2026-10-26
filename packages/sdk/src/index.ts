@@ -1,7 +1,8 @@
-import type { BreadcrumbType, ErrorEvent } from '@vigil/protocol'
+import type { BreadcrumbType, ErrorEvent, PerformanceEvent } from '@vigil/protocol'
 import { BreadcrumbRecorder, installBreadcrumbs } from './collectors/breadcrumbs'
 import { installGlobalErrorHandler } from './collectors/global'
 import { installNetworkCapture, nativeFetch, type HttpErrorPolicy } from './collectors/network'
+import { BlankScreenDetector, PerformanceCollector } from './collectors/performance'
 import { installUnhandledRejectionHandler } from './collectors/promise'
 import { collectContext, detectSelfUrls, isBrowser } from './context'
 import { computeFingerprint, normalizeCustomFingerprint } from './fingerprint'
@@ -10,6 +11,7 @@ import { parseStack } from './parse-stack'
 import { EventQueue } from './queue'
 import { combineTeardowns, type ReportInput, type Reporter, type Teardown } from './reporter'
 import { sendBatch, splitIntoBatches, type TransportOptions } from './transport'
+import { SDK_NAME, SDK_VERSION } from './version'
 
 export { SDK_NAME, SDK_VERSION } from './version'
 export type { Breadcrumb, BreadcrumbType, ErrorEvent } from '@vigil/protocol'
@@ -19,6 +21,17 @@ export type { HttpErrorPolicy } from './collectors/network'
 const DEFAULTS = {
   /** 会话采样率。默认 1 = 全量 */
   sampleRate: 1,
+  /**
+   * 性能采样率。默认 0.1 = 只上报 10% 的页面加载。
+   *
+   * 性能数据和错误数据的性质完全不同：错误少但每条都重要，
+   * 性能多且绝大多数正常 —— 全量上报会打爆存储和带宽。
+   */
+  performanceSampleRate: 0.1,
+  /** 是否采集性能数据 */
+  enablePerformance: true,
+  /** 白屏判定超时（毫秒） */
+  blankScreenTimeoutMs: 3000,
   /** 最多保留多少条面包屑 */
   maxBreadcrumbs: 30,
   /** 定时上报间隔 */
@@ -57,6 +70,16 @@ export interface VigilOptions {
    * 整个会话要么全采要么全不采，采中的会话里每一条错误都在。
    */
   sampleRate?: number
+  /**
+   * 性能采样率（0~1），默认 0.1。
+   *
+   * 性能数据量大且绝大多数正常，必须采样；错误数据则默认全量。
+   */
+  performanceSampleRate?: number
+  /** 是否采集性能数据，默认 true */
+  enablePerformance?: boolean
+  /** 白屏判定超时（毫秒），默认 3000 */
+  blankScreenTimeoutMs?: number
   maxBreadcrumbs?: number
   flushIntervalMs?: number
   maxBatchSize?: number
@@ -75,6 +98,9 @@ interface ResolvedOptions {
   environment?: string
   userId?: string
   sampleRate: number
+  performanceSampleRate: number
+  enablePerformance: boolean
+  blankScreenTimeoutMs: number
   maxBreadcrumbs: number
   flushIntervalMs: number
   maxBatchSize: number
@@ -116,10 +142,18 @@ export class VigilClient {
   private readonly transport: TransportOptions
   private readonly sdkFilenames: string[]
   private readonly sampled: boolean
+  /** 性能数据**独立采样**（默认 10%）—— 性能量大且大多是正常的 */
+  private readonly performanceSampled: boolean
+  private readonly performanceQueue: EventQueue
+  private readonly performanceTransport: TransportOptions
+  private performanceCollector: PerformanceCollector | null = null
+  private blankScreen: BlankScreenDetector | null = null
 
   private teardown: Teardown = () => {}
   private extraContext: Record<string, unknown> = {}
   private userId: string | undefined
+  /** 会话 ID：整个生命周期内保持不变（标签页级） */
+  private readonly sessionId: string
   /** 下一次 flush 优先用 beacon（页面正在卸载） */
   private preferBeacon = false
   private closed = false
@@ -133,6 +167,7 @@ export class VigilClient {
       maxPayloadBytes: Math.min(options.maxPayloadBytes ?? DEFAULTS.maxPayloadBytes, 60 * 1024)
     }
     this.userId = options.userId
+    this.sessionId = collectContext().sessionId
     this.recorder = new BreadcrumbRecorder(this.resolved.maxBreadcrumbs)
     this.sdkFilenames = detectSelfUrls()
     this.sampled = Math.random() < this.resolved.sampleRate
@@ -159,6 +194,25 @@ export class VigilClient {
         if (this.resolved.debug) console.warn('[vigil] 上报失败', error)
       }
     })
+
+    // ---- 性能：独立通道、独立采样 ----
+    // 错误走 /collect，性能走 /performance。两条通道的采样率、批量策略、
+    // 保留周期全都不同，混在一起会让「错误要全量、性能要采样」没法实现。
+    this.performanceSampled = Math.random() < this.resolved.performanceSampleRate
+
+    this.performanceTransport = {
+      ...this.transport,
+      endpoint: this.resolved.endpoint.replace(/\/collect$/, '/performance')
+    }
+
+    this.performanceQueue = new EventQueue({
+      maxSize: this.resolved.maxBatchSize,
+      flushIntervalMs: this.resolved.flushIntervalMs,
+      onFlush: (events) => this.sendPerformance(events as unknown as PerformanceEvent[]),
+      onError: (error) => {
+        if (this.resolved.debug) console.warn('[vigil] 性能上报失败', error)
+      }
+    })
   }
 
   /** 安装所有采集器并开始工作 */
@@ -182,11 +236,61 @@ export class VigilClient {
         recorder: this.recorder,
         captureConsole: this.resolved.captureConsoleBreadcrumbs
       }),
+      this.installPerformance(),
       this.installLifecycleFlush()
     ]
 
     this.teardown = combineTeardowns(teardowns)
     this.queue.start()
+  }
+
+  /**
+   * 装��性能采集与白屏检测。
+   *
+   * 白屏检测用**双重信号**：FCP 超时 **且** DOM 采样全空。
+   * 只看 FCP 会误判（页面确实慢但有内容），只看 DOM 会误判（正在渲染中）。
+   */
+  private installPerformance(): Teardown {
+    if (!this.resolved.enablePerformance) return () => {}
+
+    this.performanceCollector = new PerformanceCollector({
+      sampleRate: this.resolved.performanceSampleRate,
+      shouldSample: () => this.performanceSampled,
+      onTransaction: (event) => {
+        event.sessionId = this.sessionId
+        event.userId = this.userId
+        event.release = this.resolved.release
+        event.environment = this.resolved.environment
+        this.performanceQueue.push(event as unknown as ErrorEvent)
+      }
+    })
+    this.performanceCollector.start()
+    this.performanceQueue.start()
+
+    this.blankScreen = new BlankScreenDetector({
+      timeoutMs: this.resolved.blankScreenTimeoutMs,
+      hasContentPaint: () => {
+        const snapshot = this.performanceCollector?.snapshot()
+        return (snapshot?.fcp ?? 0) > 0
+      },
+      onBlank: ({ elapsedMs, samples }) => {
+        // 白屏当成一条错误上报 —— 它对用户的影响和崩溃一样严重
+        this.handleReport({
+          category: 'javascript',
+          kind: 'manual',
+          name: 'BlankScreen',
+          message: `页面在 ${elapsedMs}ms 内白屏（${samples}/5 个采样点为空）`,
+          context: { blankScreen: true, elapsedMs, samples }
+        })
+      }
+    })
+    this.blankScreen.start()
+
+    return () => {
+      this.performanceCollector?.stop()
+      this.blankScreen?.stop()
+      this.performanceQueue.stop()
+    }
   }
 
   /**
@@ -198,7 +302,10 @@ export class VigilClient {
   private installLifecycleFlush(): Teardown {
     const flushWithBeacon = () => {
       this.preferBeacon = true
+      // 页面要走了 —— 先把性能事务结算掉（vitals 到此刻才完整）
+      this.performanceCollector?.report()
       void this.queue.flush()
+      void this.performanceQueue.flush()
     }
 
     const onVisibilityChange = () => {
@@ -213,7 +320,6 @@ export class VigilClient {
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }
-
   /** 内部上报入口 —— 任何异常都不能让它抛到业务代码里 */
   private handleReport(input: ReportInput): void {
     if (this.closed) return
@@ -247,6 +353,8 @@ export class VigilClient {
     const event: ErrorEvent = {
       category: input.category,
       kind: input.kind,
+      // 事件唯一 ID：服务端用它去重（网络重试不该让 count 虚高）
+      eventId: generateEventId(),
       message: scrubText(input.message),
       frames,
       fingerprint,
@@ -275,6 +383,12 @@ export class VigilClient {
     const breadcrumbs = this.recorder.list()
     if (breadcrumbs.length > 0) event.breadcrumbs = breadcrumbs
 
+    // 错误与性能关联：把报错瞬间的性能快照带上。
+    // 很多「页面卡」表面是性能问题，根因却是没捕获的异常 ——
+    // 有了这个快照才能判断「这个错误是不是拖慢了这页」。
+    const vitals = this.performanceCollector?.snapshot()
+    if (vitals && Object.keys(vitals).length > 0) event.vitals = vitals
+
     return event
   }
 
@@ -295,6 +409,63 @@ export class VigilClient {
 
     // beacon 只对「这次卸载」有意义，用完就复位
     this.preferBeacon = false
+  }
+
+  /**
+   * 发送性能事务。
+   *
+   * 走**独立通道**（/performance），和错误分开：
+   * 性能数据量大且大多是正常的，采样率、批量大小、保留周期都该独立调。
+   */
+  private async sendPerformance(transactions: PerformanceEvent[]): Promise<void> {
+    if (transactions.length === 0) return
+
+    const batches = splitIntoBatches(
+      transactions as unknown as ErrorEvent[],
+      this.resolved.maxPayloadBytes,
+      this.resolved.maxBatchSize
+    )
+
+    for (const batch of batches) {
+      const body = JSON.stringify({
+        appId: this.resolved.appId,
+        sdk: { name: SDK_NAME, version: SDK_VERSION },
+        transactions: batch
+      })
+
+      try {
+        const response = await this.performanceTransport.fetchImpl(
+          this.performanceTransport.endpoint,
+          {
+            method: 'POST',
+            body,
+            keepalive: true,
+            credentials: 'omit',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Vigil-App-Id': this.resolved.appId,
+              'X-Vigil-Token': this.resolved.token
+            }
+          }
+        )
+        if (!response.ok && this.resolved.debug) {
+          console.warn(`[vigil] ${batch.length} 条性能数据上报失败`)
+        }
+      } catch (error) {
+        if (this.resolved.debug) console.warn('[vigil] 性能上报失败', error)
+      }
+    }
+  }
+
+  /**
+   * 开始一个路由事务（SPA 路由切换）。
+   *
+   * 用法：`vigil.startRoute('/orders')` —— 在路由 hook 里调。
+   * 上一个路由的事务会在这次调用时结算。
+   */
+  startRoute(name: string): void {
+    this.performanceCollector?.report()
+    this.performanceCollector?.startRoute(name)
   }
 
   /** 手动上报一个错误 */
@@ -353,6 +524,23 @@ export class VigilClient {
 function clamp(value: number, min: number, max: number): number {
   if (Number.isNaN(value)) return min
   return Math.min(max, Math.max(min, value))
+}
+
+/**
+ * 生成事件唯一 ID。
+ *
+ * 服务端靠它去重：同一条事件因为网络重试被上报两次时，
+ * 第二次会被挡下来，count 不会虚高。
+ */
+function generateEventId(): string {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID()
+    }
+  } catch {
+    // 非安全上下文下 randomUUID 不可用，往下走
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`
 }
 
 /** 默认实例 */
