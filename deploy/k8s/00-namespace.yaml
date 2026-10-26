@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vigil
+  labels:
+    app.kubernetes.io/name: vigil
+    app.kubernetes.io/part-of: vigil
+---
+# 配置与密钥分开放：ConfigMap 是明文可查的，Secret 不是。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vigil-config
+  namespace: vigil
+data:
+  PORT: '4318'
+  VIGIL_DB_PATH: /data/vigil.db
+  VIGIL_ALERT_INTERVAL: '60'
+  LOG_LEVEL: info
+---
+# ⚠️ 这份文件是**模板**，真实的 Secret 不要进 Git。
+#    生产环境用外部密钥管理（External Secrets / Vault / Sealed Secrets）注入。
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vigil-secret
+  namespace: vigil
+type: Opaque
+stringData:
+  # 占位值 —— 用 kubectl create secret generic 覆盖
+  VIGIL_ADMIN_TOKEN: 'REPLACE_ME'

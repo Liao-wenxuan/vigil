@@ -1,0 +1,48 @@
+# 本地 / 私有化部署
+#
+#   docker compose up --build
+#   → 面板  http://localhost:8080
+#   → 接口  http://localhost:4318
+#
+# 管理 token 走环境变量注入，不写进镜像。
+
+services:
+  collector:
+    build:
+      context: .
+      target: collector
+    image: vigil/collector:local
+    restart: unless-stopped
+    environment:
+      PORT: '4318'
+      VIGIL_DB_PATH: /data/vigil.db
+      # 生产环境必须显式设置；不设置时服务会随机生成一个并打印
+      VIGIL_ADMIN_TOKEN: ${VIGIL_ADMIN_TOKEN:?请在 .env 里设置 VIGIL_ADMIN_TOKEN}
+      # 告警评估间隔（秒），0 关闭
+      VIGIL_ALERT_INTERVAL: '60'
+      LOG_LEVEL: info
+    ports:
+      - '4318:4318'
+    volumes:
+      - collector-data:/data
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:4318/api/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    build:
+      context: .
+      target: dashboard
+    image: vigil/dashboard:local
+    restart: unless-stopped
+    depends_on:
+      collector:
+        condition: service_healthy
+    ports:
+      - '8080:80'
+
+volumes:
+  collector-data:

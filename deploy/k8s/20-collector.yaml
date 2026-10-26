@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vigil-collector
+  namespace: vigil
+  labels:
+    app: vigil-collector
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: vigil-collector
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: vigil-collector
+      annotations:
+        # 改配置后触发滚动更新（ConfigMap 变了不会自动重启 Pod）
+        checksum/config: 'REPLACED_BY_CI'
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: collector
+          image: vigil/collector:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 4318
+          env:
+            - name: VIGIL_ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vigil-secret
+                  key: VIGIL_ADMIN_TOKEN
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          envFrom:
+            - configMapRef:
+                name: vigil-config
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: '1'
+              memory: 1Gi
+          # SQLite 写入需要正确的 fsync —— NORMAL 模式下进程崩溃不丢数据，
+          # 但节点掉电会丢最后几个事务。
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ['ALL']
+      volumes:
+        - name: data
+          # ⚠️ SQLite 是**有状态**的，多副本不能共用一个卷 ——
+          #    两个进程写同一个 SQLite 文件会锁竞争甚至损坏。
+          #    多副本部署前必须换成 PostgreSQL。
+          #    这里用 ReadWriteOnce + 单副本语义（滚动更新时先起新的再停旧的）。
+          persistentVolumeClaim:
+            claimName: vigil-data
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vigil-collector
+  namespace: vigil
+spec:
+  selector:
+    app: vigil-collector
+  ports:
+    - name: http
+      port: 4318
+      targetPort: http
+  type: ClusterIP
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vigil-data
+  namespace: vigil
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

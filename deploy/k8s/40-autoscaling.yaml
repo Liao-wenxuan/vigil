@@ -1,0 +1,56 @@
+# 采集服务自动扩缩容
+#
+# 按 CPU 扩缩：上报是突发流量型负载（发版后错误激增），
+# 固定副本数要么浪费要么不够。
+#
+# ⚠️ **但 SQLite 撑不住多副本** —— 多个进程写同一个数据库文件会锁竞争，
+#    极端情况会损坏文件。上面的 Deployment 用了 RWO 卷 + 2 副本，
+#    滚动更新时新 Pod 拿不到卷会卡住。
+#
+#    **多副本前必须先换 PostgreSQL。**
+#    换库步骤：改 schema 方言到 postgres + 换连接层 + 改 PVC 为共享存储。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vigil-collector
+  namespace: vigil
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vigil-collector
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # 错误突增是尖峰 —— 扩得快
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+    scaleDown:
+      # 缩得慢，避免抖动
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vigil-collector
+  namespace: vigil
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vigil-collector
