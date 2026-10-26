@@ -3,6 +3,7 @@ import type { Db } from '../../infra/db/client.js'
 import { fromBool, readJson, writeJson } from '../../infra/db/dialect.js'
 import { AppError } from '../../shared/errors.js'
 import { pathOf } from '../../shared/url.js'
+import { parseStack } from '../artifacts/parse-stack.js'
 import { SourcemapResolver, type ResolvedFrame } from '../artifacts/sourcemap.js'
 import {
   transition,
