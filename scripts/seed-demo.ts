@@ -1,21 +1,23 @@
 /**
  * 演示数据种子。
  *
- * ⚠️ 走**真实的 Ingestor** 落库，不用手写 SQL ——
- *    这样种子数据和真实上报的数据在结构、聚合行为、索引上完全一致，
+ * ⚠️ 走**真实的领域服务**落库（TenancyService / IssueService / PerformanceService），
+ *    不用手写 SQL —— 这样种子数据和真实上报在结构、聚合行为、索引上完全一致，
  *    面板看到的就和生产一样。
  *
  * 用法：
  *   npm run seed:demo              # 默认 ./data/vigil.db
- *   npm run seed:demo -- --db ./data/demo.db --reset
+ *   npm run seed:demo -- --reset   # 先清空
  */
 import fs from 'node:fs'
-import { createDb, defaultDbPath } from '../packages/collector/src/db.js'
-import { createApp } from '../packages/collector/src/apps.js'
-import { Ingestor } from '../packages/collector/src/ingest.js'
-import { SourcemapResolver } from '../packages/collector/src/sourcemap.js'
+import { openDb } from '../packages/collector/src/infra/db/client.js'
+import { TenancyService } from '../packages/collector/src/domains/tenancy/service.js'
+import { IssueService } from '../packages/collector/src/domains/issues/service.js'
+import { PerformanceService } from '../packages/collector/src/domains/performance/service.js'
+import { ArtifactService } from '../packages/collector/src/domains/artifacts/service.js'
+import { AlertingService } from '../packages/collector/src/domains/alerting/service.js'
 import { computeFingerprint } from '../packages/sdk/src/fingerprint.js'
-import type { ErrorEvent } from '../packages/protocol/src/index.js'
+import type { ErrorEvent, PerformanceEvent } from '../packages/protocol/src/index.js'
 
 const args = process.argv.slice(2)
 const argValue = (name: string, fallback?: string) => {
@@ -23,10 +25,10 @@ const argValue = (name: string, fallback?: string) => {
   return index !== -1 ? args[index + 1] : fallback
 }
 
-const dbPath = argValue('db') ?? defaultDbPath()
+const dbPath = argValue('db') ?? process.env.VIGIL_DB_PATH ?? './data/vigil.db'
 const shouldReset = args.includes('--reset')
 
-if (shouldReset && fs.existsSync(dbPath)) {
+if (shouldReset) {
   for (const suffix of ['', '-wal', '-shm']) {
     const file = `${dbPath}${suffix}`
     if (fs.existsSync(file)) fs.unlinkSync(file)
@@ -34,22 +36,16 @@ if (shouldReset && fs.existsSync(dbPath)) {
   console.log(`[seed] 已清空 ${dbPath}`)
 }
 
-const db = createDb(dbPath)
-const resolver = new SourcemapResolver(db)
-const ingestor = new Ingestor(db, resolver)
+const db = openDb(dbPath)
+const tenancy = new TenancyService(db)
+const artifacts = new ArtifactService(db)
+const issues = new IssueService(db, artifacts.sourcemapResolver)
+const performance = new PerformanceService(db)
+const alerting = new AlertingService(db)
 
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
 const MINUTE = 60 * 1000
-
-/**
- * 种子事件。
- *
- * `copies` 表示这条错误发生过多少次 —— 同一条错误要多次投喂，
- * 才能看出聚合的效果（count 累加到几十次）。
- * 这个字段不是协议的一部分，落库前会剥掉。
- */
-type SeedEvent = ErrorEvent & { copies?: number }
 
 const CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -68,9 +64,9 @@ function jsEvent(options: {
   url: string
   occurredAt: number
   userAgent?: string
-  count?: number
   release?: string
-}): SeedEvent {
+  environment?: string
+}): ErrorEvent {
   const stack = [
     `${options.name}: ${options.message}`,
     `    at ${options.fn} (${options.file}:${options.line}:17)`,
@@ -95,9 +91,9 @@ function jsEvent(options: {
     viewport: { width: 1920, height: 1080 },
     sessionId: `sess_${options.occurredAt}`,
     release: options.release ?? '1.4.2',
-    environment: 'production',
+    environment: options.environment ?? 'production',
     occurredAt: options.occurredAt,
-    copies: options.count ?? 1
+    userId: `u_${options.occurredAt % 97}`
   }
 }
 
@@ -108,8 +104,8 @@ function httpEvent(options: {
   status: number
   occurredAt: number
   userAgent?: string
-  count?: number
-}): SeedEvent {
+  release?: string
+}): ErrorEvent {
   return {
     category: 'http',
     kind: 'http',
@@ -120,10 +116,9 @@ function httpEvent(options: {
     url: 'https://shop.example.com/api/orders',
     userAgent: options.userAgent ?? CHROME_UA,
     sessionId: `sess_${options.occurredAt}`,
-    release: '1.4.2',
+    release: options.release ?? '1.4.2',
     environment: 'production',
     occurredAt: options.occurredAt,
-    copies: options.count ?? 1,
     http: {
       method: options.method,
       url: options.url,
@@ -139,7 +134,7 @@ function resourceEvent(options: {
   tag: string
   type: string
   occurredAt: number
-}): SeedEvent {
+}): ErrorEvent {
   return {
     category: 'resource',
     kind: 'resource',
@@ -153,13 +148,16 @@ function resourceEvent(options: {
     release: '1.4.2',
     environment: 'production',
     occurredAt: options.occurredAt,
-    copies: 1,
     resource: { tag: options.tag, src: options.src, type: options.type }
   }
 }
 
 /** 造一条 Promise 拒绝事件 */
-function promiseEvent(options: { message: string; occurredAt: number; count?: number }): SeedEvent {
+function promiseEvent(options: {
+  message: string
+  occurredAt: number
+  release?: string
+}): ErrorEvent {
   return {
     category: 'javascript',
     kind: 'promise',
@@ -178,19 +176,103 @@ function promiseEvent(options: { message: string; occurredAt: number; count?: nu
     url: 'https://shop.example.com/checkout',
     userAgent: SAFARI_UA,
     sessionId: `sess_${options.occurredAt}`,
+    release: options.release ?? '1.4.2',
+    environment: 'production',
+    occurredAt: options.occurredAt
+  }
+}
+
+/** 造一个性能事务 */
+function transaction(options: {
+  name: string
+  occurredAt: number
+  lcp: number
+  fcp: number
+  inp: number
+  cls: number
+  durationMs: number
+  browser?: string
+  spans?: Array<{ name: string; durationMs: number; statusCode?: number }>
+}): PerformanceEvent {
+  return {
+    name: options.name,
+    type: 'page',
+    startedAt: options.occurredAt,
+    durationMs: options.durationMs,
+    vitals: {
+      fcp: options.fcp,
+      lcp: options.lcp,
+      cls: options.cls,
+      inp: options.inp,
+      ttfb: 180 + (options.occurredAt % 120),
+      tbt: 40 + (options.occurredAt % 200),
+      longTaskCount: options.occurredAt % 3
+    },
+    resourceCount: 18 + (options.occurredAt % 12),
+    transferSize: 380000 + (options.occurredAt % 250000),
+    pageUrl: `https://shop.example.com${options.name}`,
+    userAgent: options.browser ?? CHROME_UA,
+    sessionId: `sess_${options.occurredAt}`,
     release: '1.4.2',
     environment: 'production',
-    occurredAt: options.occurredAt,
-    copies: options.count ?? 1
+    spans: options.spans
   }
 }
 
 const now = Date.now()
 
-// ---- 应用 1：主应用（生产环境，错误多）----
-const shop = createApp(db, '购物小程序')
+// ============================================================
+// 租户
+// ============================================================
+const organization = tenancy.createOrganization('示例科技', 'example')
+const team = tenancy.createTeam(organization.id, '前端组', 'frontend')
 
-const shopEvents: ErrorEvent[] = [
+const shop = tenancy.createProject({
+  organizationId: organization.id,
+  teamId: team.id,
+  name: '购物小程序',
+  slug: 'shop-miniapp',
+  platform: 'vue'
+})
+
+const blog = tenancy.createProject({
+  organizationId: organization.id,
+  teamId: team.id,
+  name: '内容平台',
+  slug: 'content-platform',
+  platform: 'react'
+})
+
+// 环境与版本
+for (const project of [shop, blog]) {
+  tenancy.createEnvironment(project.project.id, 'production', '生产环境', true)
+  tenancy.createEnvironment(project.project.id, 'staging', '预发环境', false)
+  tenancy.createEnvironment(project.project.id, 'development', '开发环境', false)
+}
+tenancy.createRelease(shop.project.id, '1.4.2', 'a1b2c3d')
+tenancy.createRelease(shop.project.id, '1.4.3', 'e4f5g6h')
+tenancy.createRelease(shop.project.id, '1.4.1', 'x9y8z7w')
+tenancy.createRelease(blog.project.id, '0.9.0-beta.3')
+
+// ============================================================
+// 问题
+// ============================================================
+/** 指纹必须由**客户端算法**算 —— 服务端只是接收它 */
+function withFingerprint(event: ErrorEvent): ErrorEvent {
+  return {
+    ...event,
+    fingerprint: computeFingerprint({
+      category: event.category,
+      name: event.name,
+      message: event.message,
+      frames: event.frames,
+      resource: event.resource,
+      http: event.http
+    })
+  }
+}
+
+const shopTemplates: ErrorEvent[] = [
   jsEvent({
     name: 'TypeError',
     message: "Cannot read properties of undefined (reading 'price')",
@@ -198,8 +280,7 @@ const shopEvents: ErrorEvent[] = [
     fn: 'calcDiscount',
     line: 1024,
     url: 'https://shop.example.com/cart',
-    occurredAt: now - 2 * HOUR,
-    count: 47
+    occurredAt: now - 2 * HOUR
   }),
   jsEvent({
     name: 'TypeError',
@@ -208,8 +289,7 @@ const shopEvents: ErrorEvent[] = [
     fn: 'calcDiscount',
     line: 1024,
     url: 'https://shop.example.com/cart',
-    occurredAt: now - 20 * HOUR,
-    count: 12
+    occurredAt: now - 20 * HOUR
   }),
   jsEvent({
     name: 'ReferenceError',
@@ -219,35 +299,30 @@ const shopEvents: ErrorEvent[] = [
     line: 2210,
     url: 'https://shop.example.com/checkout',
     occurredAt: now - 5 * HOUR,
-    userAgent: SAFARI_UA,
-    count: 8
+    userAgent: SAFARI_UA
   }),
   promiseEvent({
     message: 'Payment gateway timeout after 15000ms',
-    occurredAt: now - 40 * MINUTE,
-    count: 5
+    occurredAt: now - 40 * MINUTE
   }),
   httpEvent({
     method: 'POST',
     url: 'https://shop.example.com/api/orders?couponId=881',
     status: 500,
-    occurredAt: now - 3 * HOUR,
-    count: 23
+    occurredAt: now - 3 * HOUR
   }),
   httpEvent({
     method: 'GET',
     url: 'https://shop.example.com/api/products/1024',
     status: 502,
-    occurredAt: now - 26 * HOUR,
-    count: 6
+    occurredAt: now - 26 * HOUR
   }),
   httpEvent({
     method: 'POST',
     url: 'https://shop.example.com/api/pay/confirm',
     status: 504,
     occurredAt: now - 90 * MINUTE,
-    userAgent: ANDROID_UA,
-    count: 4
+    userAgent: ANDROID_UA
   }),
   resourceEvent({
     src: 'https://cdn.example.com/uploads/8821-large.jpg',
@@ -263,10 +338,23 @@ const shopEvents: ErrorEvent[] = [
   })
 ]
 
-// ---- 应用 2：内容平台（staging，错误少）----
-const blog = createApp(db, '内容平台')
+// 每条错误重复发生多次（不同时间戳）→ 聚合后 count 会累加
+const REPEAT = [47, 12, 8, 5, 23, 6, 4, 1, 1]
 
-const blogEvents: ErrorEvent[] = [
+let totalEvents = 0
+for (const [index, template] of shopTemplates.entries()) {
+  const repeats = REPEAT[index] ?? 1
+  for (let i = 0; i < repeats; i++) {
+    const event = withFingerprint({
+      ...template,
+      occurredAt: template.occurredAt - i * 6 * HOUR - (i % 5) * 37 * MINUTE
+    })
+    issues.ingestEvent(shop.project.id, event)
+    totalEvents++
+  }
+}
+
+const blogTemplates: ErrorEvent[] = [
   jsEvent({
     name: 'RangeError',
     message: 'Maximum call stack size exceeded',
@@ -277,7 +365,7 @@ const blogEvents: ErrorEvent[] = [
     occurredAt: now - 30 * HOUR,
     userAgent: SAFARI_UA,
     release: '0.9.0-beta.3',
-    count: 3
+    environment: 'staging'
   }),
   httpEvent({
     method: 'GET',
@@ -288,63 +376,166 @@ const blogEvents: ErrorEvent[] = [
   })
 ]
 
-let totalEvents = 0
-
-for (const [app, events] of [
-  [shop, shopEvents],
-  [blog, blogEvents]
-] as const) {
-  for (const seed of events) {
-    const copies = seed.copies ?? 1
-    const batch: ErrorEvent[] = []
-
-    for (let i = 0; i < copies; i++) {
-      // 同一个错误的多次发生分布在过去 7 天内
-      // copies 是种子专用字段，落库前剥掉 —— 它不是协议的一部分
-      const { copies: _copies, ...raw } = seed
-      const event: ErrorEvent = {
-        ...raw,
-        occurredAt: seed.occurredAt - i * (7 * HOUR) - ((seed.occurredAt + i * 977) % HOUR)
-      }
-
-      // 指纹是**客户端**算的（SDK 的职责）。种子必须走同一条路，
-      // 否则所有事件的指纹都是空串，会被聚合成一条 ——
-      // 数据看着有量，实际全是同一条错误。
-      event.fingerprint = computeFingerprint({
-        category: event.category,
-        name: event.name,
-        message: event.message,
-        frames: event.frames,
-        resource: event.resource,
-        http: event.http
-      })
-
-      batch.push(event)
-    }
-
-    ingestor.ingest(app.appId, batch)
-    totalEvents += batch.length
-  }
+for (const template of blogTemplates) {
+  issues.ingestEvent(blog.project.id, withFingerprint(template))
+  totalEvents++
 }
 
-const errorCount = (db.prepare('SELECT COUNT(*) AS n FROM errors').get() as { n: number }).n
-const occurrenceCount = (
-  db.prepare('SELECT COALESCE(SUM(count), 0) AS n FROM errors').get() as { n: number }
-).n
+// ---- 一个已解决的问题 + 一个回归，演示完整生命周期 ----
+const resolvedOutcome = issues.ingestEvent(
+  shop.project.id,
+  withFingerprint(
+    jsEvent({
+      name: 'TypeError',
+      message: "Cannot read properties of undefined (reading 'total')",
+      file: 'https://shop.example.com/assets/index-DnB3xK2l.js',
+      fn: 'sumCart',
+      line: 880,
+      url: 'https://shop.example.com/cart',
+      occurredAt: now - 3 * DAY,
+      release: '1.4.1'
+    })
+  )
+)
+issues.resolve(shop.project.id, resolvedOutcome.issueId, {
+  release: '1.4.2',
+  reason: '已在 1.4.2 修复空指针'
+})
+// 在更新版本又出现 → 判为回归
+issues.ingestEvent(
+  shop.project.id,
+  withFingerprint(
+    jsEvent({
+      name: 'TypeError',
+      message: "Cannot read properties of undefined (reading 'total')",
+      file: 'https://shop.example.com/assets/index-DnB3xK2l.js',
+      fn: 'sumCart',
+      line: 880,
+      url: 'https://shop.example.com/cart',
+      occurredAt: now - 1 * HOUR,
+      release: '1.4.3'
+    })
+  )
+)
+totalEvents++
+
+// ---- 一个归档的问题，演示「归档直到升级」策略 ----
+const archivedOutcome = issues.ingestEvent(
+  shop.project.id,
+  withFingerprint(
+    httpEvent({
+      method: 'GET',
+      url: 'https://shop.example.com/api/recommend',
+      status: 503,
+      occurredAt: now - 2 * DAY
+    })
+  )
+)
+issues.archive(shop.project.id, archivedOutcome.issueId, {
+  strategy: 'until_escalating',
+  reason: '推荐服务偶尔抖动，先归档'
+})
+
+// ============================================================
+// 性能
+// ============================================================
+const pages = ['/', '/cart', '/checkout', '/product/1024', '/order/list']
+let totalTransactions = 0
+
+for (let i = 0; i < 160; i++) {
+  const name = pages[i % pages.length]
+  const slow = name === '/checkout'
+  performance.ingestTransaction(
+    shop.project.id,
+    transaction({
+      name,
+      occurredAt: now - i * 45 * MINUTE,
+      fcp: slow ? 1400 + (i % 900) : 600 + (i % 400),
+      lcp: slow ? 3200 + (i % 1800) : 1200 + (i % 700),
+      inp: slow ? 320 + (i % 260) : 80 + (i % 90),
+      cls: Math.round((slow ? 0.14 + (i % 10) / 100 : 0.02 + (i % 5) / 100) * 10000) / 10000,
+      durationMs: slow ? 4200 + (i % 2000) : 1500 + (i % 900),
+      browser: i % 5 === 0 ? SAFARI_UA : i % 7 === 0 ? ANDROID_UA : CHROME_UA,
+      spans: [
+        { name: 'GET /api/products', durationMs: 120 + (i % 300), statusCode: 200 },
+        { name: 'GET /api/recommend', durationMs: 260 + (i % 900), statusCode: 200 },
+        { name: 'POST /api/orders', durationMs: 400 + (i % 1200), statusCode: 200 }
+      ]
+    })
+  )
+  totalTransactions++
+}
+
+// ============================================================
+// 告警
+// ============================================================
+const webhook = alerting.createChannel({
+  projectId: shop.project.id,
+  name: '前端群 Webhook',
+  type: 'webhook',
+  config: { url: 'https://hooks.example.com/vigil' }
+})
+
+const feishu = alerting.createChannel({
+  projectId: shop.project.id,
+  name: '飞书告警群',
+  type: 'feishu',
+  config: { url: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx' }
+})
+
+alerting.createRule({
+  projectId: shop.project.id,
+  name: '新问题出现',
+  type: 'issue.new',
+  threshold: 1,
+  windowSeconds: 300,
+  channelIds: [feishu.id]
+})
+
+alerting.createRule({
+  projectId: shop.project.id,
+  name: '单问题 10 分钟内超过 20 次',
+  type: 'issue.count',
+  threshold: 20,
+  windowSeconds: 600,
+  conditions: { environment: ['production'] },
+  channelIds: [feishu.id, webhook.id]
+})
+
+alerting.createRule({
+  projectId: shop.project.id,
+  name: 'LCP P95 超过 2.5 秒',
+  type: 'metric.lcp_p95',
+  threshold: 2500,
+  windowSeconds: 900,
+  channelIds: [webhook.id]
+})
+
+// ============================================================
+// 汇总
+// ============================================================
+const stats = issues.stats(shop.project.id)
+const perf = performance.summary({ projectId: shop.project.id })
 
 console.log('')
 console.log('[seed] 演示数据写入完成')
-console.log(`  数据库      ${dbPath}`)
-console.log(`  应用        ${shop.name} (${shop.appId}) / ${blog.name} (${blog.appId})`)
-console.log(`  去重错误    ${errorCount} 条`)
-console.log(`  累计发生    ${occurrenceCount} 次（写入 ${totalEvents} 条事件）`)
+console.log(`  数据库        ${dbPath}`)
+console.log(`  组织 / 团队   ${organization.name} / ${team.name}`)
+console.log(
+  `  项目          ${shop.project.name} (${shop.project.id}) / ${blog.project.name} (${blog.project.id})`
+)
+console.log(`  去重问题      ${stats.total} 条（累计 ${stats.occurrences} 次）`)
+console.log(`  写入事件      ${totalEvents} 条`)
+console.log(
+  `    待处理      ${stats.unresolved}（新建 ${stats.new} · 回归 ${stats.regressed} · 升级 ${stats.escalating}）`
+)
+console.log(`    已解决      ${stats.resolved}   已归档 ${stats.archived}`)
+console.log(`  性能事务      ${totalTransactions} 条（LCP P95 ${perf.vitals.lcp.p95}ms）`)
+console.log(`  告警规则      3 条 · 通知通道 2 个`)
 console.log('')
-console.log('  运行时 token（上报用）：')
-console.log(`    ${shop.name}  ${shop.token}`)
-console.log(`    ${blog.name}  ${blog.token}`)
-console.log('')
-console.log('  上传 token（sourcemap 用，只在 CI）：')
-console.log(`    ${shop.name}  ${shop.uploadToken}`)
+console.log('  ⚠️  密钥只显示这一次，数据库里只存哈希：')
+console.log(`     运行时（上报用）  ${shop.runtimeKey}`)
+console.log(`     上传（sourcemap）  ${shop.uploadKey}`)
 console.log('')
 
 db.close()
