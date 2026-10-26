@@ -24,7 +24,7 @@
     "seed:demo": "tsx scripts/seed-demo.ts",
     "demo": "powershell -ExecutionPolicy Bypass -File scripts/start-demo.ps1",
     "verify": "npm run build --workspace @vigil/sdk && tsx scripts/verify-pipeline.ts",
-    "verify:dashboard": "tsx scripts/verify-dashboard.ts --url http://localhost:5174",
+    "verify:dashboard": "node packages/dashboard/tests/verify-dashboard.mjs --url http://localhost:5174",
     "prepare": "husky"
   },
   "devDependencies": {

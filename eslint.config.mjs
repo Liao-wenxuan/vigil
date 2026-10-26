@@ -3,6 +3,51 @@ import prettier from 'eslint-config-prettier'
 import pluginVue from 'eslint-plugin-vue'
 import tseslint from 'typescript-eslint'
 
+/**
+ * 浏览器全局。
+ *
+ * .vue 里的 <script setup lang="ts"> 不会像 .ts 那样被自动关掉 no-undef，
+ * 所以这些必须显式声明。
+ */
+const browserGlobals = {
+  window: 'readonly',
+  document: 'readonly',
+  navigator: 'readonly',
+  location: 'readonly',
+  console: 'readonly',
+  setTimeout: 'readonly',
+  clearTimeout: 'readonly',
+  setInterval: 'readonly',
+  clearInterval: 'readonly',
+  requestAnimationFrame: 'readonly',
+  fetch: 'readonly',
+  Blob: 'readonly',
+  FormData: 'readonly',
+  performance: 'readonly',
+  crypto: 'readonly',
+  sessionStorage: 'readonly',
+  localStorage: 'readonly',
+  history: 'readonly',
+  screen: 'readonly',
+  AbortController: 'readonly',
+  AbortSignal: 'readonly',
+  URL: 'readonly',
+  URLSearchParams: 'readonly',
+  TextEncoder: 'readonly',
+  TextDecoder: 'readonly',
+  structuredClone: 'readonly'
+}
+
+/** Node 全局 */
+const nodeGlobals = {
+  process: 'readonly',
+  Buffer: 'readonly',
+  URL: 'readonly',
+  __dirname: 'readonly',
+  __filename: 'readonly',
+  setImmediate: 'readonly'
+}
+
 export default tseslint.config(
   {
     ignores: ['**/dist/**', '**/coverage/**', '**/node_modules/**', '**/*.d.ts']
@@ -11,35 +56,6 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   // Vue 单文件组件 —— 不配的话 .vue 文件会被 ESLint 静默跳过
   ...pluginVue.configs['flat/recommended'],
-  {
-    files: ['**/*.vue'],
-    languageOptions: {
-      parserOptions: { parser: tseslint.parser },
-      // .vue 里的 <script setup lang="ts"> 不会像 .ts 那样被自动关掉 no-undef，
-      // 所以浏览器全局要显式声明一遍
-      globals: {
-        window: 'readonly',
-        document: 'readonly',
-        navigator: 'readonly',
-        location: 'readonly',
-        console: 'readonly',
-        setTimeout: 'readonly',
-        clearTimeout: 'readonly',
-        setInterval: 'readonly',
-        clearInterval: 'readonly',
-        fetch: 'readonly',
-        Blob: 'readonly',
-        FormData: 'readonly',
-        performance: 'readonly',
-        crypto: 'readonly',
-        sessionStorage: 'readonly',
-        localStorage: 'readonly',
-        history: 'readonly',
-        screen: 'readonly',
-        requestAnimationFrame: 'readonly'
-      }
-    }
-  },
   prettier,
   {
     rules: {
@@ -54,21 +70,41 @@ export default tseslint.config(
     }
   },
   {
-    // Node 侧的脚本：.mjs 不是 TS，typescript-eslint 不会帮它关掉 no-undef，
-    // 所以这里显式声明 Node 内置全局。
-    files: ['scripts/**/*.mjs', '**/*.config.mjs', '**/*.config.js'],
+    // 面板是浏览器应用：src 下的 .ts 和 .vue 都要浏览器全局
+    files: ['packages/dashboard/src/**/*.ts', 'packages/dashboard/src/**/*.vue'],
     languageOptions: {
-      globals: {
-        process: 'readonly',
-        console: 'readonly',
-        fetch: 'readonly',
-        Buffer: 'readonly',
-        URL: 'readonly',
-        setTimeout: 'readonly',
-        clearTimeout: 'readonly',
-        setInterval: 'readonly',
-        clearInterval: 'readonly'
-      }
+      parserOptions: { parser: tseslint.parser },
+      globals: browserGlobals
+    }
+  },
+  {
+    // 通用 .vue（其它包里可能还有）
+    files: ['**/*.vue'],
+    languageOptions: {
+      parserOptions: { parser: tseslint.parser },
+      globals: browserGlobals
+    }
+  },
+  {
+    // Node 侧脚本
+    files: ['scripts/**/*.ts', 'scripts/**/*.mjs'],
+    languageOptions: {
+      globals: { ...nodeGlobals, ...browserGlobals }
+    }
+  },
+  {
+    // 端到端验证脚本：跑在 Node 里，但要在页面上下文里 evaluate，
+    // 所以 window / document 也会被 ESLint 看到
+    files: ['**/tests/**/*.mjs', '**/tests/**/*.ts'],
+    languageOptions: {
+      globals: { ...nodeGlobals, ...browserGlobals }
+    }
+  },
+  {
+    // 配置文件
+    files: ['**/*.config.mjs', '**/*.config.js'],
+    languageOptions: {
+      globals: nodeGlobals
     }
   }
 )
