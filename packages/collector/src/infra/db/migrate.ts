@@ -30,6 +30,39 @@ function tableExists(db: Db, name: string): boolean {
   return (row?.n ?? 0) > 0
 }
 
+/** 表里有没有某列 */
+function hasColumn(db: Db, table: string, column: string): boolean {
+  const row = db.get<{ n: number }>(
+    'SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?',
+    [table, column]
+  )
+  return (row?.n ?? 0) > 0
+}
+
+/**
+ * 腾出与 v2 同名的老表。
+ *
+ * ## 为什么必须做
+ *
+ * v1 和 v2 都有 `sourcemaps` 表，但**列结构不同**：
+ *   v1：app_id + release（字符串）
+ *   v2：project_id + release_id（外键）
+ *
+ * 而建表语句是 `CREATE TABLE IF NOT EXISTS sourcemaps (...)` ——
+ * 表名已存在时它**什么都不做**，于是 v2 的列根本不存在。
+ * 后果是任何上报在查 sourcemaps 时都抛错，整个摄入链路 500。
+ *
+ * 而且它**只在有历史数据的库上出现** —— 全新库没有老表，一切正常。
+ * 这类 bug 最危险的地方就在这里：本地全绿，升级的生产环境直接挂。
+ *
+ * 修法：建 v2 的表**之前**先把老表改名，把表名腾出来。
+ */
+function renameLegacyTables(db: Db): void {
+  if (tableExists(db, 'sourcemaps') && !hasColumn(db, 'sourcemaps', 'project_id')) {
+    db.exec('ALTER TABLE sourcemaps RENAME TO sourcemaps_legacy')
+  }
+}
+
 /**
  * v1 → v2 的数据迁移：老的 4 张表搬进新的领域模型。
  *
@@ -178,8 +211,67 @@ function migrateLegacyV1Data(db: Db): void {
     }
   }
 
-  // 老表清空 —— 数据已经搬到新模型，留着只会让人困惑
-  for (const table of ['error_events', 'errors', 'sourcemaps', 'apps']) {
+  // 迁移过来的 Issue 也要有活动流 —— 否则详情页是空的，
+  // 「这个问题是什么时候出现的」就无从查起。
+  const migrated = db.all<{ id: number; first_seen: number }>(
+    'SELECT id, first_seen FROM issues WHERE id NOT IN (SELECT issue_id FROM issue_activity)'
+  )
+
+  for (const issue of migrated) {
+    db.run(
+      `INSERT INTO issue_activity
+         (issue_id, actor_type, actor_id, action, reason, data_json, created_at)
+       VALUES (?, 'system', NULL, 'created', ?, NULL, ?)`,
+      [issue.id, '从 v1 迁移导入', issue.first_seen]
+    )
+  }
+
+  // v1 的 sourcemaps → v2 的 sourcemaps
+  //
+  // ⚠️ 这两张表**同名**，但列不一样（v1 是 app_id + release 字符串，
+  //    v2 是 project_id + release_id 外键）。
+  //    建表阶段已经把老表改名成 sourcemaps_legacy，把表名腾给 v2 了。
+  if (tableExists(db, 'sourcemaps_legacy')) {
+    const legacyMaps = db.all<{
+      id: number
+      app_id: string
+      release: string
+      file_name: string
+      base_name: string
+      map_json: string
+      uploaded_at: number
+    }>('SELECT * FROM sourcemaps_legacy')
+
+    // v1 的行按列名取，v2 的行按外键取 —— 两套列名，不能直接搬
+    for (const map of legacyMaps) {
+      const releaseRow = db.get<{ id: number }>(
+        'SELECT id FROM releases WHERE project_id = ? AND version = ?',
+        [legacyAppId(map.app_id), map.release]
+      )
+
+      db.run(
+        `INSERT OR IGNORE INTO sourcemaps
+           (project_id, release_id, file_name, base_name, map_json, uploaded_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [
+          legacyAppId(map.app_id),
+          releaseRow?.id ?? null,
+          map.file_name,
+          map.base_name,
+          map.map_json,
+          map.uploaded_at
+        ]
+      )
+    }
+
+    db.exec('DROP TABLE sourcemaps_legacy')
+  }
+
+  // 老表清空 —— 数据已经搬到新模型，留着只会让人困惑。
+  //
+  // ⚠️ 只删**v2 里不存在同名表**的老表。
+  //    `sourcemaps` 两边都有，删了就把 v2 的表也毁了。
+  for (const table of ['error_events', 'errors', 'apps']) {
     if (tableExists(db, table)) db.exec(`DROP TABLE ${table}`)
   }
 }
@@ -207,6 +299,10 @@ export const MIGRATIONS: Migration[] = [
     version: 1,
     name: 'core-schema',
     up(db, dialect) {
+      // ⚠️ 顺序很重要：先腾出与 v2 同名的老表，再建 v2 的表。
+      //    `CREATE TABLE IF NOT EXISTS` 遇到同名表会**静默跳过**，
+      //    老表结构就被沿用了 —— 症状是 v2 的列根本不存在。
+      renameLegacyTables(db)
       db.exec(buildSchema(dialect))
     }
   },

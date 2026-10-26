@@ -66,11 +66,13 @@ class SqliteDb implements Db {
 }
 
 /**
- * 打开数据库并跑到最新 schema。
+ * 打开数据库。
  *
  * @param path SQLite 文件路径；':memory:' 表示内存库（测试用）
+ * @param options.migrate 是否自动跑迁移。测试造「有历史数据的老库」时
+ *        要先关掉 —— 否则迁移先跑完，就没有老表可迁了。
  */
-export function openDb(path: string): Db {
+export function openDb(path: string, options: { migrate?: boolean } = {}): Db {
   if (path !== ':memory:') {
     // 目录不存在时 SQLite 不会自动建 —— 直接开文件会报 "unable to open database file"
     fs.mkdirSync(nodePath.dirname(nodePath.resolve(path)), { recursive: true })
@@ -88,7 +90,9 @@ export function openDb(path: string): Db {
   raw.pragma('synchronous = NORMAL')
 
   const db = new SqliteDb(raw)
-  runMigrations(db, 'sqlite', MIGRATIONS)
+  if (options.migrate !== false) {
+    runMigrations(db, 'sqlite', MIGRATIONS)
+  }
   return db
 }
 
