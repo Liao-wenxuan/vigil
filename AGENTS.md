@@ -55,6 +55,20 @@ npm --prefix packages/collector run cli -- release add 1 1.4.2
 | `packages/collector` | 采集服务（**模块化单体**） | Fastify + SQLite。ESM/NodeNext，相对导入**必须带 `.js` 后缀** |
 | `packages/dashboard` | 管理面板 | Vue 3 + Element Plus + vue-router。管理 token 由 Vite 代理层注入，**不进前端代码** |
 
+### 面板结构
+
+```
+packages/dashboard/src/
+  router/index.ts        6 条路由
+  layouts/AppLayout.vue  固定侧栏（项目选择器 + 6 导航项 + 底部 slug）+ 顶栏
+  api/client.ts          类型化 API 客户端（ApiError 统一错误）
+  views/                 Overview / Issues / IssueDetail / Performance / Alerts / Settings
+  components/            StatCard / StatusTag / PanelSection / BarList(SVG) / PercentileChart(SVG)
+  theme.css              设计 token（**不要改**，所有页面复用它）
+```
+
+图表是**手写 SVG**，没有引图表库 —— 趋势图和分位数区间条两个组件就够。
+
 ### Collector 的域分层
 
 ```
@@ -195,18 +209,38 @@ IIFE 放 `<head>` 同步初始化才能收到。
 要改就加一个新版本。v1→v2 的迁移会把老的 `apps` 表搬进新的
 组织/项目模型，**老 token 的哈希直接搬过去**，用户已有的上报密钥不会失效。
 
+#### ⚠️ 同名表必须先腾出表名
+
+v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
+（v1 是 `app_id` + `release` 字符串，v2 是 `project_id` + `release_id` 外键）。
+
+而建表语句是 `CREATE TABLE IF NOT EXISTS sourcemaps (...)` ——
+表名已存在时它**什么都不做**，于是 v2 的列根本不存在。
+
+症状特别阴：全新库没有老表，一切正常；**只有带历史数据的库会挂**，
+表现是任何上报在查 sourcemaps 时抛错，整个摄入链路 500。
+本地全绿、升级的生产环境直接挂。
+
+修法：`renameLegacyTables()` 在建 v2 表**之前**把老表改名，
+把表名腾出来。`tests/migrate.test.ts` 里有 7 条回归测试盯着这件事。
+
+**教训：迁移里 DROP 或 CREATE 同名表之前，先确认 v2 那一侧的列结构。**
+
 ---
 
 ## 验证
 
 ```bash
-npm run test              # 125 条
+npm run test              # 132 条
 npm run verify            # 20 条端到端断言
-npm run verify:dashboard  # 面板渲染断言
+npm run verify:dashboard  # 33 条面板渲染断言
 ```
 
 `npm run verify` 跑的是**真实链路**：真 Chromium → 真 SDK 产物 → 真 HTTP →
 真 Collector → 真 SQLite → 真查询 API。
+
+`npm run verify:dashboard` 自带播种逻辑（自建专属演示项目 + 注入 localStorage），
+所以断言**可重复**，不依赖库里已有什么数据。
 
 ### 写断言的三个坑（都踩过）
 

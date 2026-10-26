@@ -169,9 +169,9 @@ installVueErrorHandler(app, (err) => vigil.captureException(err))
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 125 条单元测试
+npm run test              # 132 条单元测试
 npm run verify            # 20 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
-npm run verify:dashboard  # 面板渲染断言
+npm run verify:dashboard  # 33 条面板渲染断言
 npm run typecheck
 npm run lint
 ```
@@ -192,6 +192,18 @@ npm run lint
 ✓ 错误事件带上了性能快照 — 6 条事件带 vitals
 ✓ 告警规则能触发并落库 / 去重生效
 ✓ 页面卸载后事件仍能送达（beacon 通道）
+```
+
+`npm run verify:dashboard` 自带播种（自建演示项目 + 注入 localStorage），
+断言的是**渲染出来的 DOM 文本**：
+
+```
+✓ 侧边导航有 6 个导航项
+✓ 「去重错误」卡片 = 接口的 stats.total
+✓ 问题表格渲染 N 行 = 接口返回的行数
+✓ 点击行后跳到 /issues/<id>，详情页出现活动流
+✓ LCP P95 显示值 = 接口返回的 p95
+✓ 控制台 0 报错
 ```
 
 ---
@@ -322,9 +334,9 @@ docker compose up --build
 - [x] 性能 RUM（Web Vitals / 长任务 / span / 路由事务 / 分位数）
 - [x] 错误与性能关联
 - [x] 采集端脱敏
-- [x] 管理面板（总览/问题/详情/性能/告警/设置）
+- [x] 管理面板（总览/问题/详情/性能/告警/设置，6 路由）
 - [x] Docker / K8s 部署形态
-- [x] 125 条单元测试 + 20 条端到端断言 + 面板渲染断言
+- [x] 132 条单元测试 + 20 条端到端断言 + 33 条面板断言
 
 待做：
 
