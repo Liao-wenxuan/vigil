@@ -1,37 +1,54 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
-import type { Database } from 'better-sqlite3'
-import type { CollectEnvelope, ErrorEvent } from '@vigil/protocol'
-import { authenticateAdmin, authenticateRuntime, authenticateUpload } from './auth.js'
-import { createApp, listApps, setAppEnabled, touchApp } from './apps.js'
-import { Ingestor } from './ingest.js'
-import { TokenBucketLimiter } from './rate-limit.js'
-import { saveSourcemap, SourcemapResolver } from './sourcemap.js'
+import crypto from 'node:crypto'
+import { openDb, type Db } from './infra/db/client.js'
+import { TokenBucketLimiter } from './infra/ratelimit.js'
+import { TenancyService, type ProjectRow } from './domains/tenancy/service.js'
+import { IssueService } from './domains/issues/service.js'
+import { PerformanceService } from './domains/performance/service.js'
+import { ArtifactService } from './domains/artifacts/service.js'
+import { AlertingService } from './domains/alerting/service.js'
+import { AlertEvaluator } from './domains/alerting/evaluator.js'
+import { IngestionPipeline } from './domains/ingestion/pipeline.js'
+import { AppError } from './shared/errors.js'
+import type { CollectEnvelope, PerformanceEnvelope } from '@vigil/protocol'
 
+/**
+ * 采集服务（模块化单体）。
+ *
+ * ## 为什么是模块化单体而不是微服务
+ *
+ * 三个域（问题 / 性能 / 告警）要**紧耦合**：
+ * 告警要读问题的状态，性能要关联错误的上下文。
+ * 拆成进程就要处理跨进程查询、事务边界、最终一致性 ——
+ * 而这些复杂度换来的收益（独立扩缩容）在这个量级根本用不上。
+ *
+ * 过度微服务化是反模式：它把「代码内的一个函数调用」换成了
+ * 「网络请求 + 重试 + 超时 + 监控」。
+ *
+ * 所以：**代码按域分层，进程只有一个**。
+ * 以后真要拆，域的边界已经是现成的切缝。
+ */
 export interface BuildAppOptions {
-  db: Database
-  /** 管理端 token：查询错误列表用 */
+  db: Db
+  /** 管理端 token：查询与操作接口用 */
   adminToken: string
-  /** 单个应用的限流配额 */
+  /** 单个项目的限流配额 */
   rateLimit?: { capacity: number; refillPerSecond: number }
   logger?: boolean
 }
 
-/**
- * 采集服务。
- *
- * ## CORS 不是可选项
- *
- * SDK 的上报地址通常和业务页面**不同源**（页面在 app.example.com，
- * 采集在 collector.example.com）。而 SDK 的 fetch 请求带了
- * `Content-Type: application/json` 和自定义 header —— 这会触发**预检**。
- * 浏览器发出 OPTIONS，Collector 不回应 → 预检失败 → **整个上报被浏览器拦掉**，
- * 而且控制台只有一句 CORS 报错，很容易被忽略。
- *
- * sendBeacon 那条路是 no-cors，不发预检，但响应是 opaque 的。
- *
- * 所以两条路都要支持 CORS，OPTIONS 必须显式处理。
- */
-export function buildApp(options: BuildAppOptions): FastifyInstance {
+export interface BuiltApp {
+  app: FastifyInstance
+  tenancy: TenancyService
+  issues: IssueService
+  performance: PerformanceService
+  artifacts: ArtifactService
+  alerting: AlertingService
+  evaluator: AlertEvaluator
+  ingestion: IngestionPipeline
+}
+
+export function buildApp(options: BuildAppOptions): BuiltApp {
   const { db, adminToken } = options
 
   const app = Fastify({
@@ -42,14 +59,22 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     ajv: { customOptions: { coerceTypes: false } }
   })
 
-  const resolver = new SourcemapResolver(db)
-  const ingestor = new Ingestor(db, resolver)
+  const tenancy = new TenancyService(db)
+  const artifacts = new ArtifactService(db)
+  const issues = new IssueService(db, artifacts.sourcemapResolver)
+  const performance = new PerformanceService(db)
+  const alerting = new AlertingService(db)
+  const evaluator = new AlertEvaluator(db, alerting)
+  const ingestion = new IngestionPipeline(db, issues, performance, artifacts)
 
   const limiter = new TokenBucketLimiter(
-    options.rateLimit ?? { capacity: 120, refillPerSecond: 20 }
+    options.rateLimit ?? { capacity: 240, refillPerSecond: 40 }
   )
 
   // ---- CORS（只对上报相关的跨域路径开放）----
+  // SDK 的上报地址通常和业务页面不同源，而带 Content-Type: application/json
+  // 和自定义 header 的请求会触发预检。浏览器发 OPTIONS，
+  // 不回应就整条链路被拦掉，控制台只有一句 CORS 报错，极易被忽略。
   app.addHook('onRequest', async (request, reply) => {
     if (!isIngestPath(request.url)) return
     reply.header('Access-Control-Allow-Origin', '*')
@@ -62,12 +87,27 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
   })
 
   app.options('/api/v1/collect', async (_request, reply) => reply.code(204).send())
+  app.options('/api/v1/performance', async (_request, reply) => reply.code(204).send())
   app.options('/api/v1/sourcemaps', async (_request, reply) => reply.code(204).send())
 
-  // ---- 健康检查 ----
+  // ---- 错误处理 ----
+  app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof AppError) {
+      return reply.code(error.status).send({ ok: false, error: error.message, code: error.code })
+    }
+    app.log.error(error)
+    return reply.code(500).send({ ok: false, error: '内部错误' })
+  })
+
+  // ==========================================================
+  // 健康检查
+  // ==========================================================
   app.get('/api/health', async () => ({ ok: true, service: 'vigil-collector' }))
 
-  // ---- 上报入口 ----
+  // ==========================================================
+  // 摄入接口（SDK 用，项目密钥鉴权）
+  // ==========================================================
+
   app.post(
     '/api/v1/collect',
     {
@@ -76,7 +116,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           type: 'object',
           required: ['appId', 'events'],
           properties: {
-            appId: { type: 'string', minLength: 1, maxLength: 64 },
+            appId: { type: 'string', maxLength: 64 },
             token: { type: 'string', maxLength: 256 },
             sdk: {
               type: 'object',
@@ -89,7 +129,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
               type: 'array',
               minItems: 1,
               maxItems: 200,
-              // 事件内部结构完全交给 ingest 层处理，
+              // 事件内部结构交给摄入层处理，
               // 这里只保证「是个对象」—— 协议演进时不会因为校验过严把数据挡掉
               items: { type: 'object', additionalProperties: true }
             }
@@ -99,35 +139,56 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
     },
     async (request, reply) => {
       const body = request.body as CollectEnvelope
+      const { project } = authenticateProject(request, body.token)
+      enforceRateLimit(limiter, project.id)
 
-      // header 优先：fetch 通道把 token 放 header，不进 body，
-      // 也就不会出现在服务端的请求体日志里
-      const appId = headerValue(request, 'x-vigil-app-id') ?? body.appId
-      const token = headerValue(request, 'x-vigil-token') ?? body.token
-
-      const auth = authenticateRuntime(db, appId, token)
-      if (!auth.ok) {
-        return reply.code(auth.status).send({ ok: false, error: auth.reason })
-      }
-
-      if (!limiter.take(appId)) {
-        // 超限不是错误，是背压 —— 用 429 让 SDK 知道要退避
-        return reply.code(429).send({ ok: false, error: '超出上报频率限制' })
-      }
-
-      const events = (body.events ?? []) as ErrorEvent[]
-      const result = ingestor.ingest(appId, events)
-      touchApp(db, appId)
-
+      const result = ingestion.ingestErrors(project, body)
       return reply.send({
         ok: true,
         accepted: result.accepted,
+        dropped: result.dropped,
         ids: result.ids
       })
     }
   )
 
-  // ---- sourcemap 上传 ----
+  app.post(
+    '/api/v1/performance',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['appId', 'transactions'],
+          properties: {
+            appId: { type: 'string', maxLength: 64 },
+            token: { type: 'string', maxLength: 256 },
+            sdk: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', maxLength: 64 },
+                version: { type: 'string', maxLength: 32 }
+              }
+            },
+            transactions: {
+              type: 'array',
+              minItems: 1,
+              maxItems: 100,
+              items: { type: 'object', additionalProperties: true }
+            }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const body = request.body as PerformanceEnvelope
+      const { project } = authenticateProject(request, body.token)
+      enforceRateLimit(limiter, project.id)
+
+      const result = ingestion.ingestPerformance(project, body)
+      return reply.send({ ok: true, accepted: result.accepted, dropped: result.dropped })
+    }
+  )
+
   app.post(
     '/api/v1/sourcemaps',
     {
@@ -138,7 +199,7 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
           type: 'object',
           required: ['appId', 'release', 'files'],
           properties: {
-            appId: { type: 'string', minLength: 1, maxLength: 64 },
+            appId: { type: 'string', maxLength: 64 },
             token: { type: 'string', maxLength: 256 },
             release: { type: 'string', minLength: 1, maxLength: 128 },
             files: {
@@ -166,39 +227,42 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
         files: Array<{ fileName: string; sourceMap: string }>
       }
 
-      const appId = headerValue(request, 'x-vigil-app-id') ?? body.appId
-      const token = headerValue(request, 'x-vigil-upload-token') ?? body.token
+      // 上传用**独立密钥** —— 运行时密钥在前端代码里，
+      // 谁拿到它都能上报垃圾数据；上传密钥只在 CI 里
+      const token =
+        headerValue(request, 'x-vigil-upload-token') ??
+        headerValue(request, 'x-vigil-token') ??
+        body.token
+      const found = tenancy.findProjectByKey(token ?? '')
+      if (!found) throw AppError.unauthorized('上传密钥无效')
+      // 密钥存在但类型不对 → 403（是有效密钥，只是用错了地方）
+      if (found.keyKind !== 'upload') throw AppError.forbidden('需要上传密钥')
 
-      // 上传用**独立 token** —— 运行时 token 在前端代码里，
-      // 谁拿到它都能上报垃圾数据；上传 token 只在 CI 里
-      const auth = authenticateUpload(db, appId, token)
-      if (!auth.ok) {
-        return reply.code(auth.status).send({ ok: false, error: auth.reason })
-      }
-
-      const save = db.transaction(() => {
-        for (const file of body.files) {
-          saveSourcemap(db, appId, body.release, file.fileName, file.sourceMap)
-        }
+      const result = ingestion.uploadSourcemaps(found.project, {
+        release: body.release,
+        files: body.files
       })
-      save()
-
-      // 上传后必须清缓存，否则旧 map 继续生效
-      resolver.invalidate(appId, body.release)
-
-      return reply.send({ ok: true, uploaded: body.files.length })
+      return reply.send({ ok: true, uploaded: result.uploaded })
     }
   )
 
-  // ---- 管理接口 ----
-  app.get('/api/v1/apps', async (request, reply) => {
-    if (!requireAdmin(request, reply, adminToken)) return reply
-    return reply.send({ ok: true, apps: listApps(db) })
-  })
+  // ==========================================================
+  // 管理接口（admin token）
+  // ==========================================================
+
+  const admin = { preHandler: adminGuard(adminToken) }
+
+  // ---- 组织与项目 ----
+
+  app.get('/api/v1/organizations', admin, async () => ({
+    ok: true,
+    organizations: tenancy.listOrganizations()
+  }))
 
   app.post(
-    '/api/v1/apps',
+    '/api/v1/organizations',
     {
+      ...admin,
       schema: {
         body: {
           type: 'object',
@@ -208,154 +272,581 @@ export function buildApp(options: BuildAppOptions): FastifyInstance {
       }
     },
     async (request, reply) => {
-      if (!requireAdmin(request, reply, adminToken)) return reply
       const body = request.body as { name: string }
-      const created = createApp(db, body.name)
-      // token 只在这里返回一次，之后数据库里只有哈希
-      return reply.code(201).send({ ok: true, ...created })
+      const organization = tenancy.createOrganization(body.name)
+      return reply.code(201).send({ ok: true, organization })
     }
   )
 
-  app.patch('/api/v1/apps/:appId', async (request, reply) => {
-    if (!requireAdmin(request, reply, adminToken)) return reply
-    const { appId } = request.params as { appId: string }
-    const body = request.body as { enabled?: boolean }
-    const changed = setAppEnabled(db, appId, body.enabled !== false)
-    if (!changed) return reply.code(404).send({ ok: false, error: '应用不存在' })
-    return reply.send({ ok: true, appId, enabled: body.enabled !== false })
-  })
-
-  app.get('/api/v1/apps/:appId/errors', async (request, reply) => {
-    if (!requireAdmin(request, reply, adminToken)) return reply
-    const { appId } = request.params as { appId: string }
-    const query = request.query as {
-      limit?: string
-      offset?: string
-      q?: string
-      category?: string
-    }
-
-    const limit = clampInt(query.limit, 50, 1, 500)
-    const offset = clampInt(query.offset, 0, 0, 1_000_000)
-
-    const conditions = ['app_id = ?']
-    const params: unknown[] = [appId]
-
-    if (query.q) {
-      conditions.push('(message LIKE ? OR url_path LIKE ?)')
-      params.push(`%${query.q}%`, `%${query.q}%`)
-    }
-    if (query.category) {
-      conditions.push('category = ?')
-      params.push(query.category)
-    }
-
-    const where = conditions.join(' AND ')
-    const total = (
-      db.prepare(`SELECT COUNT(*) AS n FROM errors WHERE ${where}`).get(...params) as { n: number }
-    ).n
-
-    const rows = db
-      .prepare(
-        `SELECT id, fingerprint, category, kind, name, message, url, url_path,
-                browser, os, device, environment, release, first_seen, last_seen, count
-         FROM errors
-         WHERE ${where}
-         ORDER BY last_seen DESC
-         LIMIT ? OFFSET ?`
-      )
-      .all(...params, limit, offset)
-
-    return reply.send({ ok: true, total, limit, offset, errors: rows })
-  })
-
-  app.get('/api/v1/apps/:appId/errors/:fingerprint', async (request, reply) => {
-    if (!requireAdmin(request, reply, adminToken)) return reply
-    const { appId, fingerprint } = request.params as { appId: string; fingerprint: string }
-
-    const error = db
-      .prepare('SELECT * FROM errors WHERE app_id = ? AND fingerprint = ?')
-      .get(appId, fingerprint)
-    if (!error) return reply.code(404).send({ ok: false, error: '错误不存在' })
-
-    const events = db
-      .prepare(
-        `SELECT id, occurred_at, received_at, payload_json
-         FROM error_events
-         WHERE app_id = ? AND fingerprint = ?
-         ORDER BY occurred_at DESC, id DESC
-         LIMIT 20`
-      )
-      .all(appId, fingerprint)
-
-    return reply.send({ ok: true, error, events })
-  })
-
-  app.get('/api/v1/apps/:appId/stats', async (request, reply) => {
-    if (!requireAdmin(request, reply, adminToken)) return reply
-    const { appId } = request.params as { appId: string }
-
-    const totals = db
-      .prepare(
-        `SELECT COUNT(*) AS distinct_errors, COALESCE(SUM(count), 0) AS occurrences
-         FROM errors WHERE app_id = ?`
-      )
-      .get(appId) as { distinct_errors: number; occurrences: number }
-
-    const byCategory = db
-      .prepare(
-        `SELECT category, COUNT(*) AS n, COALESCE(SUM(count), 0) AS occurrences
-         FROM errors WHERE app_id = ? GROUP BY category ORDER BY occurrences DESC`
-      )
-      .all(appId)
-
-    const topErrors = db
-      .prepare(
-        `SELECT fingerprint, message, name, count, last_seen
-         FROM errors WHERE app_id = ?
-         ORDER BY count DESC LIMIT 10`
-      )
-      .all(appId)
-
-    const topEndpoints = db
-      .prepare(
-        `SELECT url_path, COUNT(*) AS n, COALESCE(SUM(count), 0) AS occurrences
-         FROM errors WHERE app_id = ? AND category = 'http' AND url_path IS NOT NULL
-         GROUP BY url_path ORDER BY occurrences DESC LIMIT 10`
-      )
-      .all(appId)
-
-    const browsers = db
-      .prepare(
-        `SELECT browser, COUNT(*) AS n FROM errors WHERE app_id = ? AND browser IS NOT NULL
-         GROUP BY browser ORDER BY n DESC`
-      )
-      .all(appId)
-
-    return reply.send({
+  app.get('/api/v1/organizations/:organizationId/projects', admin, async (request) => {
+    const { organizationId } = request.params as { organizationId: string }
+    return {
       ok: true,
-      appId,
-      totals,
-      byCategory,
-      topErrors,
-      topEndpoints,
-      browsers
+      projects: tenancy.listProjects(Number(organizationId))
+    }
+  })
+
+  app.post(
+    '/api/v1/organizations/:organizationId/projects',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 128 },
+            slug: { type: 'string', maxLength: 64 },
+            teamId: { type: 'integer' },
+            platform: { type: 'string', maxLength: 32 },
+            retentionDays: { type: 'integer' },
+            eventQuota: { type: 'integer' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { organizationId } = request.params as { organizationId: string }
+      const body = request.body as {
+        name: string
+        slug?: string
+        teamId?: number
+        platform?: string
+        retentionDays?: number
+        eventQuota?: number
+      }
+
+      const created = tenancy.createProject({
+        organizationId: Number(organizationId),
+        teamId: body.teamId,
+        name: body.name,
+        slug: body.slug,
+        platform: body.platform,
+        retentionDays: body.retentionDays,
+        eventQuota: body.eventQuota
+      })
+
+      // 两把密钥只在这里返回一次
+      return reply.code(201).send({
+        ok: true,
+        project: created.project,
+        runtimeKey: created.runtimeKey,
+        uploadKey: created.uploadKey
+      })
+    }
+  )
+
+  app.get('/api/v1/projects/:projectId', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return {
+      ok: true,
+      project: tenancy.getProject(Number(projectId)),
+      environments: tenancy.listEnvironments(Number(projectId)),
+      releases: tenancy.listReleases(Number(projectId))
+    }
+  })
+
+  app.post(
+    '/api/v1/projects/:projectId/keys/rotate',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['kind'],
+          properties: { kind: { type: 'string', enum: ['runtime', 'upload'] } }
+        }
+      }
+    },
+    async (request) => {
+      const { projectId } = request.params as { projectId: string }
+      const body = request.body as { kind: 'runtime' | 'upload' }
+      const key = tenancy.rotateKey(Number(projectId), body.kind)
+      return { ok: true, kind: body.kind, key }
+    }
+  )
+
+  // ---- 环境与版本 ----
+
+  app.get('/api/v1/projects/:projectId/environments', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return { ok: true, environments: tenancy.listEnvironments(Number(projectId)) }
+  })
+
+  app.post(
+    '/api/v1/projects/:projectId/environments',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['slug', 'name'],
+          properties: {
+            slug: { type: 'string', minLength: 1, maxLength: 64 },
+            name: { type: 'string', minLength: 1, maxLength: 128 },
+            isProduction: { type: 'boolean' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { projectId } = request.params as { projectId: string }
+      const body = request.body as { slug: string; name: string; isProduction?: boolean }
+      const environment = tenancy.createEnvironment(
+        Number(projectId),
+        body.slug,
+        body.name,
+        body.isProduction ?? false
+      )
+      return reply.code(201).send({ ok: true, environment })
+    }
+  )
+
+  app.get('/api/v1/projects/:projectId/releases', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return { ok: true, releases: tenancy.listReleases(Number(projectId)) }
+  })
+
+  app.post(
+    '/api/v1/projects/:projectId/releases',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['version'],
+          properties: {
+            version: { type: 'string', minLength: 1, maxLength: 64 },
+            commitSha: { type: 'string', maxLength: 64 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { projectId } = request.params as { projectId: string }
+      const body = request.body as { version: string; commitSha?: string }
+      const release = tenancy.createRelease(Number(projectId), body.version, body.commitSha)
+      return reply.code(201).send({ ok: true, release })
+    }
+  )
+
+  // ---- 问题 ----
+
+  app.get('/api/v1/projects/:projectId/issues', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+
+    const result = issues.listIssues({
+      projectId: Number(projectId),
+      status: query.status as never,
+      substatus: query.substatus as never,
+      category: query.category,
+      level: query.level as never,
+      environment: query.environment,
+      release: query.release,
+      query: query.q,
+      limit: query.limit ? Number(query.limit) : undefined,
+      offset: query.offset ? Number(query.offset) : undefined,
+      sort: query.sort as never
     })
+
+    return { ok: true, total: result.total, issues: result.issues }
   })
 
-  app.addHook('onClose', async () => {
-    resolver.clear()
+  app.get('/api/v1/projects/:projectId/issues/:issueId', admin, async (request) => {
+    const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+    return { ok: true, issue: issues.getIssue(Number(projectId), Number(issueId)) }
   })
 
-  return app
+  const issueAction = (_action: string) => ({
+    ...admin,
+    schema: {
+      body: {
+        type: 'object',
+        properties: {
+          release: { type: 'string', maxLength: 64 },
+          reason: { type: 'string', maxLength: 500 },
+          actorId: { type: 'integer' },
+          strategy: {
+            type: 'string',
+            enum: ['forever', 'until_escalating', 'until_count', 'until_user_count']
+          },
+          untilCount: { type: 'integer' },
+          untilUserCount: { type: 'integer' },
+          memberId: { type: 'integer' },
+          body: { type: 'string', maxLength: 5000 },
+          bookmarked: { type: 'boolean' }
+        }
+      }
+    }
+  })
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/:issueId/resolve',
+    issueAction('resolve'),
+    async (request) => {
+      const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+      const body = request.body as { release?: string; reason?: string; actorId?: number }
+      return {
+        ok: true,
+        issue: issues.resolve(Number(projectId), Number(issueId), body)
+      }
+    }
+  )
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/:issueId/archive',
+    issueAction('archive'),
+    async (request) => {
+      const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+      const body = request.body as {
+        strategy?: 'forever' | 'until_escalating' | 'until_count' | 'until_user_count'
+        untilCount?: number
+        untilUserCount?: number
+        reason?: string
+        actorId?: number
+      }
+      return {
+        ok: true,
+        issue: issues.archive(Number(projectId), Number(issueId), {
+          strategy: body.strategy ?? 'forever',
+          untilCount: body.untilCount,
+          untilUserCount: body.untilUserCount,
+          reason: body.reason,
+          actorId: body.actorId
+        })
+      }
+    }
+  )
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/:issueId/unarchive',
+    issueAction('unarchive'),
+    async (request) => {
+      const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+      const body = request.body as { reason?: string; actorId?: number }
+      return {
+        ok: true,
+        issue: issues.unarchive(Number(projectId), Number(issueId), body)
+      }
+    }
+  )
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/:issueId/seen',
+    issueAction('seen'),
+    async (request) => {
+      const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+      const body = request.body as { reason?: string; actorId?: number }
+      return {
+        ok: true,
+        issue: issues.markSeen(Number(projectId), Number(issueId), body)
+      }
+    }
+  )
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/:issueId/assign',
+    issueAction('assign'),
+    async (request) => {
+      const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+      const body = request.body as { memberId?: number; reason?: string; actorId?: number }
+      return {
+        ok: true,
+        issue: issues.assign(Number(projectId), Number(issueId), body.memberId ?? null, body)
+      }
+    }
+  )
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/:issueId/comments',
+    issueAction('comment'),
+    async (request) => {
+      const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+      const body = request.body as { body: string; actorId?: number }
+      if (!body.body) throw AppError.badRequest('缺少评论内容')
+      return {
+        ok: true,
+        issue: issues.comment(Number(projectId), Number(issueId), body.actorId, body.body)
+      }
+    }
+  )
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/:issueId/bookmark',
+    issueAction('bookmark'),
+    async (request) => {
+      const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+      const body = request.body as { bookmarked?: boolean }
+      return {
+        ok: true,
+        issue: issues.setBookmarked(Number(projectId), Number(issueId), body.bookmarked !== false)
+      }
+    }
+  )
+
+  app.post(
+    '/api/v1/projects/:projectId/issues/bulk',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['issueIds', 'action'],
+          properties: {
+            issueIds: { type: 'array', items: { type: 'integer' } },
+            action: {
+              type: 'string',
+              enum: ['resolve', 'archive', 'unarchive', 'bookmark', 'unbookmark', 'mark_seen']
+            },
+            archiveStrategy: { type: 'string' },
+            archiveUntilCount: { type: 'integer' },
+            archiveUntilUserCount: { type: 'integer' },
+            release: { type: 'string' },
+            reason: { type: 'string' },
+            actorId: { type: 'integer' }
+          }
+        }
+      }
+    },
+    async (request) => {
+      const { projectId } = request.params as { projectId: string }
+      const body = request.body as {
+        issueIds: number[]
+        action: 'resolve' | 'archive' | 'unarchive' | 'bookmark' | 'unbookmark' | 'mark_seen'
+        archiveStrategy?: 'forever' | 'until_escalating' | 'until_count' | 'until_user_count'
+        archiveUntilCount?: number
+        archiveUntilUserCount?: number
+        release?: string
+        reason?: string
+        actorId?: number
+      }
+
+      const affected = issues.bulkAction(Number(projectId), {
+        issueIds: body.issueIds,
+        action: body.action,
+        archiveStrategy: body.archiveStrategy,
+        archiveUntilCount: body.archiveUntilCount,
+        archiveUntilUserCount: body.archiveUntilUserCount,
+        release: body.release,
+        reason: body.reason,
+        actorId: body.actorId
+      })
+
+      return { ok: true, affected }
+    }
+  )
+
+  app.get('/api/v1/projects/:projectId/stats', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return { ok: true, stats: issues.stats(Number(projectId)) }
+  })
+
+  // ---- 性能 ----
+
+  app.get('/api/v1/projects/:projectId/performance', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+    return {
+      ok: true,
+      summary: performance.summary({
+        projectId: Number(projectId),
+        environment: query.environment,
+        release: query.release,
+        since: query.since ? Number(query.since) : undefined,
+        until: query.until ? Number(query.until) : undefined
+      })
+    }
+  })
+
+  app.get('/api/v1/projects/:projectId/transactions', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+    return {
+      ok: true,
+      ...performance.listTransactions({
+        projectId: Number(projectId),
+        environment: query.environment,
+        release: query.release,
+        name: query.name,
+        since: query.since ? Number(query.since) : undefined,
+        until: query.until ? Number(query.until) : undefined,
+        limit: query.limit ? Number(query.limit) : undefined,
+        offset: query.offset ? Number(query.offset) : undefined
+      })
+    }
+  })
+
+  app.get('/api/v1/projects/:projectId/error-performance', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+    return {
+      ok: true,
+      rows: performance.errorPerformanceCorrelation(
+        Number(projectId),
+        query.since ? Number(query.since) : undefined
+      )
+    }
+  })
+
+  // ---- 告警 ----
+
+  app.get('/api/v1/projects/:projectId/alert-rules', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return { ok: true, rules: alerting.listRules(Number(projectId)) }
+  })
+
+  app.post(
+    '/api/v1/projects/:projectId/alert-rules',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['name', 'type'],
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 128 },
+            type: {
+              type: 'string',
+              enum: [
+                'issue.new',
+                'issue.count',
+                'issue.spike',
+                'metric.error_count',
+                'metric.error_rate',
+                'metric.lcp_p95'
+              ]
+            },
+            conditions: { type: 'object', additionalProperties: true },
+            threshold: { type: 'number' },
+            windowSeconds: { type: 'integer' },
+            channelIds: { type: 'array', items: { type: 'integer' } }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { projectId } = request.params as { projectId: string }
+      const body = request.body as {
+        name: string
+        type: 'issue.new'
+        conditions?: never
+        threshold?: number
+        windowSeconds?: number
+        channelIds?: number[]
+      }
+      const rule = alerting.createRule({ projectId: Number(projectId), ...body })
+      return reply.code(201).send({ ok: true, rule })
+    }
+  )
+
+  app.patch('/api/v1/alert-rules/:ruleId', admin, async (request) => {
+    const { ruleId } = request.params as { ruleId: string }
+    const body = request.body as Record<string, never>
+    return { ok: true, rule: alerting.updateRule(Number(ruleId), body) }
+  })
+
+  app.delete('/api/v1/alert-rules/:ruleId', admin, async (request) => {
+    const { ruleId } = request.params as { ruleId: string }
+    alerting.deleteRule(Number(ruleId))
+    return { ok: true }
+  })
+
+  app.get('/api/v1/projects/:projectId/channels', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return { ok: true, channels: alerting.listChannels(Number(projectId)) }
+  })
+
+  app.post(
+    '/api/v1/projects/:projectId/channels',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['name', 'type'],
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 128 },
+            type: { type: 'string', enum: ['webhook', 'feishu', 'dingtalk', 'email', 'slack'] },
+            config: { type: 'object', additionalProperties: true }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { projectId } = request.params as { projectId: string }
+      const body = request.body as {
+        name: string
+        type: 'webhook' | 'feishu' | 'dingtalk' | 'email' | 'slack'
+        config: Record<string, unknown>
+      }
+      const channel = alerting.createChannel({ projectId: Number(projectId), ...body })
+      return reply.code(201).send({ ok: true, channel })
+    }
+  )
+
+  app.get('/api/v1/projects/:projectId/alert-incidents', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return { ok: true, incidents: alerting.listIncidents(Number(projectId)) }
+  })
+
+  app.post('/api/v1/projects/:projectId/alerts/evaluate', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const result = await evaluator.evaluateProject(Number(projectId))
+    return { ok: true, result }
+  })
+
+  // ==========================================================
+  // 内部
+  // ==========================================================
+
+  /** 项目密钥鉴权 */
+  function authenticateProject(
+    request: FastifyRequest,
+    bodyToken: string | undefined
+  ): { project: ProjectRow } {
+    const token = headerValue(request, 'x-vigil-token') ?? bodyToken
+    if (!token) throw AppError.unauthorized('缺少项目密钥')
+
+    const found = tenancy.findProjectByKey(token)
+    if (!found) throw AppError.unauthorized('项目密钥无效')
+    if (found.keyKind !== 'runtime') throw AppError.forbidden('该密钥不能用于上报')
+
+    return { project: found.project }
+  }
+
+  function enforceRateLimit(limiter: TokenBucketLimiter, projectId: number): void {
+    if (!limiter.take(String(projectId))) {
+      throw AppError.tooManyRequests('超出上报频率限制')
+    }
+  }
+
+  return { app, tenancy, issues, performance, artifacts, alerting, evaluator, ingestion }
 }
 
-/** 管理端鉴权：失败时直接回复并返回 false */
-function requireAdmin(request: FastifyRequest, reply: FastifyReply, adminToken: string): boolean {
-  const auth = authenticateAdmin(request, adminToken)
-  if (auth.ok) return true
-  void reply.code(auth.status).send({ ok: false, error: auth.reason })
-  return false
+/** 管理端鉴权 */
+function adminGuard(adminToken: string) {
+  const expected = crypto.createHash('sha256').update(adminToken, 'utf8').digest('hex')
+
+  return async (request: FastifyRequest, _reply: FastifyReply): Promise<void> => {
+    const header = request.headers['x-vigil-admin-token']
+    const authorization = request.headers.authorization
+
+    let provided: string | undefined
+    if (typeof header === 'string') {
+      provided = header
+    } else if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
+      provided = authorization.slice('Bearer '.length)
+    }
+
+    if (!provided) throw AppError.unauthorized('缺少管理 token')
+
+    const actual = crypto.createHash('sha256').update(provided, 'utf8').digest('hex')
+    // 常量时间比较：逐字节比较的时间差可以泄漏 token 前缀
+    if (!crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected))) {
+      throw AppError.forbidden('管理 token 不匹配')
+    }
+  }
 }
 
 /** 读 header，兼容 Fastify 的 string | string[] | undefined */
@@ -367,11 +858,16 @@ function headerValue(request: FastifyRequest, name: string): string | undefined 
 }
 
 function isIngestPath(url: string): boolean {
-  return url.startsWith('/api/v1/collect') || url.startsWith('/api/v1/sourcemaps')
+  return (
+    url.startsWith('/api/v1/collect') ||
+    url.startsWith('/api/v1/performance') ||
+    url.startsWith('/api/v1/sourcemaps')
+  )
 }
 
-function clampInt(value: string | undefined, fallback: number, min: number, max: number): number {
-  const parsed = Number.parseInt(value ?? '', 10)
-  if (Number.isNaN(parsed)) return fallback
-  return Math.min(max, Math.max(min, parsed))
+/** 从环境变量组装服务 */
+export function createAppFromEnv(): BuiltApp & { db: Db } {
+  const db = openDb(process.env.VIGIL_DB_PATH ?? './data/vigil.db')
+  const adminToken = process.env.VIGIL_ADMIN_TOKEN ?? crypto.randomBytes(24).toString('hex')
+  return { ...buildApp({ db, adminToken }), db }
 }
