@@ -6,15 +6,19 @@
 
 **Vigil** —— 多应用可接入的前端可观测性平台。
 
-浏览器 SDK 采集 → 采集服务接收 → **Issue 聚合与生命周期** → 性能 RUM → 告警 → 管理面板。
+浏览器 SDK 采集 → 采集服务接收 → **Issue 聚合与生命周期** → 性能 RUM → 告警 →
+会话回放 / 用户行为 → 管理面板。
 
 | 域 | 覆盖 |
 |---|---|
 | 错误 | JS 运行时错误、Promise 拒绝、资源加载失败、接口错误、Vue 组件错误、白屏 |
 | 性能 | Web Vitals（FCP/LCP/CLS/INP/TTFB）、长任务/TBT、接口 span、路由事务 |
 | 关联 | 报错事件带上**当刻的性能快照**；性能页能反查「哪些错误拖慢了页面」 |
+| 回放 | rrweb 录制 → 事件流存储 → 面板逐事件回放，可拖动定位 |
+| 行为 | 访问 / 路径 / 点击分布，**不记录任何输入内容** |
 
 **性能 RUM 和错误监控是一体的**，不是两个独立功能 —— 很多「页面卡」的根因是没捕获的异常或资源重试风暴。
+**回放和行为挂在同一个会话上** —— 能回答「用户出错前在干什么」。
 
 ## 仓库位置
 
@@ -32,9 +36,10 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，125 条
-npm run verify              # 端到端闭环，20 条断言（会先构建 SDK）
-npm run verify:dashboard    # 面板渲染验证（需要面板已启动）
+npm run test                # vitest，157 条
+npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
+npm run verify:dashboard    # 面板渲染验证，45 条断言（需要面板已启动）
+npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
 npm run build               # 构建 SDK / Collector / Dashboard
 
 # 管理 CLI（组织 / 项目 / 环境 / 版本）
@@ -52,6 +57,7 @@ npm --prefix packages/collector run cli -- release add 1 1.4.2
 |---|---|---|
 | `packages/protocol` | 上报协议类型契约 | **纯类型，零运行时**。只有 `import type` 能从它导入 |
 | `packages/sdk` | 浏览器采集 SDK | 无框架依赖。Vue 适配器单独入口 `src/vue.ts` |
+| `packages/sdk`（replay 入口） | 会话回放 + 用户行为 | **独立入口** `dist/replay.js`。核心不感知它的存在 |
 | `packages/collector` | 采集服务（**模块化单体**） | Fastify + SQLite。ESM/NodeNext，相对导入**必须带 `.js` 后缀** |
 | `packages/dashboard` | 管理面板 | Vue 3 + Element Plus + vue-router。管理 token 由 Vite 代理层注入，**不进前端代码** |
 
@@ -59,15 +65,21 @@ npm --prefix packages/collector run cli -- release add 1 1.4.2
 
 ```
 packages/dashboard/src/
-  router/index.ts        6 条路由
-  layouts/AppLayout.vue  固定侧栏（项目选择器 + 6 导航项 + 底部 slug）+ 顶栏
+  router/index.ts        8 条路由
+  layouts/AppLayout.vue  固定侧栏（项目选择器 + 8 导航项 + 底部 slug）+ 顶栏
   api/client.ts          类型化 API 客户端（ApiError 统一错误）
-  views/                 Overview / Issues / IssueDetail / Performance / Alerts / Settings
-  components/            StatCard / StatusTag / PanelSection / BarList(SVG) / PercentileChart(SVG)
+  views/                 Overview / Issues / IssueDetail / Performance /
+                         Sessions（回放）/ Behavior（行为）/ Alerts / Settings
+  components/            StatCard / StatusTag / PanelSection / BarList / PercentileChart
   theme.css              设计 token（**不要改**，所有页面复用它）
 ```
 
-图表是**手写 SVG**，没有引图表库 —— 趋势图和分位数区间条两个组件就够。
+图表是**手写 HTML/CSS**，没有引图表库 —— 趋势图和分位数区间条两个组件就够。
+
+⚠️ **不要改回 SVG。** 上一版是 SVG + `preserveAspectRatio` + `width: 100%`，
+字号是 **viewBox 单位**，实际渲染 = 字号 × (面板宽 / 900) ——
+同屏两个宽度不同的面板，同一个「12px」渲染出来就是两个大小。
+`verify-dashboard.mjs` 里有「同屏图表的标签字号一致」这条回归防护盯着。
 
 ### Collector 的域分层
 
@@ -85,6 +97,7 @@ src/
     performance/      事务/span/分位数
     alerting/         service（规则/通道）+ evaluator（评估）+ channels（发送）
     artifacts/        版本/sourcemap/还原
+    replay/           会话回放 + 用户行为（回放/行为两个域共用一张 service）
     ingestion/        pipeline（摄入管道）
   shared/             errors / time / url
 ```
@@ -187,6 +200,69 @@ IIFE 放 `<head>` 同步初始化才能收到。
 
 性能数据量大且绝大多数正常，混在一起就没法「错误全量、性能采样」。
 
+### 13. 通道地址要**推导**，不能拼字符串
+
+`endpoint` 是错误通道的完整地址（`.../api/v1/collect`）。
+性能（`.../performance`）、行为（`.../behavior`）是它的**兄弟通道**。
+
+`packages/sdk/src/endpoint.ts` 负责推导（去掉最后一段路径）。
+**不要用字符串拼接** —— 拼出来是 `.../api/v1/collect/api/v1/behavior`，
+404 而且**不报错**：请求发出去了、服务端也收到了，只是路由不匹配。
+面板上看到的是「行为数据一条都没有」，SDK 侧一切正常，日志里连警告都没有。
+
+插件的 `host.post(path)` 里 `path` 是**相对 API 根**的（如 `/behavior`）。
+
+### 14. rrweb 事件编号不能猜
+
+`@rrweb/types` 的 `EventType`：
+
+| 编号 | 事件 | 说明 |
+|---|---|---|
+| 2 | FullSnapshot | **增量链的起点** |
+| 3 | IncrementalSnapshot | 增量 |
+| 4 | Meta | 原始视口尺寸 |
+
+节点类型（`NodeType`）：0 = Document、2 = Element、3 = Text。
+
+写错的后果**极其隐蔽**：播放器按编号分派，编号错了就**静默播不出来**，
+不报任何错。种子数据、测试夹具、手写事件流都要按这个表来。
+
+### 15. 增量链必须从全量快照开始
+
+rrweb 的回放是「一个全量快照 + 一串增量」。中间丢掉任何一段，
+后面的增量**全部对不上**，回放直接废掉。
+
+客户端缓冲区满了**不能丢中间的**，只能重新取一次全量快照。
+这条策略在 `packages/sdk/src/replay/buffer.ts`（**纯函数**）里，
+`packages/sdk/tests/replay-buffer.test.ts` 盯着。
+
+⚠️ 缓冲区重置时**要保留 Meta** —— 播放器靠它把内容按比例缩放，
+丢了回放会被裁切。
+
+### 16. 回放比行为汇总先到是常态
+
+错误是立即上报的，行为汇总要等攒批或页面卸载。
+所以**回放到达时会话行可能还不存在**。
+
+只 UPDATE 的话这一行永远建不出来，结果是「回放事件躺在库里，
+但会话列表里看不到它」。`domains/replay/service.ts` 的 `ensureSessionRow`
+负责补建。
+
+### 17. 回放是独立入口，不进核心
+
+rrweb 压缩后 74KB gzip，打进 SDK 核心会让它膨胀 6 倍，
+而绝大多数用户不需要回放（尤其涉及隐私合规的团队）。
+
+- SDK 侧：独立入口 `@vigil/sdk/replay`（`dist/replay.js`）
+- 面板侧：播放器**动态加载**（`import('rrweb-player')`），只有打开回放才拉
+
+### 18. 行为不记录任何输入内容
+
+只记「点了某个按钮」，不记「在搜索框里输入了 xxx」。
+SDK 侧不采集输入值，rrweb 侧 `maskAllInputs` 全开，文本还会做 PII 脱敏。
+
+**不要为了「功能更全」去采集输入内容。** 这条边界是设计出来的。
+
 ---
 
 ## 数据层
@@ -231,9 +307,10 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 132 条
-npm run verify            # 20 条端到端断言
-npm run verify:dashboard  # 33 条面板渲染断言
+npm run test              # 157 条
+npm run verify            # 33 条端到端断言
+npm run verify:dashboard  # 45 条面板渲染断言
+npm run audit:ui          # 15 条界面设计闸门
 ```
 
 `npm run verify` 跑的是**真实链路**：真 Chromium → 真 SDK 产物 → 真 HTTP →
@@ -242,7 +319,11 @@ npm run verify:dashboard  # 33 条面板渲染断言
 `npm run verify:dashboard` 自带播种逻辑（自建专属演示项目 + 注入 localStorage），
 所以断言**可重复**，不依赖库里已有什么数据。
 
-### 写断言的三个坑（都踩过）
+`npm run audit:ui` 把「界面好不好看」拆成 15 条**可自动测的数字**闸门：
+字阶对比、字号档位、颜色收敛、动效档位、焦点环、点击目标、横向溢出、
+响应式、reduced-motion 降级。改界面后跑一遍。
+
+### 写断言的五个坑（都踩过）
 
 1. **Element Plus 把所有下拉的 popper 都挂在 body 上** —— 数选项必须限定
    `.el-select__popper:visible`，否则会把别的下拉的选项一起数进去。
@@ -250,6 +331,17 @@ npm run verify:dashboard  # 33 条面板渲染断言
    断言要落在**有栈的那一行**上。
 3. **E2E 跳页前要等特定事件落库**，不能只等「凑够 N 条」——
    页面里的错误常由 `setTimeout` 触发，跳太快会误判成产品问题。
+4. **断言要落在具体那一个元素上**，别用位置选择器。`.first()` 选中的是
+   **最早那条**，撤回了个不相干的，断言还照样通过。
+5. **别把「某个状态出现了」当断言** —— 断言要带**能区分身份的信息**
+   （内容 / id / 会话 ID），否则测的是「恰好也成立」的巧合。
+
+### 禁用的控件不计入焦点环覆盖率
+
+`disabled` 的 button **按设计就聚焦不了**，所以它不可能有焦点环。
+界面闸门里已排除 `:disabled` —— 判据错了，不是界面错了。
+同理 Element Plus 视觉隐藏的原生 input（`el-select__input` 等）也要排除，
+它们是可点区域是 wrapper 的替代品。
 
 ---
 
