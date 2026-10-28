@@ -9,12 +9,15 @@ import { computed } from 'vue'
 
 const props = defineProps<{
   label: string
-  value: number
+  /** 数字会被千分位格式化；比率这类需要自定义格式的传字符串 */
+  value: number | string
   hint?: string
   unit?: string
 }>()
 
-const display = computed(() => props.value.toLocaleString('zh-CN'))
+const display = computed(() =>
+  typeof props.value === 'number' ? props.value.toLocaleString('zh-CN') : props.value
+)
 </script>
 
 <template>
