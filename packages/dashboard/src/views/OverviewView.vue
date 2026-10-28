@@ -2,45 +2,87 @@
 /**
  * 总览页。
  *
- * 回答四个问题：
- *   1. 现在有多严重？      → 4 张统计卡片
- *   2. 是哪几条问题在爆？  → Top 问题横向条形图
- *   3. 分布在哪儿？        → 分类分布 + Top 责任点
- *   4. 我现在该处理什么？  → 待处理问题列表
+ * 回答五个问题：
+ *   1. 现在有多严重？      → 统计卡片（受时间范围约束）
+ *   2. 是涨了还是跌了？    → 错误趋势图 + 错误率
+ *   3. 是哪几条问题在爆？  → Top 问题横向条形图
+ *   4. 分布在哪儿？        → 分类分布 + Top 责任点
+ *   5. 我现在该处理什么？  → 待处理问题列表
+ *
+ * ## 所有数字都受**时间范围**约束
+ *
+ * 顶栏选的时间范围是全局的，这一页所有卡片和图表都跟着它走。
+ * 「累计发生」这类没有时间维度的说法会误导人 ——
+ * 面板上看到的每个数字都应该能回答「这是多长时间里的」。
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getIssueStats, listIssues } from '../api/client'
+import { getErrorTrend, getIssueStats, listIssues } from '../api/client'
 import { categoryLabel } from '../format'
-import { PANEL_CONTEXT, type IssueRow, type IssueStats } from '../types'
+import {
+  localTzOffsetMinutes,
+  PANEL_CONTEXT,
+  resolveTimeRange,
+  type ErrorTrend,
+  type IssueRow,
+  type IssueStats
+} from '../types'
 import BarList from '../components/BarList.vue'
 import PanelSection from '../components/PanelSection.vue'
 import StatCard from '../components/StatCard.vue'
 import StatusTag from '../components/StatusTag.vue'
+import TrendChart from '../components/TrendChart.vue'
 
 const ctx = inject(PANEL_CONTEXT)!
 const router = useRouter()
 
 const stats = ref<IssueStats | null>(null)
 const issues = ref<IssueRow[]>([])
+const trend = ref<ErrorTrend | null>(null)
 const loading = ref(false)
+
+/** 当前时间范围的档位标签 —— 卡片提示里要写清楚 */
+const rangeLabel = computed(
+  () => ctx.timeRangeOptions.find((option) => option.key === ctx.timeRange)?.label ?? ''
+)
+
+/**
+ * 窗口内的错误率。
+ *
+ * 分母是**页面访问次数** —— 没有分母的错误数说明不了严重性：
+ * 100 次错误可能是 1000 次访问里的 10%，也可能是 10 次访问里的 10 倍。
+ *
+ * 分母为 0 时是「无访问」，不是「0%」。
+ */
+const errorRate = computed(() => {
+  const points = trend.value?.points ?? []
+  const occurrences = points.reduce((sum, point) => sum + point.occurrences, 0)
+  const transactions = points.reduce((sum, point) => sum + point.transactions, 0)
+  if (transactions === 0) return null
+  return (occurrences / transactions) * 100
+})
 
 const cards = computed(() => [
   {
     label: '去重错误',
     value: stats.value?.total ?? 0,
-    hint: '按指纹聚合后的问题条数'
+    hint: `${rangeLabel.value}内按指纹聚合的问题条数`
   },
   {
-    label: '累计发生',
+    label: '发生次数',
     value: stats.value?.occurrences ?? 0,
-    hint: '所有问题的发生次数总和'
+    hint: `${rangeLabel.value}内的错误发生总数`
+  },
+  {
+    label: '错误率',
+    value: errorRate.value === null ? '—' : `${errorRate.value.toFixed(2)}%`,
+    hint: '发生次数 ÷ 页面访问次数'
   },
   {
     label: '待处理',
     value: stats.value?.unresolved ?? 0,
-    hint: '尚未解决的问题'
+    hint: `${rangeLabel.value}内发生且尚未解决`
   },
   {
     label: '回归中',
@@ -50,7 +92,10 @@ const cards = computed(() => [
 ])
 
 const topIssueBars = computed(() =>
-  issues.value.map((issue) => ({ label: issue.title, value: issue.count }))
+  issues.value.map((issue) => ({
+    label: issue.title,
+    value: issue.window_count ?? issue.count
+  }))
 )
 
 const categoryBars = computed(() =>
@@ -67,22 +112,41 @@ const culpritBars = computed(() =>
   }))
 )
 
+const trendPoints = computed(() => trend.value?.points ?? [])
+
 async function load(): Promise<void> {
   const projectId = ctx.projectId
   if (projectId === null) {
     stats.value = null
     issues.value = []
+    trend.value = null
     return
   }
 
   loading.value = true
   try {
-    const [stat, list] = await Promise.all([
-      getIssueStats(projectId),
-      listIssues(projectId, { status: 'unresolved', limit: 10, sort: 'count' })
+    // 时间窗每次请求都重算 —— 「最近 1 小时」必须是滚动的
+    const { since, until, bucket } = resolveTimeRange(ctx.timeRange)
+
+    const [stat, list, errorTrend] = await Promise.all([
+      getIssueStats(projectId, { since, until }),
+      listIssues(projectId, {
+        status: 'unresolved',
+        limit: 10,
+        sort: 'count',
+        since,
+        until
+      }),
+      getErrorTrend(projectId, {
+        since,
+        until,
+        bucket,
+        tzOffset: localTzOffsetMinutes()
+      })
     ])
     stats.value = stat
     issues.value = list.issues
+    trend.value = errorTrend
   } catch (error) {
     ElMessage.error(`加载总览数据失败：${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -102,6 +166,11 @@ watch(
   () => ctx.refreshToken,
   () => void load()
 )
+// 时间范围一变就得重载 —— 换了范围还显示旧数据是最糟的情况
+watch(
+  () => ctx.timeRange,
+  () => void load()
+)
 onMounted(() => void load())
 </script>
 
@@ -117,7 +186,15 @@ onMounted(() => void load())
       />
     </section>
 
-    <PanelSection title="Top 问题" :count="topIssueBars.length" hint="按发生次数排序">
+    <PanelSection
+      title="错误趋势"
+      :count="trendPoints.length"
+      :hint="`${rangeLabel} · 按${trend?.bucket === 'hour' ? '小时' : '天'}分桶`"
+    >
+      <TrendChart :points="trendPoints" :bucket="trend?.bucket ?? 'day'" unit=" 次" />
+    </PanelSection>
+
+    <PanelSection title="Top 问题" :count="topIssueBars.length" hint="按窗口内发生次数排序">
       <BarList :items="topIssueBars" unit=" 次" empty-text="当前没有待处理的问题" />
     </PanelSection>
 
@@ -141,7 +218,9 @@ onMounted(() => void load())
           <StatusTag :status="issue.status" :substatus="issue.substatus" />
           <span class="issue-title">{{ issue.title }}</span>
           <span class="issue-short tabular">{{ issue.short_id }}</span>
-          <span class="issue-count tabular">{{ issue.count.toLocaleString('zh-CN') }} 次</span>
+          <span class="issue-count tabular">
+            {{ (issue.window_count ?? issue.count).toLocaleString('zh-CN') }} 次
+          </span>
         </li>
       </ul>
       <div v-else class="empty-hint">当前没有待处理的问题</div>
@@ -158,7 +237,7 @@ onMounted(() => void load())
 
 .cards {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -218,13 +297,21 @@ onMounted(() => void load())
   font-size: 13px;
 }
 
-@media (max-width: 1200px) {
+@media (max-width: 1400px) {
   .cards {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
 
+@media (max-width: 1200px) {
   .split {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 </style>
