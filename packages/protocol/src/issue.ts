@@ -204,6 +204,15 @@ export interface IssueQuery {
   limit?: number
   offset?: number
   sort?: 'last_seen' | 'first_seen' | 'count' | 'user_count' | 'priority'
+  /**
+   * 时间范围起点（epoch 毫秒，左闭）。
+   *
+   * 给了就只列**这个窗口内有发生**的问题，
+   * 并把 `windowCount` 填成窗口内的发生次数。
+   */
+  since?: number
+  /** 时间范围终点（epoch 毫秒，右开） */
+  until?: number
 }
 
 /** 批量状态操作 */

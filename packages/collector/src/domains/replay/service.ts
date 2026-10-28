@@ -1,5 +1,5 @@
 import type { Db } from '../../infra/db/client.js'
-import { readJson, writeJson } from '../../infra/db/dialect.js'
+import { bucketExpr, readJson, writeJson } from '../../infra/db/dialect.js'
 import { parseUserAgent } from '../tenancy/user-agent.js'
 import type {
   BehaviorEnvelope,
@@ -27,6 +27,21 @@ import type {
 export interface ReplayServiceOptions {
   /** 保留多少天的行为数据 */
   retentionDays?: number
+}
+
+/** 一天（毫秒）—— 按天分桶用 */
+const DAY_MS = 24 * 3600_000
+
+/**
+ * 桶起点 → 日期字符串（YYYY-MM-DD）。
+ *
+ * 按**本地时区**格式化：桶边界已经是用户本地午夜了，
+ * 再用 `toISOString()` 会退回到 UTC，日期就差一天。
+ */
+function formatBucketDate(bucketStart: number, tzOffsetMinutes: number): string {
+  const shifted = new Date(bucketStart + Math.round(tzOffsetMinutes) * 60_000)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${shifted.getUTCFullYear()}-${pad(shifted.getUTCMonth() + 1)}-${pad(shifted.getUTCDate())}`
 }
 
 export class ReplayService {
@@ -324,7 +339,10 @@ export class ReplayService {
    *
    * 全部在 SQL 里聚合 —— 数据量大时把明细拉回 Node 再统计是自杀。
    */
-  summary(projectId: number, options: { since?: number; until?: number } = {}): BehaviorSummary {
+  summary(
+    projectId: number,
+    options: { since?: number; until?: number; tzOffsetMinutes?: number } = {}
+  ): BehaviorSummary {
     const conditions = ['project_id = ?']
     const params: unknown[] = [projectId]
 
@@ -394,7 +412,7 @@ export class ReplayService {
     )
 
     const trend = this.db.all<{ day: number; views: number; sessions: number }>(
-      `SELECT CAST(timestamp / 86400000 AS INTEGER) AS day,
+      `SELECT ${bucketExpr('timestamp', DAY_MS, options.tzOffsetMinutes)} AS day,
               COUNT(*) AS views,
               COUNT(DISTINCT session_id) AS sessions
        FROM behavior_events WHERE ${where}
@@ -442,7 +460,7 @@ export class ReplayService {
       topPaths,
       clicks,
       trend: trend.map((row) => ({
-        date: new Date(row.day * 86400000).toISOString().slice(0, 10),
+        date: formatBucketDate(row.day, options.tzOffsetMinutes ?? 0),
         views: row.views,
         sessions: row.sessions
       }))

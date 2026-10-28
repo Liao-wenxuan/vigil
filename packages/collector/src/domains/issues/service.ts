@@ -66,6 +66,14 @@ export interface IssueRow {
   metadata_json: string | null
   created_at: number
   updated_at: number
+  /**
+   * 时间窗口内的发生次数。
+   *
+   * 只在**给了时间范围**的查询里才有值 —— 没有窗口时它等于累计的 `count`，
+   * 但那是两回事：累计值是「这个错误一共发生过几次」，
+   * 窗口值是「这段时间里发生了几次」。
+   */
+  window_count?: number
 }
 
 export interface IngestOutcome {
@@ -91,6 +99,13 @@ export interface IssueStats {
   byCategory: Array<{ category: string; n: number; occurrences: number }>
   byLevel: Array<{ level: string; n: number }>
   topCulprits: Array<{ culprit: string; n: number; occurrences: number }>
+  /** 窗口内受影响的用户数（去重）。没有时间范围时是 undefined */
+  users?: number
+  /** 窗口内首次出现的问题数。没有时间范围时是 undefined */
+  newIssues?: number
+  /** 生效的时间范围（epoch 毫秒）。没有时间范围时是 undefined */
+  since?: number
+  until?: number
 }
 
 export class IssueService {
@@ -412,15 +427,58 @@ export class IssueService {
     }
 
     const where = conditions.join(' AND ')
+
+    // ---- 时间窗口 ----
+    //
+    // 给了窗口就只列「窗口内有发生」的问题 —— 这是监控面板的基本要求：
+    // 「过去 1 小时有没有新问题」和「历史上共有多少问题」是两个问题。
+    const hasWindow = query.since !== undefined || query.until !== undefined
+    const windowConditions = ['project_id = ?']
+    const windowParams: unknown[] = [query.projectId]
+    if (query.since !== undefined) {
+      windowConditions.push('occurred_at >= ?')
+      windowParams.push(query.since)
+    }
+    if (query.until !== undefined) {
+      windowConditions.push('occurred_at < ?')
+      windowParams.push(query.until)
+    }
+    const windowWhere = windowConditions.join(' AND ')
+
+    const scopedWhere = hasWindow
+      ? `${where} AND id IN (SELECT issue_id FROM issue_events WHERE ${windowWhere})`
+      : where
+
     const total = (
-      this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM issues WHERE ${where}`, params) as {
-        n: number
-      }
+      this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM issues WHERE ${scopedWhere}`, [
+        ...params,
+        ...(hasWindow ? windowParams : [])
+      ]) as { n: number }
     ).n
 
-    const rows = this.db.all<IssueRow>(`SELECT * FROM issues WHERE ${where}`, params)
+    const rows = this.db.all<IssueRow>(`SELECT * FROM issues WHERE ${scopedWhere}`, [
+      ...params,
+      ...(hasWindow ? windowParams : [])
+    ])
 
-    const sorted = sortIssues(rows, query.sort ?? 'priority')
+    // 窗口内的发生次数：一条 GROUP BY 就够，别按行去查
+    if (hasWindow) {
+      const counts = this.db.all<{ issue_id: number; n: number }>(
+        `SELECT issue_id, COUNT(*) AS n FROM issue_events
+         WHERE ${windowWhere} GROUP BY issue_id`,
+        windowParams
+      )
+      const countMap = new Map(counts.map((row) => [row.issue_id, row.n]))
+      for (const row of rows) row.window_count = countMap.get(row.id) ?? 0
+    }
+
+    // 有窗口时按**窗口内**的次数排 —— 用户选了「最近 1 小时」，
+    // 排序就该按这段时间的量，而不是历史累计。
+    const sorted = sortIssues(
+      rows,
+      query.sort ?? 'priority',
+      hasWindow ? (row) => row.window_count ?? 0 : undefined
+    )
     const limit = query.limit ?? 50
     const offset = query.offset ?? 0
 
@@ -753,7 +811,24 @@ export class IssueService {
   // 统计
   // ==========================================================
 
-  stats(projectId: number): IssueStats {
+  /**
+   * 统计。
+   *
+   * ## 有时间窗口时看的是**窗口内发生**的问题
+   *
+   * 「过去 24 小时有多少个问题在冒」和「历史上共有多少个问题」
+   * 是两个完全不同的问题。监控面板要能回答前者。
+   *
+   * 没有窗口时行为和以前完全一致（读 issues 表的全量快照）。
+   */
+  stats(projectId: number, range: { since?: number; until?: number } = {}): IssueStats {
+    const hasWindow = range.since !== undefined || range.until !== undefined
+    if (hasWindow) return this.windowStats(projectId, range)
+    return this.allTimeStats(projectId)
+  }
+
+  /** 全量统计：直接读 issues 表（问题表本身就是一个累计快照） */
+  private allTimeStats(projectId: number): IssueStats {
     const totals = this.db.get<{
       total: number
       occurrences: number
@@ -809,6 +884,112 @@ export class IssueService {
       byCategory,
       byLevel,
       topCulprits
+    }
+  }
+
+  /**
+   * 窗口统计：从 issue_events 出发。
+   *
+   * 状态分布用的是问题**当前**的状态 ——
+   * 「过去 1 小时还在冒且现在仍未解决」是用户真正想问的。
+   */
+  private windowStats(projectId: number, range: { since?: number; until?: number }): IssueStats {
+    const conditions = ['e.project_id = ?']
+    const params: unknown[] = [projectId]
+    if (range.since !== undefined) {
+      conditions.push('e.occurred_at >= ?')
+      params.push(range.since)
+    }
+    if (range.until !== undefined) {
+      conditions.push('e.occurred_at < ?')
+      params.push(range.until)
+    }
+    const where = conditions.join(' AND ')
+
+    const totals = this.db.get<{
+      issues: number
+      occurrences: number
+      users: number
+    }>(
+      `SELECT COUNT(DISTINCT e.issue_id) AS issues,
+              COUNT(*) AS occurrences,
+              COUNT(DISTINCT e.user_id) AS users
+       FROM issue_events e WHERE ${where}`,
+      params
+    )!
+
+    // 状态分布：窗口内有发生的问题，它们的**当前**状态
+    const byStatus = this.db.all<{ status: string; substatus: string; n: number }>(
+      `SELECT i.status, i.substatus, COUNT(DISTINCT i.id) AS n
+       FROM issues i
+       WHERE i.project_id = ?
+         AND i.id IN (SELECT e.issue_id FROM issue_events e WHERE ${where})
+       GROUP BY i.status, i.substatus`,
+      [projectId, ...params]
+    )!
+
+    const count = (predicate: (row: { status: string; substatus: string }) => boolean): number =>
+      byStatus.filter(predicate).reduce((sum, row) => sum + row.n, 0)
+
+    // 新增问题：窗口内**首次出现**的问题
+    const newConditions = ['project_id = ?']
+    const newParams: unknown[] = [projectId]
+    if (range.since !== undefined) {
+      newConditions.push('first_seen >= ?')
+      newParams.push(range.since)
+    }
+    if (range.until !== undefined) {
+      newConditions.push('first_seen < ?')
+      newParams.push(range.until)
+    }
+    const newIssues = (
+      this.db.get<{ n: number }>(
+        `SELECT COUNT(*) AS n FROM issues WHERE ${newConditions.join(' AND ')}`,
+        newParams
+      ) as { n: number }
+    ).n
+
+    const byCategory = this.db.all<{ category: string; n: number; occurrences: number }>(
+      `SELECT i.category, COUNT(DISTINCT i.id) AS n, COUNT(e.id) AS occurrences
+       FROM issue_events e JOIN issues i ON i.id = e.issue_id
+       WHERE ${where}
+       GROUP BY i.category ORDER BY occurrences DESC`,
+      params
+    )
+
+    const byLevel = this.db.all<{ level: string; n: number }>(
+      `SELECT i.level, COUNT(DISTINCT i.id) AS n
+       FROM issue_events e JOIN issues i ON i.id = e.issue_id
+       WHERE ${where}
+       GROUP BY i.level ORDER BY n DESC`,
+      params
+    )
+
+    const topCulprits = this.db.all<{ culprit: string; n: number; occurrences: number }>(
+      `SELECT i.culprit, COUNT(DISTINCT i.id) AS n, COUNT(e.id) AS occurrences
+       FROM issue_events e JOIN issues i ON i.id = e.issue_id
+       WHERE ${where} AND i.culprit IS NOT NULL
+       GROUP BY i.culprit ORDER BY occurrences DESC LIMIT 10`,
+      params
+    )
+
+    return {
+      total: totals.issues,
+      unresolved: count((r) => r.status === 'unresolved'),
+      new: count((r) => r.substatus === 'new'),
+      ongoing: count((r) => r.substatus === 'ongoing'),
+      regressed: count((r) => r.substatus === 'regressed'),
+      escalating: count((r) => r.substatus === 'escalating'),
+      resolved: count((r) => r.status === 'resolved'),
+      archived: count((r) => r.status === 'archived'),
+      occurrences: totals.occurrences,
+      byCategory,
+      byLevel,
+      topCulprits,
+      users: totals.users,
+      newIssues,
+      since: range.since,
+      until: range.until
     }
   }
 
@@ -1005,9 +1186,20 @@ function statePriority(status: string, substatus: string): number {
   }
 }
 
-/** 排序 */
-export function sortIssues(rows: IssueRow[], sort: NonNullable<IssueQuery['sort']>): IssueRow[] {
+/**
+ * 排序。
+ *
+ * `countOf` 让调用方决定「发生次数」看哪个口径：
+ * 有时间窗口时看窗口内的次数，没有时看累计次数。
+ * 两者混用会让「选了最近 1 小时却按历史总量排序」这种怪事发生。
+ */
+export function sortIssues(
+  rows: IssueRow[],
+  sort: NonNullable<IssueQuery['sort']>,
+  countOf?: (row: IssueRow) => number
+): IssueRow[] {
   const now = Date.now()
+  const count = countOf ?? ((row: IssueRow) => row.count)
 
   const sorted = [...rows]
   switch (sort) {
@@ -1018,7 +1210,7 @@ export function sortIssues(rows: IssueRow[], sort: NonNullable<IssueQuery['sort'
       sorted.sort((a, b) => b.first_seen - a.first_seen)
       break
     case 'count':
-      sorted.sort((a, b) => b.count - a.count)
+      sorted.sort((a, b) => count(b) - count(a))
       break
     case 'user_count':
       sorted.sort((a, b) => b.user_count - a.user_count)

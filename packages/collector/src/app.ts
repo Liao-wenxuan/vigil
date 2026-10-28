@@ -9,6 +9,7 @@ import { ArtifactService } from './domains/artifacts/service.js'
 import { AlertingService } from './domains/alerting/service.js'
 import { AlertEvaluator } from './domains/alerting/evaluator.js'
 import { ReplayService } from './domains/replay/service.js'
+import { TrendService } from './domains/trend/service.js'
 import { IngestionPipeline } from './domains/ingestion/pipeline.js'
 import { AppError } from './shared/errors.js'
 import type { BehaviorEnvelope, CollectEnvelope, PerformanceEnvelope } from '@vigil/protocol'
@@ -48,6 +49,7 @@ export interface BuiltApp {
   evaluator: AlertEvaluator
   replay: ReplayService
   ingestion: IngestionPipeline
+  trend: TrendService
 }
 
 export function buildApp(options: BuildAppOptions): BuiltApp {
@@ -69,6 +71,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
   const evaluator = new AlertEvaluator(db, alerting)
   const replay = new ReplayService(db)
   const ingestion = new IngestionPipeline(db, issues, performance, artifacts, replay)
+  const trendService = new TrendService(db)
 
   const limiter = new TokenBucketLimiter(
     options.rateLimit ?? { capacity: 240, refillPerSecond: 40 }
@@ -489,10 +492,32 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       query: query.q,
       limit: query.limit ? Number(query.limit) : undefined,
       offset: query.offset ? Number(query.offset) : undefined,
-      sort: query.sort as never
+      sort: query.sort as never,
+      since: query.since ? Number(query.since) : undefined,
+      until: query.until ? Number(query.until) : undefined
     })
 
     return { ok: true, total: result.total, issues: result.issues }
+  })
+
+  /**
+   * 错误趋势（跨域读模型）。
+   *
+   * 单独一个接口而不是塞进 stats —— 趋势是**时间序列**，
+   * stats 是**当前快照**，两者的形状和刷新策略都不一样。
+   */
+  app.get('/api/v1/projects/:projectId/issues/trend', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+
+    const trend = trendService.errorTrend(Number(projectId), {
+      since: query.since ? Number(query.since) : undefined,
+      until: query.until ? Number(query.until) : undefined,
+      bucket: query.bucket === 'hour' ? 'hour' : 'day',
+      tzOffsetMinutes: query.tzOffset ? Number(query.tzOffset) : 0
+    })
+
+    return { ok: true, trend }
   })
 
   app.get('/api/v1/projects/:projectId/issues/:issueId', admin, async (request) => {
@@ -681,7 +706,14 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
 
   app.get('/api/v1/projects/:projectId/stats', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
-    return { ok: true, stats: issues.stats(Number(projectId)) }
+    const query = request.query as Record<string, string | undefined>
+    return {
+      ok: true,
+      stats: issues.stats(Number(projectId), {
+        since: query.since ? Number(query.since) : undefined,
+        until: query.until ? Number(query.until) : undefined
+      })
+    }
   })
 
   // ---- 性能 ----
@@ -740,7 +772,8 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       ok: true,
       summary: replay.summary(Number(projectId), {
         since: query.since ? Number(query.since) : undefined,
-        until: query.until ? Number(query.until) : undefined
+        until: query.until ? Number(query.until) : undefined,
+        tzOffsetMinutes: query.tzOffset ? Number(query.tzOffset) : 0
       })
     }
   })
@@ -942,7 +975,8 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     alerting,
     evaluator,
     replay,
-    ingestion
+    ingestion,
+    trend: trendService
   }
 }
 

@@ -94,3 +94,37 @@ export function toBool(value: boolean | undefined | null): number {
 export function fromBool(value: unknown): boolean {
   return value === 1 || value === true || value === '1' || value === 't'
 }
+
+/**
+ * 时间分桶表达式。
+ *
+ * ## 为什么返回「桶起点」而不是「桶序号」
+ *
+ * 图表要的是**桶的起始时间**（拿去当横轴标签），不是序号。
+ * 返回序号的话，每次查都要在应用层再换算一遍。
+ *
+ * ## 为什么要传时区偏移
+ *
+ * 「按天」分桶如果按 UTC 边界切，中国用户看到的「今天」
+ * 要到早上 8 点才真正开始 —— 有三分之一的数据落到了昨天。
+ *
+ * 偏移让桶边界对齐**用户所在时区的午夜**。
+ * 偏移是「分钟，UTC 以东为正」（东八区 = 480）。
+ *
+ * ## 跨库一致
+ *
+ * SQLite 的 `INTEGER / INTEGER` 与 PG 的 `bigint / bigint` **都是整除**，
+ * 两边行为一致。`CAST(... AS BIGINT)` 在 SQLite 里退化成整数亲和性，
+ * 在 PG 里保证乘回去不会溢出 int4（epoch 毫秒 × 天数会超）。
+ */
+export function bucketExpr(column: string, bucketMs: number, tzOffsetMinutes = 0): string {
+  const offsetMs = Math.round(tzOffsetMinutes) * 60_000
+  if (offsetMs === 0) {
+    return `(CAST(${column} / ${bucketMs} AS BIGINT) * ${bucketMs})`
+  }
+  // 本地时间 = UTC + 偏移，所以「本地第几天」是 (col + offset) / bucketMs，
+  // 而桶起点（换回 epoch）要再减掉偏移。
+  // ⚠️ 两个符号别搞反：反了会把东八区算成西八区，
+  //    桶边界整体错 8 小时 —— 数据会落到隔壁那天的桶里。
+  return `(CAST((${column} + ${offsetMs}) / ${bucketMs} AS BIGINT) * ${bucketMs} - ${offsetMs})`
+}
