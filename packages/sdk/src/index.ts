@@ -1,115 +1,25 @@
-import type { BreadcrumbType, ErrorEvent, PerformanceEvent } from '@vigil/protocol'
+﻿import type { BreadcrumbType, ErrorEvent, PerformanceEvent } from '@vigil/protocol'
 import { BreadcrumbRecorder, installBreadcrumbs } from './collectors/breadcrumbs'
 import { installGlobalErrorHandler } from './collectors/global'
-import { installNetworkCapture, nativeFetch, type HttpErrorPolicy } from './collectors/network'
+import { installNetworkCapture, nativeFetch } from './collectors/network'
 import { BlankScreenDetector, PerformanceCollector } from './collectors/performance'
 import { installUnhandledRejectionHandler } from './collectors/promise'
 import { collectContext, detectSelfUrls, isBrowser } from './context'
 import { computeFingerprint, normalizeCustomFingerprint } from './fingerprint'
 import { maskRecord, maskUrl, scrubText } from './mask'
+import { DEFAULTS, type ResolvedOptions, type VigilOptions } from './options'
 import { parseStack } from './parse-stack'
+import { runPluginEnrich, setupPlugins, type VigilPlugin, type VigilPluginHost } from './plugin'
 import { EventQueue } from './queue'
 import { combineTeardowns, type ReportInput, type Reporter, type Teardown } from './reporter'
 import { sendBatch, splitIntoBatches, type TransportOptions } from './transport'
 import { SDK_NAME, SDK_VERSION } from './version'
 
 export { SDK_NAME, SDK_VERSION } from './version'
+export { DEFAULTS, type VigilOptions } from './options'
+export type { VigilPlugin, VigilPluginHost } from './plugin'
 export type { Breadcrumb, BreadcrumbType, ErrorEvent } from '@vigil/protocol'
 export type { HttpErrorPolicy } from './collectors/network'
-
-/** 默认参数 */
-const DEFAULTS = {
-  /** 会话采样率。默认 1 = 全量 */
-  sampleRate: 1,
-  /**
-   * 性能采样率。默认 0.1 = 只上报 10% 的页面加载。
-   *
-   * 性能数据和错误数据的性质完全不同：错误少但每条都重要，
-   * 性能多且绝大多数正常 —— 全量上报会打爆存储和带宽。
-   */
-  performanceSampleRate: 0.1,
-  /** 是否采集性能数据 */
-  enablePerformance: true,
-  /** 白屏判定超时（毫秒） */
-  blankScreenTimeoutMs: 3000,
-  /** 最多保留多少条面包屑 */
-  maxBreadcrumbs: 30,
-  /** 定时上报间隔 */
-  flushIntervalMs: 5000,
-  /** 一批最多几条 */
-  maxBatchSize: 20,
-  /** 单个请求体上限。浏览器对 beacon / keepalive 的限制都是 64KB 量级 */
-  maxPayloadBytes: 48 * 1024,
-  /** 哪些 HTTP 状态算错误 */
-  httpErrorPolicy: '5xx' as HttpErrorPolicy,
-  /** 是否采集 console 输出作为面包屑 */
-  captureConsoleBreadcrumbs: true,
-  /** 开关 */
-  enabled: true,
-  debug: false
-}
-
-export interface VigilOptions {
-  /** 采集接口完整地址，例如 https://collector.example.com/api/v1/collect */
-  endpoint: string
-  /** 应用 ID */
-  appId: string
-  /** 运行时 token */
-  token: string
-  /** 发布版本，用于区分「这个错误是哪个版本引入的」 */
-  release?: string
-  /** 运行环境：production / staging / development */
-  environment?: string
-  /** 当前用户 ID（可后续用 setUser 更新） */
-  userId?: string
-  /**
-   * 会话采样率（0~1）。
-   *
-   * 采样是**按会话**决定的，不按单条事件随机抽 —— 随机抽事件会得到
-   * 「同一个用户只上报了部分错误」的残缺上下文，比不采样更误导。
-   * 整个会话要么全采要么全不采，采中的会话里每一条错误都在。
-   */
-  sampleRate?: number
-  /**
-   * 性能采样率（0~1），默认 0.1。
-   *
-   * 性能数据量大且绝大多数正常，必须采样；错误数据则默认全量。
-   */
-  performanceSampleRate?: number
-  /** 是否采集性能数据，默认 true */
-  enablePerformance?: boolean
-  /** 白屏判定超时（毫秒），默认 3000 */
-  blankScreenTimeoutMs?: number
-  maxBreadcrumbs?: number
-  flushIntervalMs?: number
-  maxBatchSize?: number
-  maxPayloadBytes?: number
-  httpErrorPolicy?: HttpErrorPolicy
-  captureConsoleBreadcrumbs?: boolean
-  enabled?: boolean
-  debug?: boolean
-}
-
-interface ResolvedOptions {
-  endpoint: string
-  appId: string
-  token: string
-  release?: string
-  environment?: string
-  userId?: string
-  sampleRate: number
-  performanceSampleRate: number
-  enablePerformance: boolean
-  blankScreenTimeoutMs: number
-  maxBreadcrumbs: number
-  flushIntervalMs: number
-  maxBatchSize: number
-  maxPayloadBytes: number
-  httpErrorPolicy: HttpErrorPolicy
-  captureConsoleBreadcrumbs: boolean
-  enabled: boolean
-  debug: boolean
-}
 
 export interface CaptureExtra {
   /** 附加到这条错误上的业务上下文（会被脱敏） */
@@ -148,6 +58,8 @@ export class VigilClient {
   private readonly performanceTransport: TransportOptions
   private performanceCollector: PerformanceCollector | null = null
   private blankScreen: BlankScreenDetector | null = null
+  /** 已安装的插件 */
+  private installedPlugins: VigilPlugin[] = []
 
   private teardown: Teardown = () => {}
   private extraContext: Record<string, unknown> = {}
@@ -164,7 +76,8 @@ export class VigilClient {
       ...DEFAULTS,
       ...options,
       sampleRate: clamp(options.sampleRate ?? DEFAULTS.sampleRate, 0, 1),
-      maxPayloadBytes: Math.min(options.maxPayloadBytes ?? DEFAULTS.maxPayloadBytes, 60 * 1024)
+      maxPayloadBytes: Math.min(options.maxPayloadBytes ?? DEFAULTS.maxPayloadBytes, 60 * 1024),
+      plugins: options.plugins ?? []
     }
     this.userId = options.userId
     this.sessionId = collectContext().sessionId
@@ -242,6 +155,66 @@ export class VigilClient {
 
     this.teardown = combineTeardowns(teardowns)
     this.queue.start()
+
+    // ---- 插件 ----
+    // 回放、行为分析都走这里。核心不感知它们的存在。
+    this.installedPlugins = setupPlugins(this.resolved.plugins, this.createPluginHost())
+  }
+
+  /**
+   * 插件宿主。
+   *
+   * 插件拿到的是**能力**（发请求、加上下文），不是整个客户端 ——
+   * 这样插件不会有能力去改 SDK 的内部状态。
+   */
+  private createPluginHost(): VigilPluginHost {
+    // 箭头函数天然捕获 this，不需要 `const client = this`（那会被 no-this-alias 拦）
+    const getUserId = (): string | undefined => this.userId
+    const getSessionId = (): string => this.sessionId
+    const post = (path: string, body: unknown): void => {
+      void this.postTo(path, body)
+    }
+    const addContext = (context: Record<string, unknown>): void => {
+      this.extraContext = { ...this.extraContext, ...context }
+    }
+
+    return {
+      options: this.resolved,
+      get sessionId() {
+        return getSessionId()
+      },
+      get userId() {
+        return getUserId()
+      },
+      post,
+      addContext
+    }
+  }
+
+  /**
+   * POST 到采集服务的任意路径（插件用）。
+   *
+   * 鉴权头自动带上，所以插件不用管 token 放哪。
+   */
+  private async postTo(path: string, body: unknown): Promise<void> {
+    try {
+      const response = await this.transport.fetchImpl(`${this.resolved.endpoint}${path}`, {
+        method: 'POST',
+        body: JSON.stringify(body),
+        keepalive: true,
+        credentials: 'omit',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Vigil-App-Id': this.resolved.appId,
+          'X-Vigil-Token': this.resolved.token
+        }
+      })
+      if (!response.ok && this.resolved.debug) {
+        console.warn(`[vigil] ${path} 上报失败：HTTP ${response.status}`)
+      }
+    } catch (error) {
+      if (this.resolved.debug) console.warn(`[vigil] ${path} 上报失败`, error)
+    }
   }
 
   /**
@@ -389,6 +362,9 @@ export class VigilClient {
     const vitals = this.performanceCollector?.snapshot()
     if (vitals && Object.keys(vitals).length > 0) event.vitals = vitals
 
+    // 插件增强：回放插件在这里把事件流挂到事件上
+    runPluginEnrich(this.installedPlugins, event)
+
     return event
   }
 
@@ -517,6 +493,16 @@ export class VigilClient {
     this.closed = true
     this.queue.stop()
     this.teardown()
+
+    for (const plugin of this.installedPlugins) {
+      try {
+        plugin.teardown?.()
+      } catch (error) {
+        console.warn(`[vigil] 插件 ${plugin.name} 卸载失败:`, error)
+      }
+    }
+    this.installedPlugins = []
+
     this.recorder.clear()
   }
 }

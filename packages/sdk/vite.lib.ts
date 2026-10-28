@@ -35,7 +35,11 @@ export interface LibConfigOptions {
   globalName?: string
 }
 
-export function libConfig(entry: string, name: string, options: LibConfigOptions = {}) {
+export function libConfig(
+  entry: string | Record<string, string>,
+  name: string,
+  options: LibConfigOptions = {}
+) {
   const formats = options.formats ?? ['es']
 
   return defineConfig({
@@ -46,6 +50,8 @@ export function libConfig(entry: string, name: string, options: LibConfigOptions
       minify: 'esbuild',
       emptyOutDir: options.emptyOutDir ?? false,
       lib: {
+        // 传对象时，**键名**就是产物名（`{ replay: 'src/x.ts' }` → `replay.js`）；
+        // 传字符串时 Vite 用**文件名**当产物名（`src/replay-entry.ts` → `replay-entry.js`）
         entry,
         formats,
         name: options.globalName,
