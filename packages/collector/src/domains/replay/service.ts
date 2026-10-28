@@ -50,13 +50,16 @@ export class ReplayService {
   /**
    * 摄入行为事件与会话汇总。
    */
-  ingestBehavior(projectId: number, envelope: BehaviorEnvelope): { accepted: number } {
+  async ingestBehavior(
+    projectId: number,
+    envelope: BehaviorEnvelope
+  ): Promise<{ accepted: number }> {
     const events = envelope.events ?? []
     if (events.length === 0 && !envelope.session) return { accepted: 0 }
 
-    return this.db.transaction(() => {
+    return await this.db.transaction(async () => {
       for (const event of events) {
-        this.db.run(
+        await this.db.run(
           `INSERT INTO behavior_events
              (project_id, session_id, user_id, type, name, url, timestamp, duration_ms, data_json)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -75,7 +78,7 @@ export class ReplayService {
       }
 
       if (envelope.session) {
-        this.upsertSession(projectId, envelope.session)
+        await this.upsertSession(projectId, envelope.session)
       }
 
       return { accepted: events.length }
@@ -87,29 +90,36 @@ export class ReplayService {
    *
    * 全量替换该会话已有的流 —— 客户端送来的永远是**更新更全**的窗口。
    */
-  saveReplay(
+  async saveReplay(
     projectId: number,
     sessionId: string,
     payload: ReplayPayload,
     context: { userId?: string; occurredAt?: number } = {}
-  ): { events: number; bytes: number } {
+  ): Promise<{ events: number; bytes: number }> {
     const events = payload.events ?? []
     if (events.length === 0) return { events: 0, bytes: 0 }
 
     const now = Date.now()
 
-    return this.db.transaction(() => {
+    return await this.db.transaction(async () => {
       // 该会话的旧流作废（客户端送的是更新更全的窗口）
-      this.db.run('DELETE FROM replay_events WHERE project_id = ? AND session_id = ?', [
+      await this.db.run('DELETE FROM replay_events WHERE project_id = ? AND session_id = ?', [
         projectId,
         sessionId
       ])
 
       for (const [seq, event] of events.entries()) {
-        this.db.run(
-          `INSERT OR REPLACE INTO replay_events
+        // `ON CONFLICT DO UPDATE` —— SQLite 3.24+ 与 PG 都支持。
+        // ⚠️ 别用 `INSERT OR REPLACE` —— 那是 SQLite 独有的语法，PG 上直接报错。
+        await this.db.run(
+          `INSERT INTO replay_events
              (project_id, session_id, seq, timestamp, event_type, data_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT (project_id, session_id, seq) DO UPDATE SET
+             timestamp = excluded.timestamp,
+             event_type = excluded.event_type,
+             data_json = excluded.data_json,
+             created_at = excluded.created_at`,
           [
             projectId,
             sessionId,
@@ -128,9 +138,9 @@ export class ReplayService {
       // 错误是立即上报的，行为汇总要等攒批或页面卸载。
       // 只 UPDATE 的话，这一行永远建不出来，
       // 结果是「回放事件在库里，但会话列表里看不到它」。
-      this.ensureSessionRow(projectId, sessionId, context.userId, now, events)
+      await this.ensureSessionRow(projectId, sessionId, context.userId, now, events)
 
-      this.db.run(
+      await this.db.run(
         `UPDATE replay_sessions
          SET replay_events = ?, replay_bytes = ?, replay_updated_at = ?, user_id = COALESCE(user_id, ?)
          WHERE project_id = ? AND session_id = ?`,
@@ -147,14 +157,14 @@ export class ReplayService {
    * 先由回放到达、行为汇总后到的顺序下，
    * 这一步是会话能出现在列表里的前提。
    */
-  private ensureSessionRow(
+  private async ensureSessionRow(
     projectId: number,
     sessionId: string,
     userId: string | undefined,
     now: number,
     events: ReplayEvent[]
-  ): void {
-    const existing = this.db.get<{ id: number }>(
+  ): Promise<void> {
+    const existing = await this.db.get<{ id: number }>(
       'SELECT id FROM replay_sessions WHERE project_id = ? AND session_id = ?',
       [projectId, sessionId]
     )
@@ -163,7 +173,7 @@ export class ReplayService {
     // 起始时间取流的第一个事件 —— 比用「现在」更接近真实会话开始
     const startedAt = events[0]?.timestamp ?? now
 
-    this.db.run(
+    await this.db.run(
       `INSERT INTO replay_sessions
          (project_id, session_id, user_id, started_at, ended_at, duration_ms, page_views, created_at)
        VALUES (?, ?, ?, ?, ?, 0, 0, ?)`,
@@ -172,17 +182,17 @@ export class ReplayService {
   }
 
   /** 写入 / 更新会话汇总 */
-  upsertSession(projectId: number, session: SessionSummary): void {
+  async upsertSession(projectId: number, session: SessionSummary): Promise<void> {
     const ua = parseUserAgent(session.userAgent ?? '')
     const now = Date.now()
 
-    const existing = this.db.get<{ id: number }>(
+    const existing = await this.db.get<{ id: number }>(
       'SELECT id FROM replay_sessions WHERE project_id = ? AND session_id = ?',
       [projectId, session.sessionId]
     )
 
     if (existing) {
-      this.db.run(
+      await this.db.run(
         `UPDATE replay_sessions SET
            user_id = COALESCE(user_id, ?),
            ended_at = ?, duration_ms = ?, page_views = ?,
@@ -210,7 +220,7 @@ export class ReplayService {
       return
     }
 
-    this.db.run(
+    await this.db.run(
       `INSERT INTO replay_sessions
          (project_id, session_id, user_id, started_at, ended_at, duration_ms, page_views,
           entry_page, exit_page, path_json, user_agent, browser, os, device, referrer, created_at)
@@ -237,8 +247,8 @@ export class ReplayService {
   }
 
   /** 累加会话的错误数 */
-  incrementSessionError(projectId: number, sessionId: string): void {
-    this.db.run(
+  async incrementSessionError(projectId: number, sessionId: string): Promise<void> {
+    await this.db.run(
       'UPDATE replay_sessions SET error_count = error_count + 1 WHERE project_id = ? AND session_id = ?',
       [projectId, sessionId]
     )
@@ -249,8 +259,8 @@ export class ReplayService {
   // ==========================================================
 
   /** 取某个会话的回放事件流（按 seq 排序，播放器需要连续） */
-  getReplay(projectId: number, sessionId: string): ReplayEvent[] {
-    const rows = this.db.all<{
+  async getReplay(projectId: number, sessionId: string): Promise<ReplayEvent[]> {
+    const rows = await this.db.all<{
       seq: number
       timestamp: number
       event_type: number
@@ -269,20 +279,21 @@ export class ReplayService {
   }
 
   /** 会话列表 */
-  listSessions(
+  async listSessions(
     projectId: number,
     options: { limit?: number; offset?: number; withReplay?: boolean } = {}
-  ): { total: number; sessions: Array<Record<string, unknown>> } {
+  ): Promise<{ total: number; sessions: Array<Record<string, unknown>> }> {
     const limit = options.limit ?? 50
     const offset = options.offset ?? 0
 
     const total = (
-      this.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM replay_sessions WHERE project_id = ?', [
-        projectId
-      ]) as { n: number }
+      (await this.db.get<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM replay_sessions WHERE project_id = ?',
+        [projectId]
+      )) as { n: number }
     ).n
 
-    const rows = this.db.all<{
+    const rows = await this.db.all<{
       session_id: string
       user_id: string | null
       started_at: number
@@ -339,10 +350,10 @@ export class ReplayService {
    *
    * 全部在 SQL 里聚合 —— 数据量大时把明细拉回 Node 再统计是自杀。
    */
-  summary(
+  async summary(
     projectId: number,
     options: { since?: number; until?: number; tzOffsetMinutes?: number } = {}
-  ): BehaviorSummary {
+  ): Promise<BehaviorSummary> {
     const conditions = ['project_id = ?']
     const params: unknown[] = [projectId]
 
@@ -356,7 +367,7 @@ export class ReplayService {
     }
     const where = conditions.join(' AND ')
 
-    const totals = this.db.get<{
+    const totals = (await this.db.get<{
       page_views: number
       sessions: number
       users: number
@@ -369,9 +380,9 @@ export class ReplayService {
          COALESCE(AVG(duration_ms), 0) AS avg_duration
        FROM behavior_events WHERE ${where}`,
       params
-    )!
+    ))!
 
-    const topPages = this.db.all<{
+    const topPages = await this.db.all<{
       name: string
       views: number
       avg_duration: number
@@ -382,7 +393,7 @@ export class ReplayService {
       params
     )
 
-    const clicks = this.db.all<{ name: string; count: number }>(
+    const clicks = await this.db.all<{ name: string; count: number }>(
       `SELECT name, COUNT(*) AS count
        FROM behavior_events WHERE ${where} AND type = 'click'
        GROUP BY name ORDER BY count DESC LIMIT 20`,
@@ -397,21 +408,21 @@ export class ReplayService {
     }
     const sessionWhere = sessionConditions.join(' AND ')
 
-    const entryPages = this.db.all<{ path: string; count: number }>(
+    const entryPages = await this.db.all<{ path: string; count: number }>(
       `SELECT entry_page AS path, COUNT(*) AS count
        FROM replay_sessions WHERE ${sessionWhere} AND entry_page IS NOT NULL
        GROUP BY entry_page ORDER BY count DESC LIMIT 10`,
       sessionParams
     )
 
-    const exitPages = this.db.all<{ path: string; count: number }>(
+    const exitPages = await this.db.all<{ path: string; count: number }>(
       `SELECT exit_page AS path, COUNT(*) AS count
        FROM replay_sessions WHERE ${sessionWhere} AND exit_page IS NOT NULL
        GROUP BY exit_page ORDER BY count DESC LIMIT 10`,
       sessionParams
     )
 
-    const trend = this.db.all<{ day: number; views: number; sessions: number }>(
+    const trend = await this.db.all<{ day: number; views: number; sessions: number }>(
       `SELECT ${bucketExpr('timestamp', DAY_MS, options.tzOffsetMinutes)} AS day,
               COUNT(*) AS views,
               COUNT(DISTINCT session_id) AS sessions
@@ -421,7 +432,7 @@ export class ReplayService {
     )
 
     // 访问路径：从会话的 path_json 聚合
-    const pathRows = this.db.all<{ path_json: string | null }>(
+    const pathRows = await this.db.all<{ path_json: string | null }>(
       `SELECT path_json FROM replay_sessions WHERE ${sessionWhere} AND path_json IS NOT NULL`,
       sessionParams
     )
@@ -438,7 +449,7 @@ export class ReplayService {
       .slice(0, 10)
 
     // 跳出率：只访问了一个页面的会话占比
-    const bounceRows = this.db.all<{ page_views: number }>(
+    const bounceRows = await this.db.all<{ page_views: number }>(
       `SELECT page_views FROM replay_sessions WHERE ${sessionWhere}`,
       sessionParams
     )
@@ -468,8 +479,8 @@ export class ReplayService {
   }
 
   /** 某个会话的行为明细（时间线） */
-  listSessionEvents(projectId: number, sessionId: string): BehaviorEvent[] {
-    const rows = this.db.all<{
+  async listSessionEvents(projectId: number, sessionId: string): Promise<BehaviorEvent[]> {
+    const rows = await this.db.all<{
       type: string
       name: string
       url: string | null

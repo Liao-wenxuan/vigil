@@ -101,16 +101,16 @@ export class PerformanceService {
   /**
    * 摄入一个性能事务及其 span。
    */
-  ingestTransaction(
+  async ingestTransaction(
     projectId: number,
     event: PerformanceEvent,
     context: { environmentId?: number; releaseId?: number } = {}
-  ): { transactionId: number; spans: number } {
+  ): Promise<{ transactionId: number; spans: number }> {
     const ua = parseUserAgent(event.userAgent ?? '')
     const receivedAt = Date.now()
 
-    return this.db.transaction(() => {
-      this.db.run(
+    return await this.db.transaction(async () => {
+      const insertedId = await this.db.insert(
         `INSERT INTO transactions
            (project_id, environment_id, release_id, name, type, duration_ms,
             fcp, lcp, cls, inp, ttfb, tbt, long_task_count,
@@ -150,13 +150,11 @@ export class PerformanceService {
         ]
       )
 
-      const transactionId = Number(
-        this.db.get<{ id: number }>('SELECT last_insert_rowid() AS id')?.id ?? 0
-      )
+      const transactionId = insertedId
 
       let spanCount = 0
       for (const span of event.spans ?? []) {
-        this.db.run(
+        await this.db.run(
           `INSERT INTO spans
              (transaction_id, project_id, name, type, duration_ms, started_at,
               status_code, url, size_bytes, initiator_type)
@@ -183,7 +181,9 @@ export class PerformanceService {
   }
 
   /** 事务列表 */
-  listTransactions(query: PerformanceQuery): { total: number; transactions: TransactionRow[] } {
+  async listTransactions(
+    query: PerformanceQuery
+  ): Promise<{ total: number; transactions: TransactionRow[] }> {
     const conditions = ['project_id = ?']
     const params: unknown[] = [query.projectId]
 
@@ -211,10 +211,10 @@ export class PerformanceService {
     const where = conditions.join(' AND ')
 
     const total = (
-      this.db.get<{ n: number }>(
+      (await this.db.get<{ n: number }>(
         `SELECT COUNT(*) AS n FROM transactions WHERE ${where}`,
         params
-      ) as {
+      )) as {
         n: number
       }
     ).n
@@ -222,7 +222,7 @@ export class PerformanceService {
     const limit = query.limit ?? 50
     const offset = query.offset ?? 0
 
-    const transactions = this.db.all<TransactionRow>(
+    const transactions = await this.db.all<TransactionRow>(
       `SELECT * FROM transactions WHERE ${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     )
@@ -233,7 +233,7 @@ export class PerformanceService {
   /**
    * 性能汇总：分位数 + 分页面 + 最慢接口。
    */
-  summary(query: PerformanceQuery): PerformanceSummary {
+  async summary(query: PerformanceQuery): Promise<PerformanceSummary> {
     const conditions = ['project_id = ?']
     const params: unknown[] = [query.projectId]
 
@@ -256,7 +256,7 @@ export class PerformanceService {
 
     const where = conditions.join(' AND ')
 
-    const rows = this.db.all<{
+    const rows = await this.db.all<{
       fcp: number | null
       lcp: number | null
       cls: number | null
@@ -311,7 +311,7 @@ export class PerformanceService {
       spanParams.push(query.release)
     }
 
-    const spanRows = this.db.all<{
+    const spanRows = await this.db.all<{
       name: string
       type: string
       duration_ms: number
@@ -346,7 +346,7 @@ export class PerformanceService {
       .sort((a, b) => b.p95 - a.p95)
       .slice(0, 15)
 
-    const slowTransactions = this.db.all<{
+    const slowTransactions = await this.db.all<{
       id: number
       name: string
       duration_ms: number
@@ -380,10 +380,10 @@ export class PerformanceService {
    *
    * 这张表能回答「这个错误是不是拖慢了这页」。
    */
-  errorPerformanceCorrelation(
+  async errorPerformanceCorrelation(
     projectId: number,
     since?: number
-  ): Array<{ fingerprint: string; title: string; count: number; avgLcp: number | null }> {
+  ): Promise<Array<{ fingerprint: string; title: string; count: number; avgLcp: number | null }>> {
     const conditions = ['e.project_id = ?']
     const params: unknown[] = [projectId]
 
@@ -392,7 +392,7 @@ export class PerformanceService {
       params.push(since)
     }
 
-    return this.db.all(
+    return await this.db.all(
       `SELECT i.fingerprint,
               i.title,
               COUNT(*) AS count,

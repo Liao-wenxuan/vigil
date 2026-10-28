@@ -16,7 +16,7 @@ const port = Number(process.env.PORT ?? 4318)
 const host = process.env.HOST ?? '0.0.0.0'
 const adminTokenGenerated = !process.env.VIGIL_ADMIN_TOKEN
 
-const { app, db, evaluator } = createAppFromEnv()
+const { app, db, evaluator } = await createAppFromEnv()
 
 try {
   await app.listen({ port, host })
@@ -38,15 +38,15 @@ try {
 const alertIntervalSeconds = Number(process.env.VIGIL_ALERT_INTERVAL ?? 60)
 
 if (alertIntervalSeconds > 0) {
-  const timer = setInterval(() => {
-    void evaluator
+  const timer = setInterval(async () => {
+    void (await evaluator
       .evaluateAll()
       .then((result) => {
         if (result.triggered > 0) {
           console.log(`[vigil] 告警评估：${result.evaluated} 条规则，触发 ${result.triggered} 次`)
         }
       })
-      .catch((error) => console.error('[vigil] 告警评估失败:', error))
+      .catch((error) => console.error('[vigil] 告警评估失败:', error)))
   }, alertIntervalSeconds * 1000)
 
   // 不要因为定时器而阻止进程退出
@@ -55,7 +55,7 @@ if (alertIntervalSeconds > 0) {
 
 const shutdown = async () => {
   await app.close()
-  db.close()
+  await db.close()
   process.exit(0)
 }
 

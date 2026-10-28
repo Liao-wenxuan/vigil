@@ -63,46 +63,56 @@ export class SourcemapResolver {
    * 任何一步失败都**降级返回原帧**，绝不抛异常 ——
    * 还原是锦上添花，不能因为它把整条错误弄丢了。
    */
-  resolve(projectId: number, release: string | undefined, frames: StackFrame[]): ResolvedFrame[] {
+  async resolve(
+    projectId: number,
+    release: string | undefined,
+    frames: StackFrame[]
+  ): Promise<ResolvedFrame[]> {
     if (!release || frames.length === 0) {
       return frames.map((frame) => ({ ...frame }))
     }
 
-    return frames.map((frame) => {
-      const traceMap = this.getTraceMap(projectId, release, frame.filename)
-      if (!traceMap) return { ...frame }
-      if (frame.lineno === undefined) return { ...frame }
+    return await Promise.all(
+      frames.map(async (frame) => {
+        const traceMap = await this.getTraceMap(projectId, release, frame.filename)
+        if (!traceMap) return { ...frame }
+        if (frame.lineno === undefined) return { ...frame }
 
-      try {
-        const position = originalPositionFor(traceMap, {
-          line: frame.lineno,
-          // JS 栈列号 1-based → sourcemap 0-based
-          column: Math.max(0, (frame.colno ?? 1) - 1)
-        })
+        try {
+          const position = originalPositionFor(traceMap, {
+            line: frame.lineno,
+            // JS 栈列号 1-based → sourcemap 0-based
+            column: Math.max(0, (frame.colno ?? 1) - 1)
+          })
 
-        if (position.line === null || position.column === null) {
+          if (position.line === null || position.column === null) {
+            return { ...frame }
+          }
+
+          return {
+            ...frame,
+            original: {
+              filename: position.source ?? frame.filename,
+              lineno: position.line,
+              // sourcemap 0-based → 展示用 1-based
+              colno: position.column + 1,
+              functionName: position.name ?? frame.functionName,
+              source: position.source ?? undefined
+            }
+          }
+        } catch {
           return { ...frame }
         }
-
-        return {
-          ...frame,
-          original: {
-            filename: position.source ?? frame.filename,
-            lineno: position.line,
-            // sourcemap 0-based → 展示用 1-based
-            colno: position.column + 1,
-            functionName: position.name ?? frame.functionName,
-            source: position.source ?? undefined
-          }
-        }
-      } catch {
-        return { ...frame }
-      }
-    })
+      })
+    )
   }
 
   /** 取（并缓存）某个文件对应的 TraceMap */
-  private getTraceMap(projectId: number, release: string, filename: string): TraceMap | undefined {
+  private async getTraceMap(
+    projectId: number,
+    release: string,
+    filename: string
+  ): Promise<TraceMap | undefined> {
     const base = basename(filename)
     if (!base) return undefined
 
@@ -110,7 +120,7 @@ export class SourcemapResolver {
     const cached = this.cache.get(cacheKey)
     if (cached) return cached
 
-    const row = this.db.get<{ map_json: string }>(
+    const row = await this.db.get<{ map_json: string }>(
       `SELECT map_json FROM sourcemaps
        WHERE project_id = ? AND release_id IN (
          SELECT id FROM releases WHERE project_id = ? AND version = ?
@@ -149,14 +159,14 @@ export class SourcemapResolver {
  *
  * 同一个 (项目, 版本, 文件) 重复上传时覆盖 —— CI 重跑是常态。
  */
-export function saveSourcemap(
+export async function saveSourcemap(
   db: Db,
   projectId: number,
   releaseId: number | null,
   fileName: string,
   mapJson: string
-): void {
-  db.run(
+): Promise<void> {
+  await db.run(
     `INSERT INTO sourcemaps (project_id, release_id, file_name, base_name, map_json, uploaded_at)
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(project_id, release_id, file_name)

@@ -60,7 +60,7 @@ class WebhookSender implements ChannelSender {
 
   async send(config: ChannelConfig, message: AlertMessage): Promise<SendResult> {
     if (!config.url) return { ok: false, error: '缺少 webhook 地址' }
-    return postJson(config.url, {
+    return await postJson(config.url, {
       title: message.title,
       body: message.body,
       issueId: message.issueId,
@@ -77,7 +77,7 @@ class FeishuSender implements ChannelSender {
 
   async send(config: ChannelConfig, message: AlertMessage): Promise<SendResult> {
     if (!config.url) return { ok: false, error: '缺少飞书机器人 webhook' }
-    return postJson(config.url, {
+    return await postJson(config.url, {
       msg_type: 'text',
       content: { text: `${message.title}\n${message.body}` }
     })
@@ -90,7 +90,7 @@ class DingtalkSender implements ChannelSender {
 
   async send(config: ChannelConfig, message: AlertMessage): Promise<SendResult> {
     if (!config.url) return { ok: false, error: '缺少钉钉机器人 webhook' }
-    return postJson(config.url, {
+    return await postJson(config.url, {
       msgtype: 'text',
       text: { content: `${message.title}\n${message.body}` }
     })
@@ -145,7 +145,7 @@ class SlackSender implements ChannelSender {
 
   async send(config: ChannelConfig, message: AlertMessage): Promise<SendResult> {
     if (!config.url) return { ok: false, error: '缺少 Slack webhook' }
-    return postJson(config.url, {
+    return await postJson(config.url, {
       text: `*${message.title}*\n${message.body}`
     })
   }

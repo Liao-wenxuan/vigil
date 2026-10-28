@@ -37,7 +37,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const dbPath =
   argValue('db') ?? process.env.VIGIL_DB_PATH ?? path.join(REPO_ROOT, 'data', 'vigil.db')
 
-const db = openDb(dbPath)
+const db = await openDb(dbPath)
 const tenancy = new TenancyService(db)
 
 function printUsage(): void {
@@ -62,12 +62,12 @@ try {
           console.error('缺少组织名称')
           process.exit(1)
         }
-        const organization = tenancy.createOrganization(name)
+        const organization = await tenancy.createOrganization(name)
         console.log(
           `组织已创建：id=${organization.id} slug=${organization.slug} name=${organization.name}`
         )
       } else if (sub === 'list') {
-        for (const org of tenancy.listOrganizations()) {
+        for (const org of await tenancy.listOrganizations()) {
           console.log(`${org.id}\t${org.slug}\t${org.name}`)
         }
       } else {
@@ -84,7 +84,7 @@ try {
           console.error('用法：project create <组织ID> <名称>')
           process.exit(1)
         }
-        const created = tenancy.createProject({ organizationId, name })
+        const created = await tenancy.createProject({ organizationId, name })
         console.log(`项目已创建：id=${created.project.id} slug=${created.project.slug}`)
         console.log('')
         console.log('  运行时密钥（上报用，会进前端代码）：')
@@ -95,7 +95,7 @@ try {
         console.log('⚠️  两个密钥只显示这一次，数据库里只存哈希。')
       } else if (sub === 'list') {
         const organizationId = Number(args[2])
-        for (const project of tenancy.listProjects(organizationId)) {
+        for (const project of await tenancy.listProjects(organizationId)) {
           console.log(`${project.id}\t${project.slug}\t${project.name}`)
         }
       } else {
@@ -114,7 +114,7 @@ try {
           process.exit(1)
         }
         const isProduction = args.includes('--production')
-        const environment = tenancy.createEnvironment(projectId, slug, name, isProduction)
+        const environment = await tenancy.createEnvironment(projectId, slug, name, isProduction)
         console.log(`环境已创建：id=${environment.id} slug=${environment.slug}`)
       } else {
         printUsage()
@@ -131,7 +131,7 @@ try {
           console.error('用法：release add <项目ID> <版本> [commitSha]')
           process.exit(1)
         }
-        const release = tenancy.createRelease(projectId, version, commitSha)
+        const release = await tenancy.createRelease(projectId, version, commitSha)
         console.log(`版本已登记：id=${release.id} version=${release.version}`)
       } else {
         printUsage()
@@ -140,9 +140,9 @@ try {
     }
 
     case 'list': {
-      for (const org of tenancy.listOrganizations()) {
+      for (const org of await tenancy.listOrganizations()) {
         console.log(`组织 ${org.id}  ${org.name}`)
-        for (const project of tenancy.listProjects(org.id)) {
+        for (const project of await tenancy.listProjects(org.id)) {
           console.log(`  项目 ${project.id}  ${project.name}  (${project.slug})`)
         }
       }
@@ -154,5 +154,5 @@ try {
       process.exit(1)
   }
 } finally {
-  db.close()
+  await db.close()
 }

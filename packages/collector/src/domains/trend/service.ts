@@ -45,7 +45,7 @@ export class TrendService {
    * 没有给窗口时按粒度给一个默认跨度：
    * 按小时看最近 24 小时，按天看最近 30 天。
    */
-  errorTrend(projectId: number, options: TrendOptions = {}): ErrorTrend {
+  async errorTrend(projectId: number, options: TrendOptions = {}): Promise<ErrorTrend> {
     const bucket = options.bucket ?? 'day'
     const bucketMs = bucket === 'hour' ? HOUR : DAY
     const tzOffset = options.tzOffsetMinutes ?? 0
@@ -54,7 +54,7 @@ export class TrendService {
     const since = options.since ?? until - (bucket === 'hour' ? 24 * HOUR : 30 * DAY)
 
     // ---- 错误桶 ----
-    const errorRows = this.db.all<{
+    const errorRows = await this.db.all<{
       bucket: number
       occurrences: number
       users: number
@@ -71,7 +71,7 @@ export class TrendService {
     )
 
     // ---- 新增问题桶 ----
-    const newRows = this.db.all<{ bucket: number; n: number }>(
+    const newRows = await this.db.all<{ bucket: number; n: number }>(
       `SELECT ${bucketExpr('first_seen', bucketMs, tzOffset)} AS bucket, COUNT(*) AS n
        FROM issues
        WHERE project_id = ? AND first_seen >= ? AND first_seen < ?
@@ -80,7 +80,7 @@ export class TrendService {
     )
 
     // ---- 页面访问桶（错误率的分母）----
-    const txRows = this.db.all<{ bucket: number; n: number }>(
+    const txRows = await this.db.all<{ bucket: number; n: number }>(
       `SELECT ${bucketExpr('started_at', bucketMs, tzOffset)} AS bucket, COUNT(*) AS n
        FROM transactions
        WHERE project_id = ? AND started_at >= ? AND started_at < ?

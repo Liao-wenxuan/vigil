@@ -57,7 +57,7 @@ export class AlertEvaluator {
   async evaluateAll(now = Date.now()): Promise<EvaluationResult> {
     const result: EvaluationResult = { evaluated: 0, triggered: 0, skipped: 0, failed: 0 }
 
-    const rules = this.db.all<{ project_id: number }>(
+    const rules = await this.db.all<{ project_id: number }>(
       'SELECT DISTINCT project_id FROM alert_rules WHERE enabled = 1'
     )
 
@@ -76,7 +76,7 @@ export class AlertEvaluator {
   async evaluateProject(projectId: number, now = Date.now()): Promise<EvaluationResult> {
     const result: EvaluationResult = { evaluated: 0, triggered: 0, skipped: 0, failed: 0 }
 
-    const rules = this.alerting.listRules(projectId).filter((rule) => rule.enabled)
+    const rules = (await this.alerting.listRules(projectId)).filter((rule) => rule.enabled)
 
     for (const rule of rules) {
       result.evaluated++
@@ -104,17 +104,17 @@ export class AlertEvaluator {
 
     switch (rule.type) {
       case 'issue.new':
-        return this.evaluateIssueNew(rule, windowStart, now)
+        return await this.evaluateIssueNew(rule, windowStart, now)
       case 'issue.count':
-        return this.evaluateIssueCount(rule, windowStart, now)
+        return await this.evaluateIssueCount(rule, windowStart, now)
       case 'issue.spike':
-        return this.evaluateIssueSpike(rule, windowStart, now)
+        return await this.evaluateIssueSpike(rule, windowStart, now)
       case 'metric.error_count':
-        return this.evaluateErrorCount(rule, windowStart, now)
+        return await this.evaluateErrorCount(rule, windowStart, now)
       case 'metric.error_rate':
-        return this.evaluateErrorRate(rule, windowStart, now)
+        return await this.evaluateErrorRate(rule, windowStart, now)
       case 'metric.lcp_p95':
-        return this.evaluateLcpP95(rule, windowStart, now)
+        return await this.evaluateLcpP95(rule, windowStart, now)
       default:
         return 0
     }
@@ -128,7 +128,7 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const subjects = this.loadIssues(rule.projectId, windowStart)
+    const subjects = (await this.loadIssues(rule.projectId, windowStart))
       .filter((issue) => issue.status === 'unresolved')
       .filter((issue) => issue.windowCount > 0)
       .filter((issue) => this.matchesConditions(issue, rule.conditions))
@@ -155,7 +155,7 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const subjects = this.loadIssues(rule.projectId, windowStart)
+    const subjects = (await this.loadIssues(rule.projectId, windowStart))
       .filter((issue) => issue.windowCount >= rule.threshold)
       .filter((issue) => this.matchesConditions(issue, rule.conditions))
 
@@ -179,13 +179,13 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const subjects = this.loadIssues(rule.projectId, windowStart)
+    const subjects = (await this.loadIssues(rule.projectId, windowStart))
       .filter((issue) => issue.windowCount > 0)
       .filter((issue) => this.matchesConditions(issue, rule.conditions))
 
     let triggered = 0
     for (const issue of subjects) {
-      const baseline = this.baselineFor(issue.id, now)
+      const baseline = await this.baselineFor(issue.id, now)
 
       // 没有历史就没有基线 —— 不拿固定阈值硬套，
       // 否则新项目上线第一天就会满屏告警
@@ -213,7 +213,7 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const row = this.db.get<{ n: number }>(
+    const row = await this.db.get<{ n: number }>(
       'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ? AND occurred_at >= ?',
       [rule.projectId, windowStart]
     )
@@ -236,14 +236,14 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const errors = this.db.get<{ n: number }>(
+    const errors = await this.db.get<{ n: number }>(
       'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ? AND occurred_at >= ?',
       [rule.projectId, windowStart]
     )
     const errorCount = errors?.n ?? 0
 
     // 分母用会话数（去重的 session_id）
-    const sessions = this.db.get<{ n: number }>(
+    const sessions = await this.db.get<{ n: number }>(
       'SELECT COUNT(DISTINCT session_id) AS n FROM transactions WHERE project_id = ? AND started_at >= ?',
       [rule.projectId, windowStart]
     )
@@ -267,7 +267,7 @@ export class AlertEvaluator {
   // metric.lcp_p95 —— LCP P95 超阈值
   // ==========================================================
   private async evaluateLcpP95(rule: AlertRule, windowStart: number, now: number): Promise<number> {
-    const rows = this.db.all<{ lcp: number | null }>(
+    const rows = await this.db.all<{ lcp: number | null }>(
       'SELECT lcp FROM transactions WHERE project_id = ? AND started_at >= ? AND lcp IS NOT NULL',
       [rule.projectId, windowStart]
     )
@@ -291,9 +291,9 @@ export class AlertEvaluator {
   /**
    * 载入窗口内有发生的问题，并附上窗口内计数。
    */
-  private loadIssues(projectId: number, windowStart: number): IssueSubject[] {
-    return this.db
-      .all<{
+  private async loadIssues(projectId: number, windowStart: number): Promise<IssueSubject[]> {
+    return (
+      await this.db.all<{
         id: number
         short_id: string
         fingerprint: string
@@ -318,22 +318,22 @@ export class AlertEvaluator {
          WHERE i.project_id = ?`,
         [windowStart, projectId]
       )
-      .map((row) => ({
-        id: row.id,
-        shortId: row.short_id,
-        fingerprint: row.fingerprint,
-        title: row.title,
-        level: row.level,
-        category: row.category,
-        environment: row.environment,
-        release: row.release,
-        assigneeId: row.assignee_id,
-        count: row.count,
-        userCount: row.user_count,
-        status: row.status,
-        substatus: row.substatus,
-        windowCount: row.window_count
-      }))
+    ).map((row) => ({
+      id: row.id,
+      shortId: row.short_id,
+      fingerprint: row.fingerprint,
+      title: row.title,
+      level: row.level,
+      category: row.category,
+      environment: row.environment,
+      release: row.release,
+      assigneeId: row.assignee_id,
+      count: row.count,
+      userCount: row.user_count,
+      status: row.status,
+      substatus: row.substatus,
+      windowCount: row.window_count
+    }))
   }
 
   /**
@@ -341,10 +341,10 @@ export class AlertEvaluator {
    *
    * 没有历史时返回 undefined —— 调用方据此跳过突增判定。
    */
-  private baselineFor(issueId: number, now: number): number | undefined {
+  private async baselineFor(issueId: number, now: number): Promise<number | undefined> {
     const sevenDaysAgo = now - 7 * 24 * 3600 * 1000
 
-    const row = this.db.get<{ n: number; days: number }>(
+    const row = await this.db.get<{ n: number; days: number }>(
       `SELECT COUNT(*) AS n,
               COUNT(DISTINCT CAST(occurred_at / 86400000 AS INTEGER)) AS days
        FROM issue_events
@@ -391,19 +391,23 @@ export class AlertEvaluator {
     const windowIndex = Math.floor(now / (rule.windowSeconds * 1000))
     const dedupeKey = `${rule.id}:${issue?.id ?? 'project'}:${windowIndex}`
 
-    if (!this.alerting.shouldTrigger(dedupeKey)) {
+    if (!(await this.alerting.shouldTrigger(dedupeKey))) {
       return false
     }
 
-    const channels = rule.channelIds
-      .map((id) => {
-        try {
-          return this.alerting.getChannel(id)
-        } catch {
-          return undefined
-        }
-      })
-      .filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
+    // 通道是**逐个取**的（一个通道发失败不影响别的），
+    // 所以先并发取回来，再逐个发。
+    const channels = (
+      await Promise.all(
+        rule.channelIds.map(async (id) => {
+          try {
+            return await this.alerting.getChannel(id)
+          } catch {
+            return undefined
+          }
+        })
+      )
+    ).filter((channel): channel is NonNullable<typeof channel> => Boolean(channel))
 
     const fullMessage: AlertMessage = {
       ...message,
@@ -413,13 +417,14 @@ export class AlertEvaluator {
     }
 
     const results = await Promise.all(
-      channels.map((channel) =>
-        getSender(channel.type).send(channel.config as ChannelConfig, fullMessage)
+      channels.map(
+        async (channel) =>
+          await getSender(channel.type).send(channel.config as ChannelConfig, fullMessage)
       )
     )
 
     // 即使通道全失败也要记录 —— 否则下次评估会重复发
-    this.alerting.recordIncident({
+    await this.alerting.recordIncident({
       ruleId: rule.id,
       projectId: rule.projectId,
       issueId: issue?.id,

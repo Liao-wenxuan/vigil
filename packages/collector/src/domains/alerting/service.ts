@@ -17,7 +17,7 @@ export class AlertingService {
 
   // ---- 规则 ----
 
-  createRule(input: {
+  async createRule(input: {
     projectId: number
     name: string
     type: AlertRule['type']
@@ -26,10 +26,10 @@ export class AlertingService {
     windowSeconds?: number
     channelIds?: number[]
     createdBy?: number
-  }): AlertRule {
+  }): Promise<AlertRule> {
     const now = Date.now()
 
-    this.db.run(
+    const insertedId = await this.db.insert(
       `INSERT INTO alert_rules
          (project_id, name, type, conditions_json, threshold, window_seconds,
           channel_ids_json, enabled, created_by, created_at, updated_at)
@@ -48,11 +48,11 @@ export class AlertingService {
       ]
     )
 
-    return this.getRule(Number(lastId(this.db)))
+    return await this.getRule(insertedId)
   }
 
-  getRule(id: number): AlertRule {
-    const row = this.db.get<{
+  async getRule(id: number): Promise<AlertRule> {
+    const row = await this.db.get<{
       id: number
       project_id: number
       name: string
@@ -71,16 +71,16 @@ export class AlertingService {
     return toRule(row)
   }
 
-  listRules(projectId: number): AlertRule[] {
-    return this.db
-      .all<Parameters<typeof toRule>[0]>(
+  async listRules(projectId: number): Promise<AlertRule[]> {
+    return (
+      await this.db.all<Parameters<typeof toRule>[0]>(
         'SELECT * FROM alert_rules WHERE project_id = ? ORDER BY id',
         [projectId]
       )
-      .map(toRule)
+    ).map(toRule)
   }
 
-  updateRule(
+  async updateRule(
     id: number,
     patch: Partial<{
       name: string
@@ -91,11 +91,11 @@ export class AlertingService {
       channelIds: number[]
       enabled: boolean
     }>
-  ): AlertRule {
-    const current = this.getRule(id)
+  ): Promise<AlertRule> {
+    const current = await this.getRule(id)
     const now = Date.now()
 
-    this.db.run(
+    await this.db.run(
       `UPDATE alert_rules SET
          name = ?, type = ?, conditions_json = ?, threshold = ?, window_seconds = ?,
          channel_ids_json = ?, enabled = ?, updated_at = ?
@@ -113,30 +113,30 @@ export class AlertingService {
       ]
     )
 
-    return this.getRule(id)
+    return await this.getRule(id)
   }
 
-  deleteRule(id: number): void {
-    this.db.run('DELETE FROM alert_rules WHERE id = ?', [id])
+  async deleteRule(id: number): Promise<void> {
+    await this.db.run('DELETE FROM alert_rules WHERE id = ?', [id])
   }
 
   // ---- 通道 ----
 
-  createChannel(input: {
+  async createChannel(input: {
     projectId: number
     name: string
     type: ChannelType
     config: Record<string, unknown>
-  }): NotificationChannel {
-    this.db.run(
+  }): Promise<NotificationChannel> {
+    const insertedId = await this.db.insert(
       'INSERT INTO notification_channels (project_id, name, type, config_json, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',
       [input.projectId, input.name, input.type, writeJson(input.config), Date.now()]
     )
-    return this.getChannel(Number(lastId(this.db)))
+    return await this.getChannel(insertedId)
   }
 
-  getChannel(id: number): NotificationChannel {
-    const row = this.db.get<{
+  async getChannel(id: number): Promise<NotificationChannel> {
+    const row = await this.db.get<{
       id: number
       project_id: number
       name: string
@@ -150,16 +150,16 @@ export class AlertingService {
     return toChannel(row)
   }
 
-  listChannels(projectId: number): NotificationChannel[] {
-    return this.db
-      .all<Parameters<typeof toChannel>[0]>(
+  async listChannels(projectId: number): Promise<NotificationChannel[]> {
+    return (
+      await this.db.all<Parameters<typeof toChannel>[0]>(
         'SELECT * FROM notification_channels WHERE project_id = ? ORDER BY id',
         [projectId]
       )
-      .map(toChannel)
+    ).map(toChannel)
   }
 
-  updateChannel(
+  async updateChannel(
     id: number,
     patch: Partial<{
       name: string
@@ -167,10 +167,10 @@ export class AlertingService {
       config: Record<string, unknown>
       enabled: boolean
     }>
-  ): NotificationChannel {
-    const current = this.getChannel(id)
+  ): Promise<NotificationChannel> {
+    const current = await this.getChannel(id)
 
-    this.db.run(
+    await this.db.run(
       'UPDATE notification_channels SET name = ?, type = ?, config_json = ?, enabled = ? WHERE id = ?',
       [
         patch.name ?? current.name,
@@ -181,11 +181,11 @@ export class AlertingService {
       ]
     )
 
-    return this.getChannel(id)
+    return await this.getChannel(id)
   }
 
-  deleteChannel(id: number): void {
-    this.db.run('DELETE FROM notification_channels WHERE id = ?', [id])
+  async deleteChannel(id: number): Promise<void> {
+    await this.db.run('DELETE FROM notification_channels WHERE id = ?', [id])
   }
 
   // ---- 触发记录 ----
@@ -199,24 +199,25 @@ export class AlertingService {
    * 去重键里带**时间窗编号**，窗口一过就允许重新触发 ——
    * 这正是我们想要的：持续恶化的问题每个窗口都会再提醒一次。
    */
-  shouldTrigger(dedupeKey: string): boolean {
-    const existing = this.db.get<{ id: number }>(
+  async shouldTrigger(dedupeKey: string): Promise<boolean> {
+    const existing = await this.db.get<{ id: number }>(
       'SELECT id FROM alert_incidents WHERE dedupe_key = ? ORDER BY triggered_at DESC LIMIT 1',
       [dedupeKey]
     )
     return !existing
   }
 
-  recordIncident(input: {
+  async recordIncident(input: {
     ruleId: number
     projectId: number
     issueId?: number
     dedupeKey: string
     payload: Record<string, unknown>
-  }): AlertIncident {
+  }): Promise<AlertIncident> {
     const now = Date.now()
 
-    this.db.run(
+    // `RETURNING id` —— SQLite 3.35+ 与 PG 都支持
+    const id = await this.db.insert(
       `INSERT INTO alert_incidents
          (rule_id, project_id, issue_id, status, triggered_at, dedupe_key, payload_json)
        VALUES (?, ?, ?, 'triggered', ?, ?, ?)`,
@@ -231,7 +232,7 @@ export class AlertingService {
     )
 
     return {
-      id: Number(lastId(this.db)),
+      id,
       ruleId: input.ruleId,
       projectId: input.projectId,
       issueId: input.issueId,
@@ -242,33 +243,33 @@ export class AlertingService {
     }
   }
 
-  listIncidents(projectId: number, limit = 50): AlertIncident[] {
-    return this.db
-      .all<{
-        id: number
-        rule_id: number
-        project_id: number
-        issue_id: number | null
-        status: string
-        triggered_at: number
-        resolved_at: number | null
-        dedupe_key: string
-        payload_json: string | null
-      }>('SELECT * FROM alert_incidents WHERE project_id = ? ORDER BY triggered_at DESC LIMIT ?', [
-        projectId,
-        limit
-      ])
-      .map((row) => ({
-        id: row.id,
-        ruleId: row.rule_id,
-        projectId: row.project_id,
-        issueId: row.issue_id ?? undefined,
-        status: row.status as AlertIncident['status'],
-        triggeredAt: row.triggered_at,
-        resolvedAt: row.resolved_at ?? undefined,
-        dedupeKey: row.dedupe_key,
-        payload: readJson<Record<string, unknown>>(row.payload_json) ?? {}
-      }))
+  async listIncidents(projectId: number, limit = 50): Promise<AlertIncident[]> {
+    const rows = await this.db.all<{
+      id: number
+      rule_id: number
+      project_id: number
+      issue_id: number | null
+      status: string
+      triggered_at: number
+      resolved_at: number | null
+      dedupe_key: string
+      payload_json: string | null
+    }>('SELECT * FROM alert_incidents WHERE project_id = ? ORDER BY triggered_at DESC LIMIT ?', [
+      projectId,
+      limit
+    ])
+
+    return rows.map((row) => ({
+      id: row.id,
+      ruleId: row.rule_id,
+      projectId: row.project_id,
+      issueId: row.issue_id ?? undefined,
+      status: row.status as AlertIncident['status'],
+      triggeredAt: row.triggered_at,
+      resolvedAt: row.resolved_at ?? undefined,
+      dedupeKey: row.dedupe_key,
+      payload: readJson<Record<string, unknown>>(row.payload_json) ?? {}
+    }))
   }
 }
 
@@ -320,9 +321,4 @@ function toChannel(row: {
     config: readJson<Record<string, unknown>>(row.config_json) ?? {},
     createdAt: row.created_at
   }
-}
-
-export function lastId(db: Db): number {
-  const row = db.get<{ id: number }>('SELECT last_insert_rowid() AS id')
-  return row?.id ?? 0
 }

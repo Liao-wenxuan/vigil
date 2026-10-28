@@ -44,27 +44,27 @@ export class IngestionPipeline {
   /**
    * 摄入错误事件。
    */
-  ingestErrors(project: ProjectRow, envelope: CollectEnvelope): IngestResult {
+  async ingestErrors(project: ProjectRow, envelope: CollectEnvelope): Promise<IngestResult> {
     const events = envelope.events ?? []
     if (events.length === 0) return { accepted: 0, dropped: 0 }
 
-    this.checkQuota(project, events.length)
+    await this.checkQuota(project, events.length)
 
     const ids: Record<string, number> = {}
     let accepted = 0
 
     for (const [index, event] of events.entries()) {
-      const outcome = this.issues.ingestEvent(project.id, event)
+      const outcome = await this.issues.ingestEvent(project.id, event)
       ids[String(index)] = outcome.issueId
       accepted++
 
       // 会话回放：随错误一起送来的事件流
       if (event.replay && event.sessionId) {
-        this.replay.saveReplay(project.id, event.sessionId, event.replay, {
+        await this.replay.saveReplay(project.id, event.sessionId, event.replay, {
           userId: event.userId,
           occurredAt: event.occurredAt
         })
-        this.replay.incrementSessionError(project.id, event.sessionId)
+        await this.replay.incrementSessionError(project.id, event.sessionId)
       }
     }
 
@@ -74,27 +74,33 @@ export class IngestionPipeline {
   /**
    * 摄入行为事件（PV / 路由 / 点击 + 会话汇总）。
    */
-  ingestBehavior(project: ProjectRow, envelope: BehaviorEnvelope): IngestResult {
-    const result = this.replay.ingestBehavior(project.id, envelope)
+  async ingestBehavior(project: ProjectRow, envelope: BehaviorEnvelope): Promise<IngestResult> {
+    const result = await this.replay.ingestBehavior(project.id, envelope)
     return { accepted: result.accepted, dropped: 0 }
   }
 
   /**
    * 摄入性能事务。
    */
-  ingestPerformance(project: ProjectRow, envelope: PerformanceEnvelope): IngestResult {
+  async ingestPerformance(
+    project: ProjectRow,
+    envelope: PerformanceEnvelope
+  ): Promise<IngestResult> {
     const transactions = envelope.transactions ?? []
     if (transactions.length === 0) return { accepted: 0, dropped: 0 }
 
-    this.checkQuota(project, transactions.length)
+    await this.checkQuota(project, transactions.length)
 
     const context = {
-      environmentId: this.resolveEnvironmentId(project.id, envelope.transactions[0]?.environment),
-      releaseId: this.resolveReleaseId(project.id, envelope.transactions[0]?.release)
+      environmentId: await this.resolveEnvironmentId(
+        project.id,
+        envelope.transactions[0]?.environment
+      ),
+      releaseId: await this.resolveReleaseId(project.id, envelope.transactions[0]?.release)
     }
 
     for (const transaction of transactions) {
-      this.performance.ingestTransaction(project.id, transaction, context)
+      await this.performance.ingestTransaction(project.id, transaction, context)
     }
 
     return { accepted: transactions.length, dropped: 0 }
@@ -103,16 +109,16 @@ export class IngestionPipeline {
   /**
    * 上传 sourcemap。
    */
-  uploadSourcemaps(
+  async uploadSourcemaps(
     project: ProjectRow,
     body: { release: string; files: Array<{ fileName: string; sourceMap: string }> }
-  ): { uploaded: number } {
+  ): Promise<{ uploaded: number }> {
     if (!body.release) throw AppError.badRequest('缺少 release')
     if (!Array.isArray(body.files) || body.files.length === 0) {
       throw AppError.badRequest('缺少 files')
     }
 
-    return this.artifacts.uploadSourcemaps({
+    return await this.artifacts.uploadSourcemaps({
       projectId: project.id,
       release: body.release,
       files: body.files
@@ -125,10 +131,10 @@ export class IngestionPipeline {
    * 配额按**已摄入事件总数**算，不是按 issue 数 ——
    * issue 数只反映「有多少类问题」，不反映「占了多少存储」。
    */
-  private checkQuota(project: ProjectRow, incoming: number): void {
+  private async checkQuota(project: ProjectRow, incoming: number): Promise<void> {
     if (!project.event_quota || project.event_quota <= 0) return
 
-    const row = this.db.get<{ n: number }>(
+    const row = await this.db.get<{ n: number }>(
       'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ?',
       [project.id]
     )
@@ -141,18 +147,21 @@ export class IngestionPipeline {
     }
   }
 
-  private resolveEnvironmentId(projectId: number, slug?: string): number | undefined {
+  private async resolveEnvironmentId(
+    projectId: number,
+    slug?: string
+  ): Promise<number | undefined> {
     if (!slug) return undefined
-    const row = this.db.get<{ id: number }>(
+    const row = await this.db.get<{ id: number }>(
       'SELECT id FROM environments WHERE project_id = ? AND slug = ?',
       [projectId, slug]
     )
     return row?.id
   }
 
-  private resolveReleaseId(projectId: number, version?: string): number | undefined {
+  private async resolveReleaseId(projectId: number, version?: string): Promise<number | undefined> {
     if (!version) return undefined
-    const row = this.db.get<{ id: number }>(
+    const row = await this.db.get<{ id: number }>(
       'SELECT id FROM releases WHERE project_id = ? AND version = ?',
       [projectId, version]
     )

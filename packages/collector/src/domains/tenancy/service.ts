@@ -75,60 +75,59 @@ export class TenancyService {
 
   // ---- 组织 ----
 
-  createOrganization(name: string, slug?: string): OrganizationRow {
+  async createOrganization(name: string, slug?: string): Promise<OrganizationRow> {
     const finalSlug = slug ?? slugify(name)
-    const existing = this.db.get<OrganizationRow>('SELECT * FROM organizations WHERE slug = ?', [
-      finalSlug
-    ])
+    const existing = await this.db.get<OrganizationRow>(
+      'SELECT * FROM organizations WHERE slug = ?',
+      [finalSlug]
+    )
     if (existing) return existing
 
-    const result = this.db.run(
+    const id = await this.db.insert(
       'INSERT INTO organizations (slug, name, created_at) VALUES (?, ?, ?)',
       [finalSlug, name, Date.now()]
     )
-    return this.getOrganization(Number(result.changes ? lastId(this.db) : 0))
+    return await this.getOrganization(id)
   }
 
-  getOrganization(id: number): OrganizationRow {
-    const row = this.db.get<OrganizationRow>('SELECT * FROM organizations WHERE id = ?', [id])
+  async getOrganization(id: number): Promise<OrganizationRow> {
+    const row = await this.db.get<OrganizationRow>('SELECT * FROM organizations WHERE id = ?', [id])
     if (!row) throw AppError.notFound('组织')
     return row
   }
 
-  listOrganizations(): OrganizationRow[] {
-    return this.db.all<OrganizationRow>('SELECT * FROM organizations ORDER BY id')
+  async listOrganizations(): Promise<OrganizationRow[]> {
+    return await this.db.all<OrganizationRow>('SELECT * FROM organizations ORDER BY id')
   }
 
   // ---- 团队 ----
 
-  createTeam(
+  async createTeam(
     organizationId: number,
     name: string,
     slug?: string
-  ): {
+  ): Promise<{
     id: number
     organization_id: number
     slug: string
     name: string
-  } {
+  }> {
     const finalSlug = slug ?? slugify(name)
-    const existing = this.db.get<{ id: number }>(
+    const existing = await this.db.get<{ id: number }>(
       'SELECT id FROM teams WHERE organization_id = ? AND slug = ?',
       [organizationId, finalSlug]
     )
-    if (existing) return this.getTeam(existing.id)
+    if (existing) return await this.getTeam(existing.id)
 
-    this.db.run('INSERT INTO teams (organization_id, slug, name, created_at) VALUES (?, ?, ?, ?)', [
-      organizationId,
-      finalSlug,
-      name,
-      Date.now()
-    ])
-    return this.getTeam(Number(lastId(this.db)))
+    const id = await this.db.insert(
+      'INSERT INTO teams (organization_id, slug, name, created_at) VALUES (?, ?, ?, ?)',
+      [organizationId, finalSlug, name, Date.now()]
+    )
+    return await this.getTeam(id)
   }
 
-  getTeam(id: number) {
-    const row = this.db.get<{
+  async getTeam(id: number) {
+    const row = await this.db.get<{
       id: number
       organization_id: number
       slug: string
@@ -141,27 +140,27 @@ export class TenancyService {
 
   // ---- 成员 ----
 
-  createMember(
+  async createMember(
     organizationId: number,
     email: string,
     name: string,
     role: 'owner' | 'admin' | 'member' = 'member'
-  ): { id: number; organization_id: number; email: string; name: string; role: string } {
-    const existing = this.db.get<{ id: number }>(
+  ): Promise<{ id: number; organization_id: number; email: string; name: string; role: string }> {
+    const existing = await this.db.get<{ id: number }>(
       'SELECT id FROM members WHERE organization_id = ? AND email = ?',
       [organizationId, email]
     )
-    if (existing) return this.getMember(existing.id)
+    if (existing) return await this.getMember(existing.id)
 
-    this.db.run(
+    const id = await this.db.insert(
       'INSERT INTO members (organization_id, email, name, role, created_at) VALUES (?, ?, ?, ?, ?)',
       [organizationId, email, name, role, Date.now()]
     )
-    return this.getMember(Number(lastId(this.db)))
+    return await this.getMember(id)
   }
 
-  getMember(id: number) {
-    const row = this.db.get<{
+  async getMember(id: number) {
+    const row = await this.db.get<{
       id: number
       organization_id: number
       email: string
@@ -173,8 +172,8 @@ export class TenancyService {
     return row
   }
 
-  listMembers(organizationId: number) {
-    return this.db.all<{
+  async listMembers(organizationId: number) {
+    return await this.db.all<{
       id: number
       email: string
       name: string
@@ -193,7 +192,7 @@ export class TenancyService {
    * - runtime：进前端代码，用于上报。拿到它只能刷错误数据
    * - upload：只在 CI 里，用于传 sourcemap。拿到它能污染别人项目的错误栈
    */
-  createProject(input: {
+  async createProject(input: {
     organizationId: number
     teamId?: number
     name: string
@@ -201,10 +200,10 @@ export class TenancyService {
     platform?: string
     retentionDays?: number
     eventQuota?: number
-  }): CreatedProject {
+  }): Promise<CreatedProject> {
     const slug = input.slug ?? slugify(input.name)
 
-    const existing = this.db.get<ProjectRow>(
+    const existing = await this.db.get<ProjectRow>(
       'SELECT * FROM projects WHERE organization_id = ? AND slug = ?',
       [input.organizationId, slug]
     )
@@ -218,7 +217,7 @@ export class TenancyService {
     const uploadKey = generateKey('vup')
     const createdAt = Date.now()
 
-    this.db.run(
+    const projectId = await this.db.insert(
       `INSERT INTO projects
          (organization_id, team_id, slug, name, platform, retention_days, event_quota, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -234,34 +233,33 @@ export class TenancyService {
       ]
     )
 
-    const projectId = Number(lastId(this.db))
-
-    this.db.run(
+    await this.db.run(
       'INSERT INTO project_keys (project_id, kind, key_hash, label, created_at) VALUES (?, ?, ?, ?, ?)',
       [projectId, 'runtime', hashKey(runtimeKey), '运行时密钥', createdAt]
     )
-    this.db.run(
+    await this.db.run(
       'INSERT INTO project_keys (project_id, kind, key_hash, label, created_at) VALUES (?, ?, ?, ?, ?)',
       [projectId, 'upload', hashKey(uploadKey), '上传密钥', createdAt]
     )
 
     return {
-      project: this.getProject(projectId),
+      project: await this.getProject(projectId),
       runtimeKey,
       uploadKey
     }
   }
 
-  getProject(id: number): ProjectRow {
-    const row = this.db.get<ProjectRow>('SELECT * FROM projects WHERE id = ?', [id])
+  async getProject(id: number): Promise<ProjectRow> {
+    const row = await this.db.get<ProjectRow>('SELECT * FROM projects WHERE id = ?', [id])
     if (!row) throw AppError.notFound('项目')
     return row
   }
 
-  listProjects(organizationId: number): ProjectRow[] {
-    return this.db.all<ProjectRow>('SELECT * FROM projects WHERE organization_id = ? ORDER BY id', [
-      organizationId
-    ])
+  async listProjects(organizationId: number): Promise<ProjectRow[]> {
+    return await this.db.all<ProjectRow>(
+      'SELECT * FROM projects WHERE organization_id = ? ORDER BY id',
+      [organizationId]
+    )
   }
 
   /**
@@ -269,28 +267,33 @@ export class TenancyService {
    *
    * 查哈希，不查明文 —— 数据库泄露不等于所有项目的密钥泄露。
    */
-  findProjectByKey(
+  async findProjectByKey(
     key: string
-  ): { project: ProjectRow; keyKind: 'runtime' | 'upload' } | undefined {
+  ): Promise<{ project: ProjectRow; keyKind: 'runtime' | 'upload' } | undefined> {
     if (!key) return undefined
 
-    const row = this.db.get<{ project_id: number; kind: 'runtime' | 'upload' }>(
+    const row = await this.db.get<{ project_id: number; kind: 'runtime' | 'upload' }>(
       'SELECT project_id, kind FROM project_keys WHERE key_hash = ? LIMIT 1',
       [hashKey(key)]
     )
     if (!row) return undefined
 
-    const project = this.db.get<ProjectRow>('SELECT * FROM projects WHERE id = ?', [row.project_id])
+    const project = await this.db.get<ProjectRow>('SELECT * FROM projects WHERE id = ?', [
+      row.project_id
+    ])
     if (!project) return undefined
 
     return { project, keyKind: row.kind }
   }
 
   /** 重新生成密钥（旧密钥立即失效） */
-  rotateKey(projectId: number, kind: 'runtime' | 'upload'): string {
+  async rotateKey(projectId: number, kind: 'runtime' | 'upload'): Promise<string> {
     const key = generateKey(kind === 'runtime' ? 'vsk' : 'vup')
-    this.db.run('DELETE FROM project_keys WHERE project_id = ? AND kind = ?', [projectId, kind])
-    this.db.run(
+    await this.db.run('DELETE FROM project_keys WHERE project_id = ? AND kind = ?', [
+      projectId,
+      kind
+    ])
+    await this.db.run(
       'INSERT INTO project_keys (project_id, kind, key_hash, label, created_at) VALUES (?, ?, ?, ?, ?)',
       [projectId, kind, hashKey(key), kind === 'runtime' ? '运行时密钥' : '上传密钥', Date.now()]
     )
@@ -299,40 +302,43 @@ export class TenancyService {
 
   // ---- 环境 ----
 
-  createEnvironment(
+  async createEnvironment(
     projectId: number,
     slug: string,
     name: string,
     isProduction = false
-  ): EnvironmentRow {
-    const existing = this.db.get<EnvironmentRow>(
+  ): Promise<EnvironmentRow> {
+    const existing = await this.db.get<EnvironmentRow>(
       'SELECT * FROM environments WHERE project_id = ? AND slug = ?',
       [projectId, slug]
     )
     if (existing) return existing
 
-    this.db.run(
+    const id = await this.db.insert(
       'INSERT INTO environments (project_id, slug, name, is_production, created_at) VALUES (?, ?, ?, ?, ?)',
       [projectId, slug, name, toBool(isProduction), Date.now()]
     )
-    return this.getEnvironment(Number(lastId(this.db)))
+    return await this.getEnvironment(id)
   }
 
-  getEnvironment(id: number): EnvironmentRow {
-    const row = this.db.get<EnvironmentRow>('SELECT * FROM environments WHERE id = ?', [id])
+  async getEnvironment(id: number): Promise<EnvironmentRow> {
+    const row = await this.db.get<EnvironmentRow>('SELECT * FROM environments WHERE id = ?', [id])
     if (!row) throw AppError.notFound('环境')
     return row
   }
 
-  listEnvironments(projectId: number): EnvironmentRow[] {
-    return this.db.all<EnvironmentRow>(
+  async listEnvironments(projectId: number): Promise<EnvironmentRow[]> {
+    return await this.db.all<EnvironmentRow>(
       'SELECT * FROM environments WHERE project_id = ? ORDER BY id',
       [projectId]
     )
   }
 
-  findEnvironmentBySlug(projectId: number, slug: string): EnvironmentRow | undefined {
-    return this.db.get<EnvironmentRow>(
+  async findEnvironmentBySlug(
+    projectId: number,
+    slug: string
+  ): Promise<EnvironmentRow | undefined> {
+    return await this.db.get<EnvironmentRow>(
       'SELECT * FROM environments WHERE project_id = ? AND slug = ?',
       [projectId, slug]
     )
@@ -346,56 +352,53 @@ export class TenancyService {
    * 版本是**回归判定的锚** —— 「在 1.4.3 解决的问题，
    * 只有 1.4.4+ 再出现才算回归」就靠它。
    */
-  createRelease(
+  async createRelease(
     projectId: number,
     version: string,
     commitSha?: string,
     deployedAt?: number
-  ): ReleaseRow {
-    const existing = this.db.get<ReleaseRow>(
+  ): Promise<ReleaseRow> {
+    const existing = await this.db.get<ReleaseRow>(
       'SELECT * FROM releases WHERE project_id = ? AND version = ?',
       [projectId, version]
     )
     if (existing) {
       if (commitSha && !existing.commit_sha) {
-        this.db.run('UPDATE releases SET commit_sha = ? WHERE id = ?', [commitSha, existing.id])
+        await this.db.run('UPDATE releases SET commit_sha = ? WHERE id = ?', [
+          commitSha,
+          existing.id
+        ])
         return { ...existing, commit_sha: commitSha }
       }
       return existing
     }
 
-    this.db.run(
+    const id = await this.db.insert(
       'INSERT INTO releases (project_id, version, commit_sha, created_at, deployed_at) VALUES (?, ?, ?, ?, ?)',
       [projectId, version, commitSha ?? null, Date.now(), deployedAt ?? null]
     )
-    return this.getRelease(Number(lastId(this.db)))
+    return await this.getRelease(id)
   }
 
-  getRelease(id: number): ReleaseRow {
-    const row = this.db.get<ReleaseRow>('SELECT * FROM releases WHERE id = ?', [id])
+  async getRelease(id: number): Promise<ReleaseRow> {
+    const row = await this.db.get<ReleaseRow>('SELECT * FROM releases WHERE id = ?', [id])
     if (!row) throw AppError.notFound('版本')
     return row
   }
 
-  listReleases(projectId: number): ReleaseRow[] {
-    return this.db.all<ReleaseRow>(
+  async listReleases(projectId: number): Promise<ReleaseRow[]> {
+    return await this.db.all<ReleaseRow>(
       'SELECT * FROM releases WHERE project_id = ? ORDER BY created_at DESC',
       [projectId]
     )
   }
 
-  findReleaseByVersion(projectId: number, version: string): ReleaseRow | undefined {
-    return this.db.get<ReleaseRow>('SELECT * FROM releases WHERE project_id = ? AND version = ?', [
-      projectId,
-      version
-    ])
+  async findReleaseByVersion(projectId: number, version: string): Promise<ReleaseRow | undefined> {
+    return await this.db.get<ReleaseRow>(
+      'SELECT * FROM releases WHERE project_id = ? AND version = ?',
+      [projectId, version]
+    )
   }
-}
-
-/** 取最后插入的自增 ID */
-function lastId(db: Db): number {
-  const row = db.get<{ id: number }>('SELECT last_insert_rowid() AS id')
-  return row?.id ?? 0
 }
 
 /** 名字转 slug（中文保留，英文转小写） */

@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import crypto from 'node:crypto'
 import { openDb, defaultDbPath, type Db } from './infra/db/client.js'
+import { openPostgres } from './infra/db/postgres.js'
 import { TokenBucketLimiter } from './infra/ratelimit.js'
 import { TenancyService, type ProjectRow } from './domains/tenancy/service.js'
 import { IssueService } from './domains/issues/service.js'
@@ -52,10 +53,10 @@ export interface BuiltApp {
   trend: TrendService
 }
 
-export function buildApp(options: BuildAppOptions): BuiltApp {
+export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const { db, adminToken } = options
 
-  const app = Fastify({
+  const app = await Fastify({
     logger: options.logger ?? false,
     // 关掉类型强制转换：上报数据里有大量字符串字段，
     // AJV 的 coerceTypes 会把看起来像数字的字符串悄悄改成数字
@@ -98,7 +99,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
   app.options('/api/v1/sourcemaps', async (_request, reply) => reply.code(204).send())
 
   // ---- 错误处理 ----
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler(async (error, _request, reply) => {
     if (error instanceof AppError) {
       return reply.code(error.status).send({ ok: false, error: error.message, code: error.code })
     }
@@ -110,6 +111,20 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
   // 健康检查
   // ==========================================================
   app.get('/api/health', async () => ({ ok: true, service: 'vigil-collector' }))
+
+  /**
+   * 就绪探针：**要真的连一下数据库**。
+   *
+   * Pod 可能在 PostgreSQL 还没就绪时就启动了 ——
+   * 这时候 /api/health 说是好的，流量就被打过来，然后全部 500。
+   *
+   * 所以：存活探针用 /api/health（不碰数据库，数据库挂了不该重启进程），
+   * 就绪探针用 /api/ready（碰数据库）。
+   */
+  app.get('/api/ready', async () => {
+    await db.get('SELECT 1 AS ok')
+    return { ok: true, dialect: db.dialect }
+  })
 
   // ==========================================================
   // 摄入接口（SDK 用，项目密钥鉴权）
@@ -146,10 +161,10 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     },
     async (request, reply) => {
       const body = request.body as CollectEnvelope
-      const { project } = authenticateProject(request, body.token)
+      const { project } = await authenticateProject(request, body.token)
       enforceRateLimit(limiter, project.id)
 
-      const result = ingestion.ingestErrors(project, body)
+      const result = await ingestion.ingestErrors(project, body)
       return reply.send({
         ok: true,
         accepted: result.accepted,
@@ -188,10 +203,10 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     },
     async (request, reply) => {
       const body = request.body as PerformanceEnvelope
-      const { project } = authenticateProject(request, body.token)
+      const { project } = await authenticateProject(request, body.token)
       enforceRateLimit(limiter, project.id)
 
-      const result = ingestion.ingestPerformance(project, body)
+      const result = await ingestion.ingestPerformance(project, body)
       return reply.send({ ok: true, accepted: result.accepted, dropped: result.dropped })
     }
   )
@@ -226,10 +241,10 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     },
     async (request, reply) => {
       const body = request.body as BehaviorEnvelope
-      const { project } = authenticateProject(request, body.token)
+      const { project } = await authenticateProject(request, body.token)
       enforceRateLimit(limiter, project.id)
 
-      const result = ingestion.ingestBehavior(project, body)
+      const result = await ingestion.ingestBehavior(project, body)
       return reply.send({ ok: true, accepted: result.accepted, dropped: result.dropped })
     }
   )
@@ -278,12 +293,12 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
         headerValue(request, 'x-vigil-upload-token') ??
         headerValue(request, 'x-vigil-token') ??
         body.token
-      const found = tenancy.findProjectByKey(token ?? '')
+      const found = await tenancy.findProjectByKey(token ?? '')
       if (!found) throw AppError.unauthorized('上传密钥无效')
       // 密钥存在但类型不对 → 403（是有效密钥，只是用错了地方）
       if (found.keyKind !== 'upload') throw AppError.forbidden('需要上传密钥')
 
-      const result = ingestion.uploadSourcemaps(found.project, {
+      const result = await ingestion.uploadSourcemaps(found.project, {
         release: body.release,
         files: body.files
       })
@@ -301,7 +316,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
 
   app.get('/api/v1/organizations', admin, async () => ({
     ok: true,
-    organizations: tenancy.listOrganizations()
+    organizations: await tenancy.listOrganizations()
   }))
 
   app.post(
@@ -318,7 +333,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     },
     async (request, reply) => {
       const body = request.body as { name: string }
-      const organization = tenancy.createOrganization(body.name)
+      const organization = await tenancy.createOrganization(body.name)
       return reply.code(201).send({ ok: true, organization })
     }
   )
@@ -327,7 +342,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const { organizationId } = request.params as { organizationId: string }
     return {
       ok: true,
-      projects: tenancy.listProjects(Number(organizationId))
+      projects: await tenancy.listProjects(Number(organizationId))
     }
   })
 
@@ -361,7 +376,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
         eventQuota?: number
       }
 
-      const created = tenancy.createProject({
+      const created = await tenancy.createProject({
         organizationId: Number(organizationId),
         teamId: body.teamId,
         name: body.name,
@@ -385,9 +400,9 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const { projectId } = request.params as { projectId: string }
     return {
       ok: true,
-      project: tenancy.getProject(Number(projectId)),
-      environments: tenancy.listEnvironments(Number(projectId)),
-      releases: tenancy.listReleases(Number(projectId))
+      project: await tenancy.getProject(Number(projectId)),
+      environments: await tenancy.listEnvironments(Number(projectId)),
+      releases: await tenancy.listReleases(Number(projectId))
     }
   })
 
@@ -406,7 +421,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     async (request) => {
       const { projectId } = request.params as { projectId: string }
       const body = request.body as { kind: 'runtime' | 'upload' }
-      const key = tenancy.rotateKey(Number(projectId), body.kind)
+      const key = await tenancy.rotateKey(Number(projectId), body.kind)
       return { ok: true, kind: body.kind, key }
     }
   )
@@ -415,7 +430,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
 
   app.get('/api/v1/projects/:projectId/environments', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
-    return { ok: true, environments: tenancy.listEnvironments(Number(projectId)) }
+    return { ok: true, environments: await tenancy.listEnvironments(Number(projectId)) }
   })
 
   app.post(
@@ -437,7 +452,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     async (request, reply) => {
       const { projectId } = request.params as { projectId: string }
       const body = request.body as { slug: string; name: string; isProduction?: boolean }
-      const environment = tenancy.createEnvironment(
+      const environment = await tenancy.createEnvironment(
         Number(projectId),
         body.slug,
         body.name,
@@ -449,7 +464,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
 
   app.get('/api/v1/projects/:projectId/releases', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
-    return { ok: true, releases: tenancy.listReleases(Number(projectId)) }
+    return { ok: true, releases: await tenancy.listReleases(Number(projectId)) }
   })
 
   app.post(
@@ -470,7 +485,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     async (request, reply) => {
       const { projectId } = request.params as { projectId: string }
       const body = request.body as { version: string; commitSha?: string }
-      const release = tenancy.createRelease(Number(projectId), body.version, body.commitSha)
+      const release = await tenancy.createRelease(Number(projectId), body.version, body.commitSha)
       return reply.code(201).send({ ok: true, release })
     }
   )
@@ -481,7 +496,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const { projectId } = request.params as { projectId: string }
     const query = request.query as Record<string, string | undefined>
 
-    const result = issues.listIssues({
+    const result = await issues.listIssues({
       projectId: Number(projectId),
       status: query.status as never,
       substatus: query.substatus as never,
@@ -510,7 +525,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const { projectId } = request.params as { projectId: string }
     const query = request.query as Record<string, string | undefined>
 
-    const trend = trendService.errorTrend(Number(projectId), {
+    const trend = await trendService.errorTrend(Number(projectId), {
       since: query.since ? Number(query.since) : undefined,
       until: query.until ? Number(query.until) : undefined,
       bucket: query.bucket === 'hour' ? 'hour' : 'day',
@@ -522,7 +537,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
 
   app.get('/api/v1/projects/:projectId/issues/:issueId', admin, async (request) => {
     const { projectId, issueId } = request.params as { projectId: string; issueId: string }
-    return { ok: true, issue: issues.getIssue(Number(projectId), Number(issueId)) }
+    return { ok: true, issue: await issues.getIssue(Number(projectId), Number(issueId)) }
   })
 
   const issueAction = (_action: string) => ({
@@ -556,7 +571,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       const body = request.body as { release?: string; reason?: string; actorId?: number }
       return {
         ok: true,
-        issue: issues.resolve(Number(projectId), Number(issueId), body)
+        issue: await issues.resolve(Number(projectId), Number(issueId), body)
       }
     }
   )
@@ -575,7 +590,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       }
       return {
         ok: true,
-        issue: issues.archive(Number(projectId), Number(issueId), {
+        issue: await issues.archive(Number(projectId), Number(issueId), {
           strategy: body.strategy ?? 'forever',
           untilCount: body.untilCount,
           untilUserCount: body.untilUserCount,
@@ -594,7 +609,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       const body = request.body as { reason?: string; actorId?: number }
       return {
         ok: true,
-        issue: issues.unarchive(Number(projectId), Number(issueId), body)
+        issue: await issues.unarchive(Number(projectId), Number(issueId), body)
       }
     }
   )
@@ -607,7 +622,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       const body = request.body as { reason?: string; actorId?: number }
       return {
         ok: true,
-        issue: issues.markSeen(Number(projectId), Number(issueId), body)
+        issue: await issues.markSeen(Number(projectId), Number(issueId), body)
       }
     }
   )
@@ -620,7 +635,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       const body = request.body as { memberId?: number; reason?: string; actorId?: number }
       return {
         ok: true,
-        issue: issues.assign(Number(projectId), Number(issueId), body.memberId ?? null, body)
+        issue: await issues.assign(Number(projectId), Number(issueId), body.memberId ?? null, body)
       }
     }
   )
@@ -634,7 +649,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       if (!body.body) throw AppError.badRequest('缺少评论内容')
       return {
         ok: true,
-        issue: issues.comment(Number(projectId), Number(issueId), body.actorId, body.body)
+        issue: await issues.comment(Number(projectId), Number(issueId), body.actorId, body.body)
       }
     }
   )
@@ -647,7 +662,11 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       const body = request.body as { bookmarked?: boolean }
       return {
         ok: true,
-        issue: issues.setBookmarked(Number(projectId), Number(issueId), body.bookmarked !== false)
+        issue: await issues.setBookmarked(
+          Number(projectId),
+          Number(issueId),
+          body.bookmarked !== false
+        )
       }
     }
   )
@@ -689,7 +708,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
         actorId?: number
       }
 
-      const affected = issues.bulkAction(Number(projectId), {
+      const affected = await issues.bulkAction(Number(projectId), {
         issueIds: body.issueIds,
         action: body.action,
         archiveStrategy: body.archiveStrategy,
@@ -709,7 +728,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const query = request.query as Record<string, string | undefined>
     return {
       ok: true,
-      stats: issues.stats(Number(projectId), {
+      stats: await issues.stats(Number(projectId), {
         since: query.since ? Number(query.since) : undefined,
         until: query.until ? Number(query.until) : undefined
       })
@@ -723,7 +742,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const query = request.query as Record<string, string | undefined>
     return {
       ok: true,
-      summary: performance.summary({
+      summary: await performance.summary({
         projectId: Number(projectId),
         environment: query.environment,
         release: query.release,
@@ -738,7 +757,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const query = request.query as Record<string, string | undefined>
     return {
       ok: true,
-      ...performance.listTransactions({
+      ...(await performance.listTransactions({
         projectId: Number(projectId),
         environment: query.environment,
         release: query.release,
@@ -747,7 +766,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
         until: query.until ? Number(query.until) : undefined,
         limit: query.limit ? Number(query.limit) : undefined,
         offset: query.offset ? Number(query.offset) : undefined
-      })
+      }))
     }
   })
 
@@ -756,7 +775,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const query = request.query as Record<string, string | undefined>
     return {
       ok: true,
-      rows: performance.errorPerformanceCorrelation(
+      rows: await performance.errorPerformanceCorrelation(
         Number(projectId),
         query.since ? Number(query.since) : undefined
       )
@@ -770,7 +789,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const query = request.query as Record<string, string | undefined>
     return {
       ok: true,
-      summary: replay.summary(Number(projectId), {
+      summary: await replay.summary(Number(projectId), {
         since: query.since ? Number(query.since) : undefined,
         until: query.until ? Number(query.until) : undefined,
         tzOffsetMinutes: query.tzOffset ? Number(query.tzOffset) : 0
@@ -783,16 +802,16 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const query = request.query as Record<string, string | undefined>
     return {
       ok: true,
-      ...replay.listSessions(Number(projectId), {
+      ...(await replay.listSessions(Number(projectId), {
         limit: query.limit ? Number(query.limit) : undefined,
         offset: query.offset ? Number(query.offset) : undefined
-      })
+      }))
     }
   })
 
   app.get('/api/v1/projects/:projectId/sessions/:sessionId/replay', admin, async (request) => {
     const { projectId, sessionId } = request.params as { projectId: string; sessionId: string }
-    const events = replay.getReplay(Number(projectId), sessionId)
+    const events = await replay.getReplay(Number(projectId), sessionId)
     return { ok: true, sessionId, events: events.length, stream: events }
   })
 
@@ -800,7 +819,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     const { projectId, sessionId } = request.params as { projectId: string; sessionId: string }
     return {
       ok: true,
-      events: replay.listSessionEvents(Number(projectId), sessionId)
+      events: await replay.listSessionEvents(Number(projectId), sessionId)
     }
   })
 
@@ -813,7 +832,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
   app.get('/api/v1/projects/:projectId/issues/:issueId/replay', admin, async (request) => {
     const { projectId, issueId } = request.params as { projectId: string; issueId: string }
 
-    const row = db.get<{ session_id: string | null }>(
+    const row = await db.get<{ session_id: string | null }>(
       `SELECT session_id FROM issue_events
        WHERE issue_id = ? AND project_id = ? AND session_id IS NOT NULL
        ORDER BY occurred_at DESC LIMIT 1`,
@@ -824,7 +843,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       return { ok: true, hasReplay: false, events: 0, stream: [] }
     }
 
-    const stream = replay.getReplay(Number(projectId), row.session_id)
+    const stream = await replay.getReplay(Number(projectId), row.session_id)
     return {
       ok: true,
       hasReplay: stream.length > 0,
@@ -838,7 +857,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
 
   app.get('/api/v1/projects/:projectId/alert-rules', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
-    return { ok: true, rules: alerting.listRules(Number(projectId)) }
+    return { ok: true, rules: await alerting.listRules(Number(projectId)) }
   })
 
   app.post(
@@ -880,7 +899,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
         windowSeconds?: number
         channelIds?: number[]
       }
-      const rule = alerting.createRule({ projectId: Number(projectId), ...body })
+      const rule = await alerting.createRule({ projectId: Number(projectId), ...body })
       return reply.code(201).send({ ok: true, rule })
     }
   )
@@ -888,18 +907,18 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
   app.patch('/api/v1/alert-rules/:ruleId', admin, async (request) => {
     const { ruleId } = request.params as { ruleId: string }
     const body = request.body as Record<string, never>
-    return { ok: true, rule: alerting.updateRule(Number(ruleId), body) }
+    return { ok: true, rule: await alerting.updateRule(Number(ruleId), body) }
   })
 
   app.delete('/api/v1/alert-rules/:ruleId', admin, async (request) => {
     const { ruleId } = request.params as { ruleId: string }
-    alerting.deleteRule(Number(ruleId))
+    await alerting.deleteRule(Number(ruleId))
     return { ok: true }
   })
 
   app.get('/api/v1/projects/:projectId/channels', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
-    return { ok: true, channels: alerting.listChannels(Number(projectId)) }
+    return { ok: true, channels: await alerting.listChannels(Number(projectId)) }
   })
 
   app.post(
@@ -925,14 +944,14 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
         type: 'webhook' | 'feishu' | 'dingtalk' | 'email' | 'slack'
         config: Record<string, unknown>
       }
-      const channel = alerting.createChannel({ projectId: Number(projectId), ...body })
+      const channel = await alerting.createChannel({ projectId: Number(projectId), ...body })
       return reply.code(201).send({ ok: true, channel })
     }
   )
 
   app.get('/api/v1/projects/:projectId/alert-incidents', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
-    return { ok: true, incidents: alerting.listIncidents(Number(projectId)) }
+    return { ok: true, incidents: await alerting.listIncidents(Number(projectId)) }
   })
 
   app.post('/api/v1/projects/:projectId/alerts/evaluate', admin, async (request) => {
@@ -946,14 +965,14 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
   // ==========================================================
 
   /** 项目密钥鉴权 */
-  function authenticateProject(
+  async function authenticateProject(
     request: FastifyRequest,
     bodyToken: string | undefined
-  ): { project: ProjectRow } {
+  ): Promise<{ project: ProjectRow }> {
     const token = headerValue(request, 'x-vigil-token') ?? bodyToken
     if (!token) throw AppError.unauthorized('缺少项目密钥')
 
-    const found = tenancy.findProjectByKey(token)
+    const found = await tenancy.findProjectByKey(token)
     if (!found) throw AppError.unauthorized('项目密钥无效')
     if (found.keyKind !== 'runtime') throw AppError.forbidden('该密钥不能用于上报')
 
@@ -1022,9 +1041,22 @@ function isIngestPath(url: string): boolean {
   )
 }
 
-/** 从环境变量组装服务 */
-export function createAppFromEnv(): BuiltApp & { db: Db } {
-  const db = openDb(defaultDbPath())
+/**
+ * 从环境变量组装服务。
+ *
+ * ## 选库：DATABASE_URL 有就用 PostgreSQL，否则用 SQLite
+ *
+ * 这一个开关决定了**能不能多副本**：
+ *
+ * - **SQLite**（本地开发、单实例部署）：一个文件，简单，但多副本会锁竞争
+ * - **PostgreSQL**（生产、多副本）：共享存储，采集服务可以水平扩
+ *
+ * 所以生产部署只要设 `DATABASE_URL` 就行，领域代码一行不用改 ——
+ * 两种库走的是同一套方言层（`infra/db/dialect.ts`）。
+ */
+export async function createAppFromEnv(): Promise<BuiltApp & { db: Db }> {
+  const databaseUrl = process.env.DATABASE_URL
+  const db = databaseUrl ? await openPostgres(databaseUrl) : await openDb(defaultDbPath())
   const adminToken = process.env.VIGIL_ADMIN_TOKEN ?? crypto.randomBytes(24).toString('hex')
-  return { ...buildApp({ db, adminToken }), db }
+  return { ...(await buildApp({ db, adminToken })), db }
 }

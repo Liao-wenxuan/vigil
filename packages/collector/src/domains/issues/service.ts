@@ -128,21 +128,21 @@ export class IssueService {
    *   4. 写 issue_activity（活动流）
    *   5. 更新 issue 的聚合计数
    */
-  ingestEvent(projectId: number, event: ErrorEvent): IngestOutcome {
+  async ingestEvent(projectId: number, event: ErrorEvent): Promise<IngestOutcome> {
     const occurredAt = event.occurredAt ?? Date.now()
     const eventId = event.eventId ?? generateEventId(event, occurredAt)
 
-    return this.db.transaction(() => {
-      let issue = this.findRow(projectId, event.fingerprint)
+    return await this.db.transaction(async () => {
+      let issue = await this.findRow(projectId, event.fingerprint)
       let created = false
 
       if (!issue) {
-        issue = this.createRow(projectId, event, occurredAt)
+        issue = await this.createRow(projectId, event, occurredAt)
         created = true
       }
 
       // 同一事件重复上报（网络重试）→ 直接忽略，不重复计数
-      const duplicate = this.db.get<{ id: number }>(
+      const duplicate = await this.db.get<{ id: number }>(
         'SELECT id FROM issue_events WHERE project_id = ? AND event_id = ?',
         [projectId, eventId]
       )
@@ -162,10 +162,10 @@ export class IssueService {
       // 受影响用户数：同一个人只算一次
       const userId = event.userId
       const userIsNew = userId
-        ? !this.db.get('SELECT 1 AS x FROM issue_users WHERE issue_id = ? AND user_id = ?', [
+        ? !(await this.db.get('SELECT 1 AS x FROM issue_users WHERE issue_id = ? AND user_id = ?', [
             issue.id,
             userId
-          ])
+          ]))
         : false
 
       const transitions: IssueTransition[] = []
@@ -192,7 +192,7 @@ export class IssueService {
       }
 
       // 写明细
-      this.db.run(
+      await this.db.run(
         `INSERT INTO issue_events
            (issue_id, project_id, event_id, occurred_at, received_at,
             user_id, session_id, url, release, environment, vitals_json, payload_json)
@@ -216,26 +216,29 @@ export class IssueService {
       // 记录受影响用户
       if (userId) {
         if (userIsNew) {
-          this.db.run(
-            'INSERT OR REPLACE INTO issue_users (issue_id, user_id, first_seen, last_seen) VALUES (?, ?, ?, ?)',
+          // `ON CONFLICT DO UPDATE` —— SQLite 3.24+ 与 PG 都支持。
+          // ⚠️ 别用 `INSERT OR REPLACE` —— 那是 SQLite 独有的语法，PG 上直接报错。
+          await this.db.run(
+            `INSERT INTO issue_users (issue_id, user_id, first_seen, last_seen)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (issue_id, user_id) DO UPDATE SET last_seen = excluded.last_seen`,
             [issue.id, userId, occurredAt, occurredAt]
           )
         } else {
-          this.db.run('UPDATE issue_users SET last_seen = ? WHERE issue_id = ? AND user_id = ?', [
-            occurredAt,
-            issue.id,
-            userId
-          ])
+          await this.db.run(
+            'UPDATE issue_users SET last_seen = ? WHERE issue_id = ? AND user_id = ?',
+            [occurredAt, issue.id, userId]
+          )
         }
       }
 
       // 写活动流
       for (const activity of activities) {
-        this.writeActivity(issue.id, activity, occurredAt)
+        await this.writeActivity(issue.id, activity, occurredAt)
       }
 
       // 更新聚合计数与状态
-      this.applyChanges(projectId, issue.id, finalState, activities, event, occurredAt)
+      await this.applyChanges(projectId, issue.id, finalState, activities, event, occurredAt)
 
       return {
         issueId: issue.id,
@@ -249,19 +252,23 @@ export class IssueService {
   }
 
   /** 找到 Issue 行 */
-  private findRow(projectId: number, fingerprint: string): IssueRow | undefined {
-    return this.db.get<IssueRow>('SELECT * FROM issues WHERE project_id = ? AND fingerprint = ?', [
-      projectId,
-      fingerprint
-    ])
+  private async findRow(projectId: number, fingerprint: string): Promise<IssueRow | undefined> {
+    return await this.db.get<IssueRow>(
+      'SELECT * FROM issues WHERE project_id = ? AND fingerprint = ?',
+      [projectId, fingerprint]
+    )
   }
 
   /** 新建 Issue 行（计数先记 0，随后由状态机累加） */
-  private createRow(projectId: number, event: ErrorEvent, occurredAt: number): IssueRow {
+  private async createRow(
+    projectId: number,
+    event: ErrorEvent,
+    occurredAt: number
+  ): Promise<IssueRow> {
     const title = buildTitle(event)
     const culprit = buildCulprit(event)
 
-    this.db.run(
+    const insertedId = await this.db.insert(
       `INSERT INTO issues
          (project_id, fingerprint, short_id, category, kind, title, message, culprit, level,
           status, substatus, count, user_count, first_seen, last_seen,
@@ -283,22 +290,22 @@ export class IssueService {
       ]
     )
 
-    const id = Number(lastId(this.db))
+    const id = insertedId
     const shortId = `VIG-${id.toString(36).toUpperCase().padStart(5, '0')}`
-    this.db.run('UPDATE issues SET short_id = ? WHERE id = ?', [shortId, id])
+    await this.db.run('UPDATE issues SET short_id = ? WHERE id = ?', [shortId, id])
 
-    return this.db.get<IssueRow>('SELECT * FROM issues WHERE id = ?', [id])!
+    return (await this.db.get<IssueRow>('SELECT * FROM issues WHERE id = ?', [id]))!
   }
 
   /** 把状态变更写回 issues 表 */
-  private applyChanges(
+  private async applyChanges(
     projectId: number,
     issueId: number,
     state: IssueState,
     activities: ActivityDraft[],
     event: ErrorEvent,
     now: number
-  ): void {
+  ): Promise<void> {
     const sets: string[] = []
     const params: unknown[] = []
 
@@ -343,7 +350,7 @@ export class IssueService {
     if (event.stack) {
       push('raw_stack', event.stack)
     }
-    const resolvedFrames = this.resolver.resolve(
+    const resolvedFrames = await this.resolver.resolve(
       projectId,
       event.release,
       event.frames ?? parseStack(event.stack)
@@ -358,15 +365,19 @@ export class IssueService {
       push('release', event.release)
     }
 
-    this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ?`, [...params, issueId])
+    await this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ?`, [...params, issueId])
 
     // 归档策略变化时，activity 已经写过了（状态机产出），这里不重复写
     void activities
   }
 
-  /** 写活动流 */
-  private writeActivity(issueId: number, activity: ActivityDraft, now: number): void {
-    this.db.run(
+  /** 写活动流，返回刚写入的行 id */
+  private async writeActivity(
+    issueId: number,
+    activity: ActivityDraft,
+    now: number
+  ): Promise<number> {
+    return await this.db.insert(
       `INSERT INTO issue_activity
          (issue_id, actor_type, actor_id, action, reason, data_json, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -392,7 +403,7 @@ export class IssueService {
    * 排序支持 `priority` —— 综合「相对量、绝对量、时近性、问题年龄」，
    * 而不是简单的按次数排。见 computePriority 的说明。
    */
-  listIssues(query: IssueQuery): { total: number; issues: IssueRow[] } {
+  async listIssues(query: IssueQuery): Promise<{ total: number; issues: IssueRow[] }> {
     const conditions: string[] = ['project_id = ?']
     const params: unknown[] = [query.projectId]
 
@@ -450,20 +461,20 @@ export class IssueService {
       : where
 
     const total = (
-      this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM issues WHERE ${scopedWhere}`, [
+      (await this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM issues WHERE ${scopedWhere}`, [
         ...params,
         ...(hasWindow ? windowParams : [])
-      ]) as { n: number }
+      ])) as { n: number }
     ).n
 
-    const rows = this.db.all<IssueRow>(`SELECT * FROM issues WHERE ${scopedWhere}`, [
+    const rows = await this.db.all<IssueRow>(`SELECT * FROM issues WHERE ${scopedWhere}`, [
       ...params,
       ...(hasWindow ? windowParams : [])
     ])
 
     // 窗口内的发生次数：一条 GROUP BY 就够，别按行去查
     if (hasWindow) {
-      const counts = this.db.all<{ issue_id: number; n: number }>(
+      const counts = await this.db.all<{ issue_id: number; n: number }>(
         `SELECT issue_id, COUNT(*) AS n FROM issue_events
          WHERE ${windowWhere} GROUP BY issue_id`,
         windowParams
@@ -486,24 +497,24 @@ export class IssueService {
   }
 
   /** Issue 详情 */
-  getIssue(projectId: number, issueId: number): IssueDetail {
-    const row = this.db.get<IssueRow>('SELECT * FROM issues WHERE id = ? AND project_id = ?', [
-      issueId,
-      projectId
-    ])
+  async getIssue(projectId: number, issueId: number): Promise<IssueDetail> {
+    const row = await this.db.get<IssueRow>(
+      'SELECT * FROM issues WHERE id = ? AND project_id = ?',
+      [issueId, projectId]
+    )
     if (!row) throw AppError.notFound('问题')
-    return this.toDetail(row)
+    return await this.toDetail(row)
   }
 
   /** 按指纹取详情 */
-  getIssueByFingerprint(projectId: number, fingerprint: string): IssueDetail {
-    const row = this.findRow(projectId, fingerprint)
+  async getIssueByFingerprint(projectId: number, fingerprint: string): Promise<IssueDetail> {
+    const row = await this.findRow(projectId, fingerprint)
     if (!row) throw AppError.notFound('问题')
-    return this.toDetail(row)
+    return await this.toDetail(row)
   }
 
-  private toDetail(row: IssueRow): IssueDetail {
-    const events = this.db.all<{
+  private async toDetail(row: IssueRow): Promise<IssueDetail> {
+    const events = await this.db.all<{
       id: number
       occurred_at: number
       received_at: number
@@ -522,7 +533,7 @@ export class IssueService {
       [row.id]
     )
 
-    const activity = this.db.all<{
+    const activity = await this.db.all<{
       id: number
       action: string
       actor_type: string
@@ -536,7 +547,7 @@ export class IssueService {
       [row.id]
     )
 
-    const comments = this.db.all<{
+    const comments = await this.db.all<{
       id: number
       author_id: number | null
       body: string
@@ -548,7 +559,7 @@ export class IssueService {
       [row.id]
     )
 
-    const tags = this.db.all<{ key: string; value: string }>(
+    const tags = await this.db.all<{ key: string; value: string }>(
       'SELECT key, value FROM issue_tags WHERE issue_id = ?',
       [row.id]
     )
@@ -559,7 +570,9 @@ export class IssueService {
       : undefined
 
     const assignee = row.assignee_id
-      ? this.db.get<{ name: string }>('SELECT name FROM members WHERE id = ?', [row.assignee_id])
+      ? await this.db.get<{ name: string }>('SELECT name FROM members WHERE id = ?', [
+          row.assignee_id
+        ])
       : undefined
 
     return {
@@ -627,25 +640,25 @@ export class IssueService {
   // ==========================================================
 
   /** 标记已解决 */
-  resolve(
+  async resolve(
     projectId: number,
     issueId: number,
     options: { release?: string; reason?: string; actorId?: number }
-  ): IssueDetail {
-    const issue = this.requireRow(projectId, issueId)
+  ): Promise<IssueDetail> {
+    const issue = await this.requireRow(projectId, issueId)
     const result = transition(toState(issue), {
       type: 'resolve',
       now: Date.now(),
       release: options.release,
-      releaseId: options.release ? this.findReleaseId(projectId, options.release) : undefined
+      releaseId: options.release ? await this.findReleaseId(projectId, options.release) : undefined
     })
 
-    this.persistManual(issue, result, options.actorId, options.reason)
-    return this.getIssue(projectId, issueId)
+    await this.persistManual(issue, result, options.actorId, options.reason)
+    return await this.getIssue(projectId, issueId)
   }
 
   /** 归档 */
-  archive(
+  async archive(
     projectId: number,
     issueId: number,
     options: {
@@ -655,8 +668,8 @@ export class IssueService {
       reason?: string
       actorId?: number
     }
-  ): IssueDetail {
-    const issue = this.requireRow(projectId, issueId)
+  ): Promise<IssueDetail> {
+    const issue = await this.requireRow(projectId, issueId)
     const result = transition(toState(issue), {
       type: 'archive',
       now: Date.now(),
@@ -665,51 +678,51 @@ export class IssueService {
       untilUserCount: options.untilUserCount
     })
 
-    this.persistManual(issue, result, options.actorId, options.reason)
-    return this.getIssue(projectId, issueId)
+    await this.persistManual(issue, result, options.actorId, options.reason)
+    return await this.getIssue(projectId, issueId)
   }
 
   /** 解除归档 */
-  unarchive(
+  async unarchive(
     projectId: number,
     issueId: number,
     options: { reason?: string; actorId?: number } = {}
-  ): IssueDetail {
-    const issue = this.requireRow(projectId, issueId)
+  ): Promise<IssueDetail> {
+    const issue = await this.requireRow(projectId, issueId)
     const result = transition(toState(issue), { type: 'unarchive', now: Date.now() })
-    this.persistManual(issue, result, options.actorId, options.reason)
-    return this.getIssue(projectId, issueId)
+    await this.persistManual(issue, result, options.actorId, options.reason)
+    return await this.getIssue(projectId, issueId)
   }
 
   /** 标记已阅 */
-  markSeen(
+  async markSeen(
     projectId: number,
     issueId: number,
     options: { reason?: string; actorId?: number } = {}
-  ): IssueDetail {
-    const issue = this.requireRow(projectId, issueId)
+  ): Promise<IssueDetail> {
+    const issue = await this.requireRow(projectId, issueId)
     const result = transition(toState(issue), { type: 'mark_seen', now: Date.now() })
-    this.persistManual(issue, result, options.actorId, options.reason)
-    return this.getIssue(projectId, issueId)
+    await this.persistManual(issue, result, options.actorId, options.reason)
+    return await this.getIssue(projectId, issueId)
   }
 
   /** 分配负责人 */
-  assign(
+  async assign(
     projectId: number,
     issueId: number,
     memberId: number | null,
     options: { reason?: string; actorId?: number } = {}
-  ): IssueDetail {
-    this.requireRow(projectId, issueId)
+  ): Promise<IssueDetail> {
+    await this.requireRow(projectId, issueId)
     const now = Date.now()
 
-    this.db.run('UPDATE issues SET assignee_id = ?, updated_at = ? WHERE id = ?', [
+    await this.db.run('UPDATE issues SET assignee_id = ?, updated_at = ? WHERE id = ?', [
       memberId,
       now,
       issueId
     ])
 
-    this.writeActivity(
+    await this.writeActivity(
       issueId,
       {
         action: memberId ? 'assigned' : 'unassigned',
@@ -720,64 +733,68 @@ export class IssueService {
       now
     )
 
-    return this.getIssue(projectId, issueId)
+    return await this.getIssue(projectId, issueId)
   }
 
   /** 添加评论 */
-  comment(
+  async comment(
     projectId: number,
     issueId: number,
     authorId: number | undefined,
     body: string
-  ): IssueDetail {
-    this.requireRow(projectId, issueId)
+  ): Promise<IssueDetail> {
+    await this.requireRow(projectId, issueId)
     const now = Date.now()
 
-    this.db.run(
+    await this.db.run(
       'INSERT INTO issue_comments (issue_id, author_id, body, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
       [issueId, authorId ?? null, body, now, now]
     )
 
-    this.writeActivity(issueId, { action: 'commented', actorType: 'member' }, now)
-    return this.getIssue(projectId, issueId)
+    await this.writeActivity(issueId, { action: 'commented', actorType: 'member' }, now)
+    return await this.getIssue(projectId, issueId)
   }
 
   /** 收藏 */
-  setBookmarked(projectId: number, issueId: number, bookmarked: boolean): IssueDetail {
-    this.requireRow(projectId, issueId)
+  async setBookmarked(
+    projectId: number,
+    issueId: number,
+    bookmarked: boolean
+  ): Promise<IssueDetail> {
+    await this.requireRow(projectId, issueId)
     const now = Date.now()
 
-    this.db.run('UPDATE issues SET is_bookmarked = ?, updated_at = ? WHERE id = ?', [
+    await this.db.run('UPDATE issues SET is_bookmarked = ?, updated_at = ? WHERE id = ?', [
       bookmarked ? 1 : 0,
       now,
       issueId
     ])
 
-    this.writeActivity(
+    await this.writeActivity(
       issueId,
       { action: bookmarked ? 'bookmarked' : 'unbookmarked', actorType: 'member' },
       now
     )
 
-    return this.getIssue(projectId, issueId)
+    return await this.getIssue(projectId, issueId)
   }
 
   /** 批量操作 */
-  bulkAction(projectId: number, action: IssueBulkAction): number {
+  async bulkAction(projectId: number, action: IssueBulkAction): Promise<number> {
     let affected = 0
 
     for (const issueId of action.issueIds) {
       try {
         switch (action.action) {
           case 'resolve':
-            this.resolve(projectId, issueId, {
+            await this.resolve(projectId, issueId, {
               release: action.release,
               reason: action.reason,
               actorId: action.actorId
             })
             break
           case 'archive':
-            this.archive(projectId, issueId, {
+            await this.archive(projectId, issueId, {
               strategy: action.archiveStrategy ?? 'forever',
               untilCount: action.archiveUntilCount,
               untilUserCount: action.archiveUntilUserCount,
@@ -786,16 +803,22 @@ export class IssueService {
             })
             break
           case 'unarchive':
-            this.unarchive(projectId, issueId, { reason: action.reason, actorId: action.actorId })
+            await this.unarchive(projectId, issueId, {
+              reason: action.reason,
+              actorId: action.actorId
+            })
             break
           case 'bookmark':
-            this.setBookmarked(projectId, issueId, true)
+            await this.setBookmarked(projectId, issueId, true)
             break
           case 'unbookmark':
-            this.setBookmarked(projectId, issueId, false)
+            await this.setBookmarked(projectId, issueId, false)
             break
           case 'mark_seen':
-            this.markSeen(projectId, issueId, { reason: action.reason, actorId: action.actorId })
+            await this.markSeen(projectId, issueId, {
+              reason: action.reason,
+              actorId: action.actorId
+            })
             break
         }
         affected++
@@ -821,15 +844,18 @@ export class IssueService {
    *
    * 没有窗口时行为和以前完全一致（读 issues 表的全量快照）。
    */
-  stats(projectId: number, range: { since?: number; until?: number } = {}): IssueStats {
+  async stats(
+    projectId: number,
+    range: { since?: number; until?: number } = {}
+  ): Promise<IssueStats> {
     const hasWindow = range.since !== undefined || range.until !== undefined
-    if (hasWindow) return this.windowStats(projectId, range)
-    return this.allTimeStats(projectId)
+    if (hasWindow) return await this.windowStats(projectId, range)
+    return await this.allTimeStats(projectId)
   }
 
   /** 全量统计：直接读 issues 表（问题表本身就是一个累计快照） */
-  private allTimeStats(projectId: number): IssueStats {
-    const totals = this.db.get<{
+  private async allTimeStats(projectId: number): Promise<IssueStats> {
+    const totals = (await this.db.get<{
       total: number
       occurrences: number
       unresolved: number
@@ -851,20 +877,20 @@ export class IssueService {
               COALESCE(SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END), 0) AS archived
        FROM issues WHERE project_id = ?`,
       [projectId]
-    )!
+    ))!
 
-    const byCategory = this.db.all<{ category: string; n: number; occurrences: number }>(
+    const byCategory = await this.db.all<{ category: string; n: number; occurrences: number }>(
       `SELECT category, COUNT(*) AS n, COALESCE(SUM(count), 0) AS occurrences
        FROM issues WHERE project_id = ? GROUP BY category ORDER BY occurrences DESC`,
       [projectId]
     )
 
-    const byLevel = this.db.all<{ level: string; n: number }>(
+    const byLevel = await this.db.all<{ level: string; n: number }>(
       `SELECT level, COUNT(*) AS n FROM issues WHERE project_id = ? GROUP BY level ORDER BY n DESC`,
       [projectId]
     )
 
-    const topCulprits = this.db.all<{ culprit: string; n: number; occurrences: number }>(
+    const topCulprits = await this.db.all<{ culprit: string; n: number; occurrences: number }>(
       `SELECT culprit, COUNT(*) AS n, COALESCE(SUM(count), 0) AS occurrences
        FROM issues WHERE project_id = ? AND culprit IS NOT NULL
        GROUP BY culprit ORDER BY occurrences DESC LIMIT 10`,
@@ -893,7 +919,10 @@ export class IssueService {
    * 状态分布用的是问题**当前**的状态 ——
    * 「过去 1 小时还在冒且现在仍未解决」是用户真正想问的。
    */
-  private windowStats(projectId: number, range: { since?: number; until?: number }): IssueStats {
+  private async windowStats(
+    projectId: number,
+    range: { since?: number; until?: number }
+  ): Promise<IssueStats> {
     const conditions = ['e.project_id = ?']
     const params: unknown[] = [projectId]
     if (range.since !== undefined) {
@@ -906,7 +935,7 @@ export class IssueService {
     }
     const where = conditions.join(' AND ')
 
-    const totals = this.db.get<{
+    const totals = (await this.db.get<{
       issues: number
       occurrences: number
       users: number
@@ -916,17 +945,17 @@ export class IssueService {
               COUNT(DISTINCT e.user_id) AS users
        FROM issue_events e WHERE ${where}`,
       params
-    )!
+    ))!
 
     // 状态分布：窗口内有发生的问题，它们的**当前**状态
-    const byStatus = this.db.all<{ status: string; substatus: string; n: number }>(
+    const byStatus = (await this.db.all<{ status: string; substatus: string; n: number }>(
       `SELECT i.status, i.substatus, COUNT(DISTINCT i.id) AS n
        FROM issues i
        WHERE i.project_id = ?
          AND i.id IN (SELECT e.issue_id FROM issue_events e WHERE ${where})
        GROUP BY i.status, i.substatus`,
       [projectId, ...params]
-    )!
+    ))!
 
     const count = (predicate: (row: { status: string; substatus: string }) => boolean): number =>
       byStatus.filter(predicate).reduce((sum, row) => sum + row.n, 0)
@@ -943,13 +972,13 @@ export class IssueService {
       newParams.push(range.until)
     }
     const newIssues = (
-      this.db.get<{ n: number }>(
+      (await this.db.get<{ n: number }>(
         `SELECT COUNT(*) AS n FROM issues WHERE ${newConditions.join(' AND ')}`,
         newParams
-      ) as { n: number }
+      )) as { n: number }
     ).n
 
-    const byCategory = this.db.all<{ category: string; n: number; occurrences: number }>(
+    const byCategory = await this.db.all<{ category: string; n: number; occurrences: number }>(
       `SELECT i.category, COUNT(DISTINCT i.id) AS n, COUNT(e.id) AS occurrences
        FROM issue_events e JOIN issues i ON i.id = e.issue_id
        WHERE ${where}
@@ -957,7 +986,7 @@ export class IssueService {
       params
     )
 
-    const byLevel = this.db.all<{ level: string; n: number }>(
+    const byLevel = await this.db.all<{ level: string; n: number }>(
       `SELECT i.level, COUNT(DISTINCT i.id) AS n
        FROM issue_events e JOIN issues i ON i.id = e.issue_id
        WHERE ${where}
@@ -965,7 +994,7 @@ export class IssueService {
       params
     )
 
-    const topCulprits = this.db.all<{ culprit: string; n: number; occurrences: number }>(
+    const topCulprits = await this.db.all<{ culprit: string; n: number; occurrences: number }>(
       `SELECT i.culprit, COUNT(DISTINCT i.id) AS n, COUNT(e.id) AS occurrences
        FROM issue_events e JOIN issues i ON i.id = e.issue_id
        WHERE ${where} AND i.culprit IS NOT NULL
@@ -997,17 +1026,17 @@ export class IssueService {
   // 内部
   // ==========================================================
 
-  private requireRow(projectId: number, issueId: number): IssueRow {
-    const row = this.db.get<IssueRow>('SELECT * FROM issues WHERE id = ? AND project_id = ?', [
-      issueId,
-      projectId
-    ])
+  private async requireRow(projectId: number, issueId: number): Promise<IssueRow> {
+    const row = await this.db.get<IssueRow>(
+      'SELECT * FROM issues WHERE id = ? AND project_id = ?',
+      [issueId, projectId]
+    )
     if (!row) throw AppError.notFound('问题')
     return row
   }
 
-  private findReleaseId(projectId: number, version: string): number | undefined {
-    const row = this.db.get<{ id: number }>(
+  private async findReleaseId(projectId: number, version: string): Promise<number | undefined> {
+    const row = await this.db.get<{ id: number }>(
       'SELECT id FROM releases WHERE project_id = ? AND version = ?',
       [projectId, version]
     )
@@ -1015,12 +1044,12 @@ export class IssueService {
   }
 
   /** 人工操作落库：写状态 + 写活动流 */
-  private persistManual(
+  private async persistManual(
     issue: IssueRow,
     result: { state: IssueState; changes: Record<string, unknown>; activities: ActivityDraft[] },
     actorId: number | undefined,
     reason: string | undefined
-  ): void {
+  ): Promise<void> {
     const now = Date.now()
     const sets: string[] = []
     const params: unknown[] = []
@@ -1036,16 +1065,20 @@ export class IssueService {
     sets.push('updated_at = ?')
     params.push(now)
 
-    this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ?`, [...params, issue.id])
+    await this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ?`, [...params, issue.id])
 
     for (const activity of result.activities) {
-      this.writeActivity(issue.id, { ...activity, reason: activity.reason ?? reason }, now)
+      const activityId = await this.writeActivity(
+        issue.id,
+        { ...activity, reason: activity.reason ?? reason },
+        now
+      )
       // 人工操作要记录是谁干的
       if (activity.actorType === 'member' && actorId) {
-        this.db.run('UPDATE issue_activity SET actor_id = ? WHERE issue_id = ? AND id = ?', [
+        await this.db.run('UPDATE issue_activity SET actor_id = ? WHERE issue_id = ? AND id = ?', [
           actorId,
           issue.id,
-          Number(lastId(this.db))
+          activityId
         ])
       }
     }
@@ -1221,10 +1254,4 @@ export function sortIssues(
       break
   }
   return sorted
-}
-
-/** 取最后插入的自增 ID */
-export function lastId(db: Db): number {
-  const row = db.get<{ id: number }>('SELECT last_insert_rowid() AS id')
-  return row?.id ?? 0
 }
