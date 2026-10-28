@@ -369,9 +369,27 @@ docker compose up --build    # 面板 :8080，接口 :4318
 面板 `vite.config.ts` 用了 `strictPort: true` —— 端口被占用时直接报错，
 而不是像 Vite 默认那样静默递增到 5175。
 
+### ⚠️ 采集服务重启必须带管理 token
+
+采集服务不设 `VIGIL_ADMIN_TOKEN` 时会**随机生成**一个，
+而面板的 Vite 代理用的是 `process.env.VIGIL_ADMIN_TOKEN ?? 'vigil_admin_demo'`。
+
+两边不一致时，面板所有管理接口 **403**（`管理 token 不匹配`），
+数据明明在库里却一条都看不到。
+
+```powershell
+# Windows
+cmd /c "set VIGIL_ADMIN_TOKEN=vigil_admin_demo&& set PORT=4318&& npm run dev:collector"
+```
+
+采集服务还在跑的时候 `npm run seed:demo -- --reset` 会**删不掉数据库文件**
+（Windows 上文件被占用）—— 先停服务，播种，再起服务。
+
 ## 提交约定
 
 - conventional commits，`feat` / `fix` / `refactor` / `docs` / `test` / `chore` / `ci`
 - **每个 commit 一个原子改动**，docs 单独提交
 - subject ≤ 50 字
 - pre-commit 会跑 lint-staged（eslint --fix + prettier --write）
+- ⚠️ **commitlint 拒绝 subject 里的全大写缩写**：`README` / `AGENTS` / `E2E` 都会被拒。
+  写成「补回放域不变量」而不是「AGENTS 补回放域不变量」。
