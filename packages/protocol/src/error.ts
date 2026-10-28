@@ -137,6 +137,14 @@ export interface ErrorEvent {
   /** 可搜索的结构化标签 */
   tags?: Tag[]
 
+  /**
+   * 会话回放 —— 出错**之前**的操作轨迹。
+   *
+   * 由回放插件挂上。事件流是 rrweb 格式（一个全量快照 + 后续增量），
+   * 必须连续，丢一段后面全播不了。
+   */
+  replay?: import('./replay.js').ReplayPayload
+
   /** 报错瞬间的性能快照 */
   vitals?: ErrorVitals
 
