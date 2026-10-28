@@ -38,6 +38,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(__dirname, '..')
 const SDK_DIST = path.join(REPO_ROOT, 'packages', 'sdk', 'dist', 'index.js')
 const SDK_IIFE = path.join(REPO_ROOT, 'packages', 'sdk', 'dist', 'index.iife.js')
+const SDK_REPLAY_IIFE = path.join(REPO_ROOT, 'packages', 'sdk', 'dist', 'replay.iife.js')
 
 const ADMIN_TOKEN = 'admin_e2e_token'
 
@@ -111,8 +112,8 @@ function findCachedChromium(): string | undefined {
   return candidates[0]?.file
 }
 
-if (!fs.existsSync(SDK_DIST) || !fs.existsSync(SDK_IIFE)) {
-  console.error(`找不到 SDK 产物：${SDK_DIST} / ${SDK_IIFE}`)
+if (!fs.existsSync(SDK_DIST) || !fs.existsSync(SDK_IIFE) || !fs.existsSync(SDK_REPLAY_IIFE)) {
+  console.error(`找不到 SDK 产物：${SDK_DIST} / ${SDK_IIFE} / ${SDK_REPLAY_IIFE}`)
   console.error('先跑 npm run build --workspace @vigil/sdk')
   process.exit(1)
 }
@@ -232,11 +233,66 @@ const PAGE = `<!doctype html>
 </body>
 </html>`
 
+// ---- 回放与行为专用页 ----
+//
+// 单独一页，不和上面那页混：上面那页在 <head> 里就初始化了，
+// 而 rrweb 的第一帧是**全量快照** —— 启动太早只能拍到空壳，
+// 拍不到真实 DOM。
+const REPLAY_PAGE = `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Vigil 回放 E2E</title>
+<script src="/sdk/index.iife.js"></script>
+<script src="/sdk/replay.iife.js"></script>
+</head>
+<body>
+<h1>购物车</h1>
+<div id="cart">购物车</div>
+<button id="checkout">去结算</button>
+<script>
+window.addEventListener('DOMContentLoaded', function () {
+  Vigil.init({
+    endpoint: '${collectorUrl}/api/v1/collect',
+    appId: '${project.project.slug}',
+    token: '${project.runtimeKey}',
+    release: '1.0.0',
+    environment: 'production',
+    flushIntervalMs: 300,
+    maxBatchSize: 5,
+    performanceSampleRate: 0,
+    plugins: [
+      VigilReplay.replayPlugin({ maxBytes: 64 * 1024 }),
+      VigilReplay.behaviorPlugin({ flushIntervalMs: 400 })
+    ]
+  })
+  window.__vigilReady = true
+
+  // 交互：让回放里有增量事件，也让行为域收到 click
+  setTimeout(function () {
+    document.getElementById('checkout').click()
+    document.getElementById('cart').textContent = '购物车 · 共 3 件商品'
+  }, 300)
+
+  // 出错 —— 回放事件流随这条错误一起上报
+  setTimeout(function () {
+    Vigil.captureException(new TypeError('E2E: 回放验证用的错误'))
+  }, 900)
+})
+</script>
+</body>
+</html>`
+
 const staticServer = http.createServer((req, res) => {
   const url = req.url ?? '/'
   if (url.startsWith('/page.html')) {
     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
     res.end(PAGE)
+    return
+  }
+  if (url.startsWith('/replay.html')) {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    res.end(REPLAY_PAGE)
     return
   }
   if (url === '/sdk/index.js') {
@@ -247,6 +303,11 @@ const staticServer = http.createServer((req, res) => {
   if (url === '/sdk/index.iife.js') {
     res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
     res.end(fs.readFileSync(SDK_IIFE))
+    return
+  }
+  if (url === '/sdk/replay.iife.js') {
+    res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8' })
+    res.end(fs.readFileSync(SDK_REPLAY_IIFE))
     return
   }
   if (url === '/app.min.js') {
@@ -600,6 +661,174 @@ check(
   (afterUnload?.c ?? 0) >= beforeUnload,
   `卸载前 ${beforeUnload} 次 → 卸载后 ${afterUnload?.c ?? 0} 次`
 )
+
+// ============================================================
+// 15. 会话回放与用户行为
+// ============================================================
+//
+// 这一段验的是**真浏览器录出来的** rrweb 事件流：
+//   真 Chromium → 真 SDK 回放插件 → 真 rrweb 录制 → 真 HTTP 上报
+//   → 真 Collector → 真 SQLite → 真查询 API
+//
+// 之前这块完全没有覆盖，所以三个 bug 一起溜过去了：
+//   1. 全量快照事件类型写错（0 应为 2）→ 缓冲区从不重置
+//   2. 种子流的节点类型写错 → 播放器静默播不出来
+//   3. 行为通道地址拼错 → 行为数据一条都到不了
+const replayPage = await browser.newPage()
+const replayErrors: string[] = []
+replayPage.on('pageerror', (error) => replayErrors.push(error.message))
+replayPage.on('console', (message) => {
+  if (message.type() !== 'error') return
+  const location = message.location()?.url ?? ''
+  if (location.includes('favicon')) return
+  replayErrors.push(`${message.text()}: ${location}`)
+})
+
+await replayPage.goto(`http://127.0.0.1:${staticPort}/replay.html`, { waitUntil: 'load' })
+await replayPage.waitForFunction(
+  () => (window as unknown as { __vigilReady?: boolean }).__vigilReady === true,
+  undefined,
+  { timeout: 20000 }
+)
+
+// ---- 回放事件流入库 ----
+const countReplayEvents = () =>
+  db.get<{ n: number }>('SELECT COUNT(*) AS n FROM replay_events WHERE project_id = ?', [
+    project.project.id
+  ])?.n ?? 0
+
+await waitFor(() => (countReplayEvents() > 0 ? true : undefined), 20000)
+
+const replayRows = db.all<{ seq: number; event_type: number }>(
+  `SELECT seq, event_type FROM replay_events
+   WHERE project_id = ? ORDER BY seq`,
+  [project.project.id]
+)
+check('回放事件流已入库', replayRows.length > 0, `${replayRows.length} 个事件`)
+
+/**
+ * 关键断言：**全量快照必须排在所有增量之前**。
+ *
+ * rrweb 的回放是「一个全量快照 + 一串增量」。播放器靠快照建立
+ * DOM 镜像，后面的增量才能对上。
+ *
+ * 如果快照不在最前面 —— 增量链就断了，播放器会**静默播不出来**，
+ * 不报任何错。这正是之前 `FULL_SNAPSHOT_TYPE` 写错时发生的事。
+ */
+const FULL_SNAPSHOT = 2
+const INCREMENTAL = 3
+const META = 4
+
+const firstSnapshotIndex = replayRows.findIndex((row) => row.event_type === FULL_SNAPSHOT)
+const firstIncrementalIndex = replayRows.findIndex((row) => row.event_type === INCREMENTAL)
+check(
+  '回放流里有全量快照（增量链的起点）',
+  firstSnapshotIndex >= 0,
+  `快照位置 ${firstSnapshotIndex} · 类型分布 ${[...new Set(replayRows.map((r) => r.event_type))].join(' / ')}`
+)
+check(
+  '全量快照排在增量之前',
+  firstSnapshotIndex >= 0 && firstSnapshotIndex < firstIncrementalIndex,
+  `快照位置 ${firstSnapshotIndex} · 首个增量位置 ${firstIncrementalIndex}`
+)
+check(
+  '回放流里有增量事件',
+  firstIncrementalIndex >= 0,
+  `类型分布 ${[...new Set(replayRows.map((r) => r.event_type))].join(' / ')}`
+)
+
+/**
+ * Meta 带的是**原始视口尺寸** —— 播放器靠它把内容按比例缩放。
+ * 缓冲区重置时如果把 Meta 一起丢掉，回放会被裁切。
+ */
+check(
+  '回放流保留了 Meta（视口尺寸）',
+  replayRows.some((row) => row.event_type === META),
+  `类型分布 ${[...new Set(replayRows.map((r) => r.event_type))].join(' / ')}`
+)
+
+// ---- 会话汇总入库 ----
+const sessionRow = db.get<{ n: number; replay_events: number }>(
+  `SELECT COUNT(*) AS n, COALESCE(SUM(replay_events), 0) AS replay_events
+   FROM replay_sessions WHERE project_id = ?`,
+  [project.project.id]
+)
+check('会话汇总入库', (sessionRow?.n ?? 0) >= 1, `${sessionRow?.n ?? 0} 个会话`)
+
+// ---- 管理 API 能读回回放流 ----
+const sessionsResponse = await fetch(
+  `${collectorUrl}/api/v1/projects/${project.project.id}/sessions`,
+  { headers: { 'x-vigil-admin-token': ADMIN_TOKEN } }
+)
+const sessionsBody = (await sessionsResponse.json()) as {
+  total: number
+  sessions: Array<{ sessionId: string; hasReplay: boolean; replayEvents: number }>
+}
+const withReplay = (sessionsBody.sessions ?? []).filter((s) => s.hasReplay)
+check(
+  '会话列表里至少有一个带回放',
+  withReplay.length >= 1,
+  `${sessionsBody.total ?? 0} 个会话，其中 ${withReplay.length} 个有回放`
+)
+
+const replaySessionId = withReplay[0]?.sessionId
+const streamResponse = await fetch(
+  `${collectorUrl}/api/v1/projects/${project.project.id}/sessions/${replaySessionId}/replay`,
+  { headers: { 'x-vigil-admin-token': ADMIN_TOKEN } }
+)
+const streamBody = (await streamResponse.json()) as { events: number; stream: unknown[] }
+check(
+  '回放流能从管理 API 读回',
+  streamResponse.ok && streamBody.events === replayRows.length,
+  `API 返回 ${streamBody.events} 个事件 · 库里 ${replayRows.length} 个`
+)
+
+// ---- 行为域 ----
+const countBehavior = () =>
+  db.get<{ n: number }>('SELECT COUNT(*) AS n FROM behavior_events WHERE project_id = ?', [
+    project.project.id
+  ])?.n ?? 0
+
+await waitFor(() => (countBehavior() > 0 ? true : undefined), 20000)
+
+const behaviorRows = db.all<{ type: string }>(
+  'SELECT type FROM behavior_events WHERE project_id = ?',
+  [project.project.id]
+)
+const behaviorTypes = new Set(behaviorRows.map((row) => row.type))
+check('行为事件入库', behaviorRows.length > 0, `${behaviorRows.length} 条`)
+check(
+  '行为事件里有页面访问',
+  behaviorTypes.has('pageview'),
+  `类型分布 ${[...behaviorTypes].join(' / ')}`
+)
+check('行为事件里有点击', behaviorTypes.has('click'), `类型分布 ${[...behaviorTypes].join(' / ')}`)
+
+// 行为汇总 API
+const behaviorResponse = await fetch(
+  `${collectorUrl}/api/v1/projects/${project.project.id}/behavior/summary`,
+  { headers: { 'x-vigil-admin-token': ADMIN_TOKEN } }
+)
+const behaviorBody = (await behaviorResponse.json()) as {
+  summary: { pageViews: number; sessions: number; topPages: unknown[] }
+}
+check(
+  '行为汇总 API 返回的访问次数与库一致',
+  behaviorResponse.ok && behaviorBody.summary.pageViews >= 1,
+  `汇总 pageViews=${behaviorBody.summary?.pageViews} · 库里的 pageview ${behaviorRows.filter((r) => r.type === 'pageview').length} 条`
+)
+
+// 回放页不应该有 JS 报错
+const realReplayErrors = replayErrors.filter(
+  (text) => !text.includes('favicon') && !text.includes('DevTools')
+)
+check(
+  '回放页面没有 JS 报错',
+  realReplayErrors.length === 0,
+  realReplayErrors.slice(0, 3).join(' | ') || '无'
+)
+
+await replayPage.close()
 
 // ---- 收尾 ----
 await browser.close()
