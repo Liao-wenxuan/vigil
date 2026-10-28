@@ -1,3 +1,5 @@
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { openDb } from './infra/db/client.js'
 import { TenancyService } from './domains/tenancy/service.js'
 
@@ -16,7 +18,26 @@ const args = process.argv.slice(2)
 const command = args[0]
 const sub = args[1]
 
-const db = openDb(process.env.VIGIL_DB_PATH ?? './data/vigil.db')
+const argValue = (name: string, fallback?: string) => {
+  const index = args.indexOf(`--${name}`)
+  return index !== -1 ? args[index + 1] : fallback
+}
+
+/**
+ * 仓库根目录。
+ *
+ * ⚠️ 数据库路径**必须**相对仓库根解析，不能用相对 CWD 的路径 ——
+ *    `npm --prefix packages/collector run cli` 的 CWD 是 packages/collector，
+ *    相对路径会指向 packages/collector/data/vigil.db —— 一个空库。
+ *    症状是「CLI 查出来什么都没有」，但采集服务那边数据好好的，
+ *    极难联想到是路径问题。
+ */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
+
+const dbPath =
+  argValue('db') ?? process.env.VIGIL_DB_PATH ?? path.join(REPO_ROOT, 'data', 'vigil.db')
+
+const db = openDb(dbPath)
 const tenancy = new TenancyService(db)
 
 function printUsage(): void {

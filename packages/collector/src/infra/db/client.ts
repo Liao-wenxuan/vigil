@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3'
 import fs from 'node:fs'
 import nodePath from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { runMigrations, MIGRATIONS } from './migrate.js'
 import type { Dialect } from './dialect.js'
 
@@ -99,4 +100,27 @@ export function openDb(path: string, options: { migrate?: boolean } = {}): Db {
 /** 暴露原始句柄（仅 SQLite 特有操作需要时用） */
 export function rawHandle(db: Db): Database.Database | undefined {
   return db instanceof SqliteDb ? (db as unknown as { db: Database.Database }).db : undefined
+}
+
+/**
+ * 默认数据库路径。
+ *
+ * ⚠️ 相对**仓库根**解析，不能相对 CWD。
+ *
+ *    `npm run dev:collector` 会以 packages/collector 为 CWD 跑，
+ *    相对路径会指向 packages/collector/data/vigil.db ——
+ *    于是采集服务连的是 A 库、种子脚本写的是 B 库，
+ *    表现是「种子跑完了但面板空空如也」。
+ *
+ *    根因是这类脚本的 CWD 随 npm 的调用方式变化，
+ *    路径必须锚定在仓库结构上，而不是调用者当时站在哪。
+ */
+export function defaultDbPath(): string {
+  if (process.env.VIGIL_DB_PATH) return process.env.VIGIL_DB_PATH
+
+  const repoRoot = nodePath.resolve(
+    nodePath.dirname(fileURLToPath(import.meta.url)),
+    '../../../../..'
+  )
+  return nodePath.join(repoRoot, 'data', 'vigil.db')
 }

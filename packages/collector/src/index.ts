@@ -1,4 +1,5 @@
 import { createAppFromEnv } from './app.js'
+import { defaultDbPath } from './infra/db/client.js'
 
 /**
  * 采集服务启动入口。
@@ -20,7 +21,7 @@ const { app, db, evaluator } = createAppFromEnv()
 try {
   await app.listen({ port, host })
   console.log(`[vigil] 采集服务已启动 http://${host}:${port}`)
-  console.log(`[vigil] 数据库 ${process.env.VIGIL_DB_PATH ?? './data/vigil.db'}`)
+  console.log(`[vigil] 数据库 ${defaultDbPath()}`)
   if (adminTokenGenerated) {
     console.log(
       `[vigil] 管理 token（本次随机生成，重启后会变）：${process.env.VIGIL_ADMIN_TOKEN ?? ''}`
