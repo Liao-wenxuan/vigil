@@ -34,34 +34,38 @@ defineProps<{
 .panel {
   background: var(--vigil-bg-raised);
   border: 1px solid var(--vigil-border);
-  border-radius: 4px;
+  border-radius: var(--vigil-radius);
   overflow: hidden;
 }
 
 .panel-head {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 12px 16px;
+  gap: var(--vigil-space-3);
+  padding: var(--vigil-space-3) var(--vigil-space-4);
   border-bottom: 1px solid var(--vigil-border);
 }
 
+/* 区块标题：15px / 600 —— 和 26px 的页面标题拉开一档，
+   和 13px 的正文也拉开一档。层级是三层的，不是两层的。 */
 .panel-title {
   display: flex;
   align-items: baseline;
-  gap: 10px;
-  font-size: 14px;
-  font-weight: 500;
+  gap: var(--vigil-space-2);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: var(--vigil-tracking-tight);
+  color: var(--vigil-text-1);
 }
 
 .panel-count {
-  font-size: 12px;
+  font-size: var(--vigil-text-xs);
   font-weight: 400;
   color: var(--vigil-text-3);
 }
 
 .panel-hint {
-  font-size: 12px;
+  font-size: var(--vigil-text-xs);
   color: var(--vigil-text-3);
 }
 
@@ -69,10 +73,10 @@ defineProps<{
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--vigil-space-2);
 }
 
 .panel-body {
-  padding: 16px;
+  padding: var(--vigil-space-4);
 }
 </style>

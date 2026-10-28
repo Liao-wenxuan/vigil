@@ -31,33 +31,50 @@ const display = computed(() => props.value.toLocaleString('zh-CN'))
 .stat-card {
   background: var(--vigil-bg-raised);
   border: 1px solid var(--vigil-border);
-  border-radius: 4px;
-  padding: 15px 17px;
+  border-radius: var(--vigil-radius);
+  padding: var(--vigil-space-4) var(--vigil-space-4);
+  /* 卡片本身不做位移+阴影的「通用悬浮」——
+     那样每个卡片都在喊，等于什么都没说。
+     这里只让**边框**亮一档：它表达的是「这块可看」，不是「这块特别重要」。 */
+  transition:
+    border-color var(--vigil-motion-fast) var(--vigil-ease-standard),
+    background var(--vigil-motion-fast) var(--vigil-ease-standard);
+}
+
+.stat-card:hover {
+  border-color: var(--vigil-border-strong);
+  background: #232327;
 }
 
 .stat-label {
-  font-size: 12px;
+  font-size: var(--vigil-text-xs);
   color: var(--vigil-text-3);
-  letter-spacing: 0.03em;
+  letter-spacing: var(--vigil-tracking-wide);
 }
 
+/* 数字是这个面板里第二大的东西 —— 26px。页面标题 30px 领头，
+   数字跟着它，但不能跟它一样大，否则层级就平了。
+   纯字重不够：黑体大字重在深底上会糊，所以字重 500 + 更亮的白。 */
 .stat-value {
-  font-size: 28px;
+  font-size: var(--vigil-text-xl);
   font-weight: 500;
-  line-height: 1.25;
-  margin-top: 6px;
+  line-height: var(--vigil-leading-tight);
+  letter-spacing: var(--vigil-tracking-tight);
+  margin-top: var(--vigil-space-1);
   color: var(--vigil-text-1);
 }
 
 .stat-unit {
-  font-size: 13px;
+  font-size: var(--vigil-text-sm);
   color: var(--vigil-text-3);
-  margin-left: 4px;
+  margin-left: var(--vigil-space-1);
+  font-weight: 400;
 }
 
 .stat-hint {
-  font-size: 11px;
+  font-size: var(--vigil-text-2xs);
   color: var(--vigil-text-3);
-  margin-top: 4px;
+  margin-top: var(--vigil-space-1);
+  line-height: var(--vigil-leading-normal);
 }
 </style>

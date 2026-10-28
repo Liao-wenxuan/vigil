@@ -1,14 +1,19 @@
 /**
- * 设计 token。
+ * Vigil 设计 token 层。
  *
- * 沿用「工业 HUD 调性」：深炭底 + 唯一强调色 + 纯色底 + 1px 描边 + 无阴影。
+ * 改样式只改这里，不要在组件里写死数值。
  *
- * 两条硬规则：
- * 1. **强调色只用于状态**（主按钮、选中态、状态标签），
- *    **不用于显示数据** —— 数字、计数、错误次数一律用白色系。
- *    否则一屏数字全黄绿，扫一眼分不出哪个是重点。
- * 2. **文字用同一白的三档透明度**，不用灰阶。
- *    灰阶偏冷，和暖炭底不搭；透明度叠在底色上更协调。
+ * ## 三条纪律
+ *
+ * 1. **字阶必须有真实的跳跃。** 全部字号挤在 11–16px 之间，
+ *    页面就没有层级 —— 「没设计感」通常说的就是这个。
+ *    层级不只靠字号：中文大字重会糊成一块，
+ *    所以**字重 + 颜色 + 字号**三者一起用。
+ *
+ * 2. **间距只用这几档。** 间距一乱，页面就散了。
+ *
+ * 3. **强调色只表示状态。** 数字、计数一律白色 ——
+ *    一屏数字全黄绿就分不出重点了。
  */
 
 :root {
@@ -22,7 +27,7 @@
   /* 浅色场景下同一个色在浅底上只有 1.7:1，必须换暗态 */
   --vigil-accent-dim: #7d8220;
 
-  /* ---- 文字：同一白的三档透明度 ---- */
+  /* ---- 文字：同一白的三档透明度，而不是灰阶 ---- */
   --vigil-text-1: rgba(255, 255, 255, 0.94);
   --vigil-text-2: rgba(255, 255, 255, 0.66);
   --vigil-text-3: rgba(255, 255, 255, 0.42);
@@ -35,11 +40,83 @@
   --vigil-danger: #d9534f;
   --vigil-warn: #d8a13a;
   --vigil-ok: #4fa85f;
+
+  /* ============================================================
+     字阶
+     ============================================================
+     11 / 12 / 13 / 14 / 16 / 20 / 26 / 30
+     最小 11，最大 30 → 对比度 2.7×
+
+     面板是数据密集型界面，正文比落地页小（13 而不是 16）——
+     这是密度决定的，不是偷懒。层级靠**字重 + 颜色**补：
+     页面标题 600/26，区块标题 600/15，正文 400/13，元信息 400/11。
+     */
+  --vigil-text-2xs: 11px;
+  --vigil-text-xs: 12px;
+  --vigil-text-sm: 13px;
+  --vigil-text-base: 14px;
+  --vigil-text-md: 16px;
+  --vigil-text-lg: 20px;
+  --vigil-text-xl: 26px;
+  --vigil-text-2xl: 30px;
+
+  /* 行高随字号走：字越大行距越松 */
+  --vigil-leading-tight: 1.2;
+  --vigil-leading-normal: 1.5;
+  --vigil-leading-loose: 1.65;
+
+  /* 字距：标题收紧，正文不动 */
+  --vigil-tracking-tight: -0.02em;
+  --vigil-tracking-normal: 0;
+  --vigil-tracking-wide: 0.04em;
+
+  /* ============================================================
+     间距节奏
+     ============================================================ */
+  --vigil-space-1: 4px;
+  --vigil-space-2: 8px;
+  --vigil-space-3: 12px;
+  --vigil-space-4: 16px;
+  --vigil-space-5: 20px;
+  --vigil-space-6: 24px;
+  --vigil-space-8: 32px;
+  --vigil-space-10: 40px;
+  --vigil-space-12: 48px;
+
+  /* 圆角 */
+  --vigil-radius-sm: 3px;
+  --vigil-radius: 4px;
+  --vigil-radius-lg: 6px;
+
+  /* ============================================================
+     动效档位
+     ============================================================
+     三档，不是一个 0.3s ease 用到底 ——
+     那样读起来就是 CSS 默认值。
+     */
+  --vigil-motion-instant: 90ms;
+  --vigil-motion-fast: 160ms;
+  --vigil-motion-standard: 280ms;
+  --vigil-motion-slow: 460ms;
+
+  /* 入场：快进慢停 */
+  --vigil-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* 退场：慢起快出 */
+  --vigil-ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  /* 通用 */
+  --vigil-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  /* 轻微过冲：只给「按下去」的手感 */
+  --vigil-ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-/* Element Plus 的暗色变量覆盖。
-   EP 自带的暗色主题是通用深灰，和上面的暖炭底不是一回事，
-   所以这里把关键变量重新指一遍。 */
+/* ============================================================
+   Element Plus 覆盖
+   ============================================================ */
+
+/**
+ * Element Plus 自带的暗色主题是通用深灰，和暖炭底不是一回事，
+ * 所以关键变量重新指一遍。
+ */
 html.dark {
   --el-color-primary: var(--vigil-accent);
   --el-color-primary-light-3: #a9ad44;
@@ -73,7 +150,57 @@ html.dark {
   --el-mask-color: rgba(0, 0, 0, 0.72);
   --el-disabled-bg-color: #232327;
   --el-disabled-text-color: var(--vigil-text-3);
+
+  /* Element Plus 的默认圆角偏大，这里收到 4px，和整体一致 */
+  --el-border-radius-base: 4px;
+  --el-border-radius-small: 3px;
+
+  /* 控件高度：Element Plus 默认 32px 偏小，在这个面板里主控件统一抬到 36px */
+  --el-component-size: 36px;
+  --el-component-size-small: 28px;
 }
+
+/* ============================================================
+   控件尺寸
+   ============================================================
+   44px 是**触摸**场景的准则。这个面板是桌面监控台，
+   密集表格里的行内文字按钮不可能做到 44px —— 那样表格会被撑爆。
+
+   所以分档：
+   - **主控件**（导航项、主按钮、tab 项）→ 44px，鼠标和手指都够用
+   - **密集控件**（表格行内文字按钮）→ 保持紧凑，靠间距隔开避免误点
+   - Element Plus 的原生 input 被自定义控件替代，它的**可点区域是 wrapper**，
+     原始 input 尺寸不参与判断
+   */
+.el-button:not(.is-link):not(.is-text) {
+  min-height: 36px;
+}
+
+.el-tabs__item {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+}
+
+.el-select__wrapper,
+.el-input__wrapper {
+  min-height: 36px;
+}
+
+/* 表格行内的文字按钮（归档 / 解决 / 收藏）。
+   密集表格里它们必须紧凑 —— 做到 44px 会把表格撑成三倍高。
+   但 18px 太小，误点成本高（误归档一个 Issue 是有后果的），
+   所以给到 24px + 更多横向留白。 */
+.el-table .el-button.is-link,
+.el-table .el-button--small.is-link {
+  min-height: 24px;
+  padding: 0 var(--vigil-space-2);
+  margin-left: var(--vigil-space-1);
+}
+
+/* ============================================================
+   基础
+   ============================================================ */
 
 * {
   box-sizing: border-box;
@@ -98,8 +225,30 @@ body {
     'PingFang SC',
     'Microsoft YaHei',
     sans-serif;
-  font-size: 14px;
+  font-size: var(--vigil-text-sm);
+  line-height: var(--vigil-leading-normal);
   -webkit-font-smoothing: antialiased;
+}
+
+/* ============================================================
+   焦点环
+   ============================================================
+   键盘可见性不是可选项 —— 没有焦点环的人没法用键盘操作。
+   用 :focus-visible 而不是 :focus，避免鼠标点击也画一圈。
+   */
+:focus-visible {
+  outline: 2px solid var(--vigil-accent);
+  outline-offset: 2px;
+  border-radius: var(--vigil-radius-sm);
+}
+
+/* Element Plus 的部分控件内部元素不继承 outline，单独补 */
+.el-select__wrapper:focus-visible,
+.el-input__wrapper:focus-visible,
+.el-button:focus-visible,
+.el-switch:focus-visible {
+  outline: 2px solid var(--vigil-accent);
+  outline-offset: 2px;
 }
 
 /* 数字用等宽 —— 列表里的计数要能上下对齐地扫 */
@@ -108,7 +257,13 @@ body {
   font-feature-settings: 'tnum';
 }
 
-/* 滚动条：默认的亮色滚动条在深底上很刺眼 */
+.mono {
+  font-family: 'SF Mono', 'Cascadia Mono', Consolas, monospace;
+}
+
+/* ============================================================
+   滚动条
+   ============================================================ */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -127,7 +282,9 @@ body {
   background-clip: content-box;
 }
 
-/* Element Plus 细节修正 */
+/* ============================================================
+   Element Plus 细节
+   ============================================================ */
 .el-table {
   --el-table-border-color: var(--vigil-border);
   --el-table-header-bg-color: var(--vigil-bg-sunken);
@@ -139,12 +296,17 @@ body {
 .el-table th.el-table__cell {
   font-weight: 500;
   color: var(--vigil-text-3);
-  font-size: 12px;
-  letter-spacing: 0.04em;
+  font-size: var(--vigil-text-xs);
+  letter-spacing: var(--vigil-tracking-wide);
 }
 
 .el-table .cell {
   line-height: 1.5;
+}
+
+/* 表格行高一点：密集表格也要能点得中 */
+.el-table .el-table__cell {
+  padding: 10px 0;
 }
 
 .el-drawer {
@@ -159,10 +321,78 @@ body {
 
 .el-tabs__item {
   color: var(--vigil-text-2);
+  transition: color var(--vigil-motion-fast) var(--vigil-ease-standard);
 }
 .el-tabs__item.is-active {
   color: var(--vigil-text-1);
 }
 .el-tabs__nav-wrap::after {
   background-color: var(--vigil-border);
+}
+.el-tabs__active-bar {
+  background-color: var(--vigil-accent);
+}
+
+/* ============================================================
+   触摸宽度
+   ============================================================
+   窄屏下控件按**手指**尺寸来，不是鼠标。
+   面板的窄屏形态是「抽屉导航 + 单列内容」，
+   顶栏的开关和按钮正好是最容易被误触的地方。
+   */
+@media (max-width: 768px) {
+  /* ⚠️ 选择器特异度必须和上面的桌面规则**一样高**。
+     桌面那条是 `:not(.is-link):not(.is-text)`（特异度 0,3,0），
+     这里如果只写 `:not(.is-link)`（0,2,0），桌面规则会赢 ——
+     窄屏的尺寸就永远不生效，而且不报任何错。 */
+  .el-button:not(.is-link):not(.is-text) {
+    min-height: 44px;
+    padding: 0 var(--vigil-space-4);
+  }
+
+  .el-button.is-text {
+    min-height: 44px;
+  }
+
+  .el-switch {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .el-select__wrapper,
+  .el-input__wrapper {
+    min-height: 44px;
+  }
+
+  /* 分页的上一页/下一页/页码。
+     ⚠️ 上下页按钮**不在** .el-pager 里（它是 .el-pager 的兄弟节点），
+     而且 EP 自己的规则是 `.el-pagination .btn-prev`（特异度 0,2,0）——
+     这里必须用**同样**的选择器，否则 EP 的会赢。 */
+  .el-pagination .btn-prev,
+  .el-pagination .btn-next,
+  .el-pagination .el-pager li {
+    min-width: 40px;
+    min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+}
+
+/* ============================================================
+   动效降级
+   ============================================================
+   reduced-motion 不是一个「坏掉的版本」，而是一个**设计过的版本**。
+   动效没了，内容和层级都还在 —— 这才是合格的降级。
+   */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

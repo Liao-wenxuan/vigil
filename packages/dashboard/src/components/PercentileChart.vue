@@ -1,15 +1,23 @@
 <script setup lang="ts">
 /**
- * 分位数区间图（SVG 手写）。
+ * 分位数区间图（p50 → p95）。
  *
- * 画的是 p50 → p95 的一段区间：
- * - 区间底色用白色半透明 —— 它是**数据**
- * - p95 端点用强调色 —— 它是「这条线的警戒位」
- * - 数字一律白色
+ * ## 为什么不用 SVG
+ *
+ * 和 BarList 同样的问题：SVG 里的 `font-size` 是 **viewBox 单位**，
+ * 实际渲染大小 = `字号 × (面板宽 / 900)`。
+ * 面板宽度一变，标签字号就跟着变 —— 同一个「13px」在两个面板里不是一个大小。
+ *
+ * 改成 HTML/CSS：字号是真实 px，位置用百分比。
+ *
+ * ## 动效预算
+ *
+ * 区间条用 `translateX + scaleX` 定位 —— 全是 transform，不触发 layout。
+ * 端点竖线用 `left: X%` + `translateX(-50%)` 居中。
  */
-import { computed } from 'vue'
-
-const props = withDefaults(
+// 模板里直接用 props 的字段（<script setup> 会自动解包），
+// 所以这里不需要把 props 赋给一个变量
+withDefaults(
   defineProps<{
     items: Array<{
       label: string
@@ -24,20 +32,23 @@ const props = withDefaults(
   { emptyText: '暂无性能数据' }
 )
 
-const ROW_HEIGHT = 46
-const WIDTH = 900
-const LABEL_WIDTH = 130
-const VALUE_WIDTH = 130
-const BAR_WIDTH = WIDTH - LABEL_WIDTH - VALUE_WIDTH
-
-const height = computed(() => Math.max(ROW_HEIGHT, props.items.length * ROW_HEIGHT))
-
 function scaleMax(item: { p95: number; max?: number }): number {
   return item.max ?? Math.max(item.p95 * 1.3, 1)
 }
 
-function x(value: number, max: number): number {
-  return LABEL_WIDTH + (value / max) * BAR_WIDTH
+/** 区间起点的百分比 */
+function start(item: { p50: number; p95: number; max?: number }): string {
+  return `${(item.p50 / scaleMax(item)) * 100}%`
+}
+
+/** 区间宽度的百分比（相对轨道全宽） */
+function span(item: { p50: number; p95: number; max?: number }): string {
+  return `${((item.p95 - item.p50) / scaleMax(item)) * 100}%`
+}
+
+/** 端点的百分比位置 */
+function at(item: { p50: number; p95: number; max?: number }, value: number): string {
+  return `${(value / scaleMax(item)) * 100}%`
 }
 
 function format(value: number): string {
@@ -47,103 +58,114 @@ function format(value: number): string {
 
 <template>
   <div v-if="items.length === 0" class="pc-empty">{{ emptyText }}</div>
-  <svg
-    v-else
-    class="pc-chart"
-    :viewBox="`0 0 ${WIDTH} ${height}`"
-    preserveAspectRatio="xMinYMin meet"
-    role="img"
-  >
-    <g
-      v-for="(item, index) in items"
-      :key="item.label"
-      :transform="`translate(0, ${index * ROW_HEIGHT})`"
-    >
-      <text class="pc-label" :x="0" :y="18">{{ item.label }}</text>
-      <text class="pc-sub tabular" :x="0" :y="34">
-        p50 {{ format(item.p50) }}{{ item.unit ?? '' }}
-      </text>
 
-      <rect class="pc-track" :x="LABEL_WIDTH" :y="12" :width="BAR_WIDTH" height="12" rx="2" />
+  <div v-else class="pc-list">
+    <div v-for="(item, index) in items" :key="`${item.label}-${index}`" class="pc-row">
+      <div class="pc-names">
+        <span class="pc-label">{{ item.label }}</span>
+        <span class="pc-sub tabular"> p50 {{ format(item.p50) }}{{ item.unit ?? '' }} </span>
+      </div>
 
-      <rect
-        class="pc-band"
-        :x="x(item.p50, scaleMax(item))"
-        :y="12"
-        :width="Math.max(2, x(item.p95, scaleMax(item)) - x(item.p50, scaleMax(item)))"
-        height="12"
-        rx="2"
-      />
+      <div class="pc-track">
+        <span
+          class="pc-band"
+          :style="{ transform: `translateX(${start(item)}) scaleX(${span(item)})` }"
+        ></span>
+        <span class="pc-mark pc-p50" :style="{ left: at(item, item.p50) }"></span>
+        <span class="pc-mark pc-p95" :style="{ left: at(item, item.p95) }"></span>
+      </div>
 
-      <line
-        class="pc-p50"
-        :x1="x(item.p50, scaleMax(item))"
-        :x2="x(item.p50, scaleMax(item))"
-        :y1="8"
-        :y2="28"
-      />
-
-      <line
-        class="pc-p95"
-        :x1="x(item.p95, scaleMax(item))"
-        :x2="x(item.p95, scaleMax(item))"
-        :y1="6"
-        :y2="30"
-      />
-
-      <text class="pc-value tabular" :x="LABEL_WIDTH + BAR_WIDTH + 10" :y="22">
-        p95 {{ format(item.p95) }}{{ item.unit ?? '' }}
-      </text>
-    </g>
-  </svg>
+      <span class="pc-value tabular">p95 {{ format(item.p95) }}{{ item.unit ?? '' }}</span>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.pc-chart {
-  width: 100%;
-  min-width: 520px;
-  height: auto;
-  display: block;
+.pc-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vigil-space-3);
+}
+
+.pc-row {
+  display: grid;
+  grid-template-columns: minmax(0, 30%) 1fr auto;
+  gap: var(--vigil-space-3);
+  align-items: center;
+}
+
+.pc-names {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .pc-label {
-  fill: var(--vigil-text-1);
-  font-size: 13px;
+  font-size: var(--vigil-text-sm);
   font-weight: 500;
+  color: var(--vigil-text-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pc-sub {
-  fill: var(--vigil-text-3);
-  font-size: 11px;
+  font-size: var(--vigil-text-2xs);
+  color: var(--vigil-text-3);
 }
 
 .pc-track {
-  fill: rgba(255, 255, 255, 0.05);
+  position: relative;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: var(--vigil-radius-sm);
 }
 
 .pc-band {
-  fill: rgba(255, 255, 255, 0.22);
+  position: absolute;
+  left: 0;
+  top: 1px;
+  width: 100%;
+  height: 12px;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: var(--vigil-radius-sm);
+  transform-origin: left center;
+  transition: transform var(--vigil-motion-standard) var(--vigil-ease-out);
+}
+
+.pc-mark {
+  position: absolute;
+  top: -2px;
+  width: 2px;
+  height: 18px;
+  border-radius: 1px;
+  transform: translateX(-50%);
 }
 
 .pc-p50 {
-  stroke: var(--vigil-text-2);
-  stroke-width: 1;
+  background: var(--vigil-text-2);
 }
 
 .pc-p95 {
-  stroke: var(--vigil-accent);
-  stroke-width: 2;
+  background: var(--vigil-accent);
+  width: 2px;
+  height: 20px;
+  top: -3px;
 }
 
 .pc-value {
-  fill: var(--vigil-text-1);
-  font-size: 12px;
+  font-size: var(--vigil-text-xs);
+  color: var(--vigil-text-1);
+  min-width: 96px;
+  text-align: right;
+  white-space: nowrap;
 }
 
 .pc-empty {
-  padding: 28px;
+  padding: var(--vigil-space-6);
   text-align: center;
   color: var(--vigil-text-3);
-  font-size: 13px;
+  font-size: var(--vigil-text-sm);
 }
 </style>
