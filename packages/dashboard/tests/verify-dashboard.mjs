@@ -37,6 +37,21 @@ const dashboardUrl = argValue('url', 'http://localhost:5174')
 const collectorUrl = argValue('collector', 'http://127.0.0.1:4318')
 const adminToken = process.env.VIGIL_ADMIN_TOKEN ?? 'vigil_admin_demo'
 
+/**
+ * 面板默认时间范围是「最近 7 天」。
+ *
+ * E2E 的接口查询**必须用同一个窗口** ——
+ * 面板看的是窗口内的数字，接口返回的是全量数字，
+ * 拿全量去比窗口，断言必然对不上。
+ *
+ * 右端放宽一小时：面板的窗口右端是「请求那一刻」，
+ * 放宽不会引入未来数据（库里没有未来事件），但能吸收秒级的时间差。
+ */
+const RANGE_MS = 7 * 24 * 3600 * 1000
+const rangeSince = Date.now() - RANGE_MS
+const rangeUntil = Date.now() + 3600 * 1000
+const rangeQuery = `since=${rangeSince}&until=${rangeUntil}`
+
 const results = []
 
 function check(name, pass, detail) {
@@ -220,12 +235,14 @@ async function ensureDemoData() {
     console.log('  · 已创建 2 个版本')
   }
 
-  const stats = await api(`/projects/${project.id}/stats`)
+  // 播种判据也用**窗口内**的计数 ——
+  // 累计计数不为 0 但全都老到窗口外时，面板会是空的，E2E 会超时。
+  const stats = await api(`/projects/${project.id}/stats?${rangeQuery}`)
   if ((stats.stats?.total ?? 0) === 0) {
     await seedIssues(project, runtimeKey)
   }
 
-  const perf = await api(`/projects/${project.id}/performance`)
+  const perf = await api(`/projects/${project.id}/performance?${rangeQuery}`)
   if ((perf.summary?.transactions ?? 0) === 0) {
     await seedPerformance(project, runtimeKey)
   }
@@ -311,7 +328,7 @@ async function seedReplayAndBehavior(project, runtimeKey) {
   const now = Date.now()
   const sessionId = 'session-replay-verify'
 
-  const behavior = await api(`/projects/${project.id}/behavior/summary`)
+  const behavior = await api(`/projects/${project.id}/behavior/summary?${rangeQuery}`)
   if ((behavior.summary?.sessions ?? 0) === 0) {
     await ingest(
       '/api/v1/behavior',
@@ -710,14 +727,18 @@ console.log('  · 准备演示数据')
 const project = await ensureDemoData()
 console.log(`  · 当前项目：${project.name}（${project.slug}，#${project.id}）\n`)
 
-const statsBody = await api(`/projects/${project.id}/stats`)
+const statsBody = await api(`/projects/${project.id}/stats?${rangeQuery}`)
 const stats = statsBody.stats
 const issuesBody = await api(
-  `/projects/${project.id}/issues?status=unresolved&limit=50&sort=priority`
+  `/projects/${project.id}/issues?status=unresolved&limit=50&sort=priority&${rangeQuery}`
 )
 const issues = issuesBody.issues ?? []
-const perfBody = await api(`/projects/${project.id}/performance`)
+const perfBody = await api(`/projects/${project.id}/performance?${rangeQuery}`)
 const perf = perfBody.summary
+const trendBody = await api(
+  `/projects/${project.id}/issues/trend?${rangeQuery}&bucket=day&tzOffset=480`
+)
+const trend = trendBody.trend
 const rulesBody = await api(`/projects/${project.id}/alert-rules`)
 const channelsBody = await api(`/projects/${project.id}/channels`)
 const incidentsBody = await api(`/projects/${project.id}/alert-incidents`)
@@ -778,9 +799,9 @@ check(
   `卡片=${cardMap.get('去重错误')} · 接口=${stats.total.toLocaleString('zh-CN')}`
 )
 check(
-  '「累计发生」卡片显示 stats.occurrences',
-  cardMap.get('累计发生') === stats.occurrences.toLocaleString('zh-CN'),
-  `卡片=${cardMap.get('累计发生')} · 接口=${stats.occurrences.toLocaleString('zh-CN')}`
+  '「发生次数」卡片显示 stats.occurrences',
+  cardMap.get('发生次数') === stats.occurrences.toLocaleString('zh-CN'),
+  `卡片=${cardMap.get('发生次数')} · 接口=${stats.occurrences.toLocaleString('zh-CN')}`
 )
 check(
   '「待处理」卡片显示 stats.unresolved',
@@ -801,6 +822,59 @@ check(
   topBars === Math.min(10, issues.length),
   `页面=${topBars} 根条形 · 接口=${Math.min(10, issues.length)} 条问题`
 )
+
+// ---- 时间范围与错误趋势 ----
+const rangeOptions = await page.locator('.range-select').count()
+check('顶栏有时间范围选择器', rangeOptions === 1, `${rangeOptions} 个`)
+
+const trendBars = await page.locator('[data-panel="错误趋势"] .trend-col').count()
+check(
+  '错误趋势图渲染了 N 个桶',
+  trendBars === trend.points.length && trendBars > 0,
+  `页面=${trendBars} 个桶 · 接口=${trend.points.length} 个桶`
+)
+
+const trendOccurrences = trend.points.reduce((sum, point) => sum + point.occurrences, 0)
+check(
+  '趋势图的发生次数之和等于统计的 occurrences',
+  trendOccurrences === stats.occurrences,
+  `趋势合计=${trendOccurrences} · 统计=${stats.occurrences}`
+)
+
+const errorRateCard = cardMap.get('错误率')
+check(
+  '错误率卡片显示百分比或无访问',
+  errorRateCard === '—' || /%$/.test(errorRateCard ?? ''),
+  `卡片=${errorRateCard}`
+)
+
+// 缩短时间范围后，统计不该变大
+const beforeRange = cardMap.get('去重错误')
+await page.locator('.range-select').click()
+await page
+  .locator('.el-select__popper:visible .el-select-dropdown__item', { hasText: '最近 1 小时' })
+  .first()
+  .click()
+await page.waitForTimeout(1500)
+await page.waitForSelector('.stat-card', { timeout: 20000 })
+const afterValues = await page.locator('.stat-value').allTextContents()
+const afterLabels = await page.locator('.stat-label').allTextContents()
+const afterMap = new Map(
+  afterLabels.map((label, i) => [label.trim(), (afterValues[i] ?? '').trim()])
+)
+check(
+  '缩短时间范围后统计不增',
+  Number(afterMap.get('去重错误')) <= Number(beforeRange),
+  `7 天=${beforeRange} → 1 小时=${afterMap.get('去重错误')}`
+)
+
+// 切回默认档位，后面的断言才有稳定的基准
+await page.locator('.range-select').click()
+await page
+  .locator('.el-select__popper:visible .el-select-dropdown__item', { hasText: '最近 7 天' })
+  .first()
+  .click()
+await page.waitForTimeout(1500)
 
 /**
  * 回归防护：**同屏图表的标签字号必须一致**。
@@ -1020,7 +1094,7 @@ if (replaySessions.length > 0) {
 }
 
 // ---- 用户行为页 ----
-const behaviorBody = await api(`/projects/${project.id}/behavior/summary`)
+const behaviorBody = await api(`/projects/${project.id}/behavior/summary?${rangeQuery}`)
 const behaviorSummary = behaviorBody.summary
 
 await page.locator('.nav-item', { hasText: '用户行为' }).first().click()
