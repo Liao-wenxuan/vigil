@@ -10,14 +10,20 @@
  *   npm run seed:demo -- --reset   # 先清空
  */
 import fs from 'node:fs'
-import { openDb } from '../packages/collector/src/infra/db/client.js'
+import { openDb, defaultDbPath } from '../packages/collector/src/infra/db/client.js'
 import { TenancyService } from '../packages/collector/src/domains/tenancy/service.js'
 import { IssueService } from '../packages/collector/src/domains/issues/service.js'
 import { PerformanceService } from '../packages/collector/src/domains/performance/service.js'
 import { ArtifactService } from '../packages/collector/src/domains/artifacts/service.js'
 import { AlertingService } from '../packages/collector/src/domains/alerting/service.js'
+import { ReplayService } from '../packages/collector/src/domains/replay/service.js'
 import { computeFingerprint } from '../packages/sdk/src/fingerprint.js'
-import type { ErrorEvent, PerformanceEvent } from '../packages/protocol/src/index.js'
+import type {
+  BehaviorEvent,
+  ErrorEvent,
+  PerformanceEvent,
+  ReplayEvent
+} from '../packages/protocol/src/index.js'
 
 const args = process.argv.slice(2)
 const argValue = (name: string, fallback?: string) => {
@@ -25,7 +31,7 @@ const argValue = (name: string, fallback?: string) => {
   return index !== -1 ? args[index + 1] : fallback
 }
 
-const dbPath = argValue('db') ?? process.env.VIGIL_DB_PATH ?? './data/vigil.db'
+const dbPath = argValue('db') ?? defaultDbPath()
 const shouldReset = args.includes('--reset')
 
 if (shouldReset) {
@@ -42,6 +48,7 @@ const artifacts = new ArtifactService(db)
 const issues = new IssueService(db, artifacts.sourcemapResolver)
 const performance = new PerformanceService(db)
 const alerting = new AlertingService(db)
+const replayService = new ReplayService(db)
 
 const HOUR = 3600 * 1000
 const DAY = 24 * HOUR
@@ -442,6 +449,146 @@ issues.archive(shop.project.id, archivedOutcome.issueId, {
 })
 
 // ============================================================
+// 用户行为与会话回放
+// ============================================================
+//
+// 行为数据走**真实的 BehaviorService**（行为域），回放走 **ReplayService**。
+// 不手写 SQL —— 这样种子数据和真实上报在结构、聚合上完全一致。
+const behaviorPages = ['/', '/cart', '/checkout', '/product/1024', '/order/list', '/me']
+let behaviorCount = 0
+
+for (let session = 0; session < 40; session++) {
+  const sessionId = `sess_demo_${session}`
+  const userId = `u_${session % 12}`
+  const startedAt = now - session * 3 * HOUR - (session % 5) * 17 * MINUTE
+  const path: string[] = []
+  const events: BehaviorEvent[] = []
+
+  // 每次会话 2~5 步
+  const steps = 2 + (session % 4)
+  for (let step = 0; step < steps; step++) {
+    const page = behaviorPages[(session + step) % behaviorPages.length]
+    path.push(page)
+
+    events.push({
+      type: step === 0 ? 'pageview' : 'route',
+      name: page,
+      url: `https://shop.example.com${page}`,
+      timestamp: startedAt + step * 45_000,
+      durationMs: 12_000 + ((session * 7 + step * 13) % 40_000),
+      sessionId,
+      userId
+    })
+
+    // 偶尔点一下
+    if (step > 0 && (session + step) % 3 === 0) {
+      events.push({
+        type: 'click',
+        name: `button:立即购买`,
+        url: `https://shop.example.com${page}`,
+        timestamp: startedAt + step * 45_000 + 3_000,
+        durationMs: 900,
+        sessionId,
+        userId,
+        data: { tag: 'button' }
+      })
+    }
+  }
+
+  replayService.ingestBehavior(shop.project.id, {
+    appId: shop.project.slug,
+    sdk: { name: '@vigil/sdk', version: '0.1.0' },
+    events,
+    session: {
+      sessionId,
+      userId,
+      startedAt,
+      endedAt: startedAt + steps * 45_000,
+      durationMs: steps * 45_000,
+      pageViews: 1,
+      entryPage: path[0],
+      exitPage: path[path.length - 1],
+      path,
+      userAgent: CHROME_UA,
+      referrer: 'https://www.google.com/'
+    }
+  })
+  behaviorCount += events.length
+}
+
+// 造一份回放事件流（rrweb 格式：Meta + FullSnapshot + 增量）
+//
+// type 4 = Meta，type 3 = FullSnapshot，type 2 = IncrementalSnapshot
+// 真实回放流是连续的，播放器依赖第一个 FullSnapshot 建立 DOM 镜像。
+const replaySessionId = 'sess_demo_replay'
+const replayEvents: ReplayEvent[] = [
+  {
+    type: 4,
+    data: { href: 'https://shop.example.com/cart', width: 1440, height: 900 },
+    timestamp: now - 300_000
+  },
+  {
+    type: 3,
+    data: { node: { type: 0, childNodes: [], id: 1, tagName: 'html' } },
+    timestamp: now - 300_000
+  },
+  {
+    type: 3,
+    data: { node: { type: 0, childNodes: [], id: 2, tagName: 'body' } },
+    timestamp: now - 299_990
+  },
+  {
+    type: 3,
+    data: {
+      node: { type: 1, childNodes: [], id: 3, tagName: 'div', attributes: { class: 'cart' } }
+    },
+    timestamp: now - 299_980
+  },
+  { type: 2, data: { source: 3, adds: [], removes: [], text: '购物车' }, timestamp: now - 299_000 }
+]
+replayService.saveReplay(shop.project.id, replaySessionId, {
+  events: replayEvents,
+  droppedSegments: 0,
+  bytes: JSON.stringify(replayEvents).length
+})
+
+// 让一个错误带上这份回放（回放就是随错误一起送来的）
+const replayOutcome = issues.ingestEvent(
+  shop.project.id,
+  withFingerprint(
+    jsEvent({
+      name: 'TypeError',
+      message: "Cannot read properties of undefined (reading 'subtotal')",
+      file: 'https://shop.example.com/assets/index-DnB3xK2l.js',
+      fn: 'calcSubtotal',
+      line: 1420,
+      url: 'https://shop.example.com/cart',
+      occurredAt: now - 4 * MINUTE
+    })
+  )
+)
+// 给事件补上回放与 sessionId
+db.run(`UPDATE issue_events SET session_id = ?, vitals_json = ? WHERE issue_id = ?`, [
+  replaySessionId,
+  JSON.stringify({ lcp: 2400, fcp: 1100, inp: 180, longTaskCount: 2 }),
+  replayOutcome.issueId
+])
+replayService.upsertSession(shop.project.id, {
+  sessionId: replaySessionId,
+  userId: 'u_replay',
+  startedAt: now - 6 * MINUTE,
+  endedAt: now,
+  durationMs: 6 * MINUTE,
+  pageViews: 2,
+  entryPage: '/',
+  exitPage: '/cart',
+  path: ['/', '/cart'],
+  userAgent: CHROME_UA,
+  referrer: 'https://shop.example.com/'
+})
+replayService.incrementSessionError(shop.project.id, replaySessionId)
+
+// ============================================================
 // 性能
 // ============================================================
 const pages = ['/', '/cart', '/checkout', '/product/1024', '/order/list']
@@ -536,6 +683,7 @@ console.log(
 )
 console.log(`    已解决      ${stats.resolved}   已归档 ${stats.archived}`)
 console.log(`  性能事务      ${totalTransactions} 条（LCP P95 ${perf.vitals.lcp.p95}ms）`)
+console.log(`  行为事件      ${behaviorCount} 条`)
 console.log(`  告警规则      3 条 · 通知通道 2 个`)
 console.log('')
 console.log('  ⚠️  密钥只显示这一次，数据库里只存哈希：')
