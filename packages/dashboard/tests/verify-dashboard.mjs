@@ -231,8 +231,159 @@ async function ensureDemoData() {
   }
 
   await seedAlerts(project.id)
+  await seedReplayAndBehavior(project, runtimeKey)
 
   return project
+}
+
+/**
+ * 造一份回放事件流。
+ *
+ * 事件编号必须和 rrweb 对上（`@rrweb/types` 的 EventType）：
+ *   2 = 全量快照、3 = 增量快照、4 = Meta
+ *
+ * 写错的后果很隐蔽：播放器按编号分派，编号错了就**静默播不出来**。
+ * 节点类型同理（NodeType）：0 = Document、2 = Element、3 = Text。
+ */
+function replayStream(base) {
+  return [
+    {
+      type: 4,
+      timestamp: base,
+      data: { href: 'https://example.com/cart', width: 1280, height: 800 }
+    },
+    {
+      type: 2,
+      timestamp: base,
+      data: {
+        node: {
+          type: 0,
+          id: 1,
+          childNodes: [
+            {
+              type: 2,
+              id: 2,
+              tagName: 'html',
+              attributes: {},
+              childNodes: [
+                {
+                  type: 2,
+                  id: 3,
+                  tagName: 'body',
+                  attributes: {},
+                  childNodes: [
+                    {
+                      type: 2,
+                      id: 4,
+                      tagName: 'div',
+                      attributes: { class: 'cart' },
+                      childNodes: [{ type: 3, id: 5, textContent: '购物车' }]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        initialOffset: { left: 0, top: 0 }
+      }
+    },
+    {
+      type: 3,
+      timestamp: base + 1000,
+      data: {
+        source: 0,
+        adds: [{ type: 3, id: 6, parentId: 4, textContent: '共 3 件商品' }],
+        removes: [],
+        text: '共 3 件商品'
+      }
+    }
+  ]
+}
+
+/**
+ * 播种回放与行为数据。
+ *
+ * 回放**随错误一起上报**（挂在事件上），行为走**独立通道** —— 两者的
+ * 上报路径不一样，路径不一样就容易只通一条，所以这里两条都验。
+ */
+async function seedReplayAndBehavior(project, runtimeKey) {
+  const now = Date.now()
+  const sessionId = 'session-replay-verify'
+
+  const behavior = await api(`/projects/${project.id}/behavior/summary`)
+  if ((behavior.summary?.sessions ?? 0) === 0) {
+    await ingest(
+      '/api/v1/behavior',
+      {
+        appId: String(project.id),
+        sdk: { name: 'vigil-sdk', version: '0.1.0' },
+        events: [
+          {
+            type: 'pageview',
+            name: '/market',
+            url: 'https://example.com/market',
+            timestamp: now - 3000
+          },
+          {
+            type: 'click',
+            name: 'button:去结算',
+            url: 'https://example.com/market',
+            timestamp: now - 2000
+          },
+          {
+            type: 'route',
+            name: '/checkout',
+            url: 'https://example.com/checkout',
+            timestamp: now - 1000
+          }
+        ],
+        session: {
+          sessionId,
+          userId: 'user-verify',
+          startedAt: now - 5000,
+          endedAt: now,
+          durationMs: 5000,
+          pageViews: 1,
+          entryPage: '/market',
+          exitPage: '/checkout',
+          path: ['/market', '/checkout'],
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+        }
+      },
+      { 'x-vigil-token': runtimeKey }
+    )
+    console.log('  · 已上报 3 条行为事件')
+  }
+
+  const sessions = await api(`/projects/${project.id}/sessions`)
+  const hasReplay = (sessions.sessions ?? []).some((row) => row.hasReplay)
+  if (!hasReplay) {
+    await ingest(
+      '/api/v1/collect',
+      {
+        appId: String(project.id),
+        sdk: { name: 'vigil-sdk', version: '0.1.0' },
+        events: [
+          {
+            ...errorEvent({
+              fingerprint: fingerprint('replay'),
+              name: 'TypeError',
+              message: "Cannot read properties of undefined (reading 'subtotal')",
+              sessionId
+            }),
+            replay: {
+              events: replayStream(now - 4000),
+              droppedSegments: 0,
+              bytes: 2048
+            }
+          }
+        ]
+      },
+      { 'x-vigil-token': runtimeKey }
+    )
+    console.log('  · 已上报 1 条带回放的事件')
+  }
 }
 
 async function seedIssues(project, runtimeKey) {
@@ -605,7 +756,7 @@ await page.waitForFunction(() => document.querySelectorAll('.stat-card').length 
 })
 
 const navCount = await page.locator('.nav-item').count()
-check('侧边导航有 6 个导航项', navCount === 6, `${navCount} 个`)
+check('侧边导航有 8 个导航项', navCount === 8, `${navCount} 个`)
 
 const envNavHref = await page
   .locator('.nav-item', { hasText: '环境与版本' })
@@ -793,6 +944,118 @@ check(
   '最慢接口表渲染了 N 行',
   spanRows === perf.topSpans.length,
   `页面=${spanRows} 行 · 接口=${perf.topSpans.length} 行`
+)
+
+// ---- 会话回放页 ----
+const sessionsBody = await api(`/projects/${project.id}/sessions`)
+const sessionRows = sessionsBody.sessions ?? []
+const replaySessions = sessionRows.filter((row) => row.hasReplay)
+
+await page.locator('.nav-item', { hasText: '会话回放' }).first().click()
+await page.waitForURL('**/sessions', { timeout: 20000 })
+await page.waitForSelector('.el-table__row', { timeout: 20000 })
+
+const sessionTableRows = await page
+  .locator('[data-panel="会话列表"]')
+  .locator('.el-table__row')
+  .count()
+check(
+  '会话表格渲染了 N 行',
+  sessionTableRows === Math.min(sessionRows.length, 50),
+  `页面=${sessionTableRows} 行 · 接口=${sessionRows.length} 个会话`
+)
+
+const sessionStatValues = await page.locator('.stat-value').allTextContents()
+const sessionStatLabels = await page.locator('.stat-label').allTextContents()
+const sessionStatMap = new Map(
+  sessionStatLabels.map((label, i) => [label.trim(), (sessionStatValues[i] ?? '').trim()])
+)
+check(
+  '「会话总数」卡片显示接口的 total',
+  sessionStatMap.get('会话总数') === Number(sessionRows.length).toLocaleString('zh-CN'),
+  `卡片=${sessionStatMap.get('会话总数')} · 接口=${sessionRows.length}`
+)
+check(
+  '「有回放」卡片显示有回放的会话数',
+  sessionStatMap.get('有回放') === replaySessions.length.toLocaleString('zh-CN'),
+  `卡片=${sessionStatMap.get('有回放')} · 接口=${replaySessions.length}`
+)
+
+// 打开一个回放，验证播放器真的挂上了
+if (replaySessions.length > 0) {
+  const replayButton = page
+    .locator('.el-table__row')
+    .filter({ hasText: replaySessions[0].sessionId })
+    .locator('button')
+    .first()
+  await replayButton.click()
+
+  await page.waitForSelector('.replay', { timeout: 20000 })
+  // 播放器是**动态加载**的 chunk —— 要等它真的挂上
+  await page.waitForSelector('.player-host .replayer-wrapper', { timeout: 20000 })
+  const playerMounted = await page.locator('.player-host .replayer-wrapper').count()
+  check('回放播放器挂载成功', playerMounted === 1, `${playerMounted} 个播放器`)
+
+  // 会话 ID 在**抽屉头部**（不在内容区里）—— 断言要落在具体那个元素上
+  const drawerSessionId = (await page.locator('.drawer-sub').textContent())?.trim() ?? ''
+  check(
+    '回放抽屉显示会话 ID',
+    drawerSessionId === replaySessions[0].sessionId,
+    `抽屉=${drawerSessionId} · 接口=${replaySessions[0].sessionId}`
+  )
+
+  // 控制条是我们自己画的：播放按钮 + 进度条 + 倍速
+  const controlCount = await page
+    .locator('.controls .play-btn, .controls .seek, .controls .speed')
+    .count()
+  check('回放控制条有 3 个控件', controlCount === 3, `${controlCount} 个`)
+
+  const clockText = (await page.locator('.controls .clock').textContent()) ?? ''
+  check('回放显示时间读数', /\d+:\d+/.test(clockText), `读数=${clockText.trim()}`)
+
+  await page.keyboard.press('Escape')
+  await page.waitForTimeout(400)
+} else {
+  check('回放播放器挂载成功', false, '没有带回放的会话 —— 种子数据没生效')
+}
+
+// ---- 用户行为页 ----
+const behaviorBody = await api(`/projects/${project.id}/behavior/summary`)
+const behaviorSummary = behaviorBody.summary
+
+await page.locator('.nav-item', { hasText: '用户行为' }).first().click()
+await page.waitForURL('**/behavior', { timeout: 20000 })
+await page.waitForSelector('.stat-card', { timeout: 20000 })
+
+const behaviorValues = await page.locator('.stat-value').allTextContents()
+const behaviorLabels = await page.locator('.stat-label').allTextContents()
+const behaviorMap = new Map(
+  behaviorLabels.map((label, i) => [label.trim(), (behaviorValues[i] ?? '').trim()])
+)
+check(
+  '「访问次数」卡片显示接口的 pageViews',
+  behaviorMap.get('访问次数') === Number(behaviorSummary.pageViews).toLocaleString('zh-CN'),
+  `卡片=${behaviorMap.get('访问次数')} · 接口=${behaviorSummary.pageViews}`
+)
+check(
+  '「会话数」卡片显示接口的 sessions',
+  behaviorMap.get('会话数') === Number(behaviorSummary.sessions).toLocaleString('zh-CN'),
+  `卡片=${behaviorMap.get('会话数')} · 接口=${behaviorSummary.sessions}`
+)
+
+const topPageRows = await page.locator('[data-panel="热门页面"]').locator('.el-table__row').count()
+check(
+  '热门页面表渲染了 N 行',
+  topPageRows === behaviorSummary.topPages.length,
+  `页面=${topPageRows} 行 · 接口=${behaviorSummary.topPages.length} 行`
+)
+
+// 隐私边界写在**页面描述**里（由布局渲染，不在视图根节点内）
+const behaviorDesc = (await page.locator('.page-desc').textContent())?.trim() ?? ''
+check(
+  '行为页说明不记录输入内容',
+  behaviorDesc.includes('不记录输入内容'),
+  `页面描述="${behaviorDesc}"`
 )
 
 // ---- 告警页 ----
