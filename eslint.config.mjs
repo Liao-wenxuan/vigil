@@ -38,6 +38,14 @@ const browserGlobals = {
   structuredClone: 'readonly',
   MediaQueryList: 'readonly',
   MediaQueryListEvent: 'readonly',
+  // DOM 类型名（TypeScript 的类型标注里也要能解析）
+  HTMLElement: 'readonly',
+  HTMLInputElement: 'readonly',
+  Element: 'readonly',
+  Event: 'readonly',
+  MouseEvent: 'readonly',
+  KeyboardEvent: 'readonly',
+  CustomEvent: 'readonly',
   // Playwright 的 page.evaluate() 里的代码跑在**浏览器**里，
   // 但 ESLint 按当前文件的语法环境解析 —— 这几个是浏览器全局
   getComputedStyle: 'readonly',
