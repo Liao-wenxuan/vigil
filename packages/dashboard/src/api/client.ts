@@ -19,6 +19,8 @@ import type {
   AlertRule,
   AlertRuleType,
   ArchiveStrategy,
+  BehaviorEventRow,
+  BehaviorSummary,
   ChannelType,
   CreatedProject,
   EnvironmentRow,
@@ -34,6 +36,8 @@ import type {
   ProjectDetail,
   ProjectRow,
   ReleaseRow,
+  ReplayStreamEvent,
+  SessionRow,
   TransactionRow
 } from '../types'
 
@@ -428,4 +432,89 @@ export async function evaluateAlerts(projectId: number): Promise<AlertEvaluation
     `/projects/${projectId}/alerts/evaluate`
   )
   return body.result
+}
+
+/* ============================================================
+ * 会话回放
+ * ============================================================ */
+
+export async function listSessions(
+  projectId: number,
+  params: { limit?: number; offset?: number } = {}
+): Promise<{ total: number; sessions: SessionRow[] }> {
+  const body = await get<{ total: number; sessions: SessionRow[] }>(
+    `/projects/${projectId}/sessions`,
+    params
+  )
+  return { total: body.total ?? 0, sessions: body.sessions ?? [] }
+}
+
+/**
+ * 取某个会话的回放事件流。
+ *
+ * 流的第一个事件必须是**全量快照**（rrweb 的 type=2）——
+ * 播放器靠它建立 DOM 镜像。少了它，增量全部对不上，**静默播不出来**。
+ */
+export async function getSessionReplay(
+  projectId: number,
+  sessionId: string
+): Promise<{ events: number; stream: ReplayStreamEvent[] }> {
+  const body = await get<{ events: number; stream: ReplayStreamEvent[] }>(
+    `/projects/${projectId}/sessions/${encodeURIComponent(sessionId)}/replay`
+  )
+  return { events: body.events ?? 0, stream: body.stream ?? [] }
+}
+
+/** 某个会话的行为时间线 */
+export async function getSessionEvents(
+  projectId: number,
+  sessionId: string
+): Promise<BehaviorEventRow[]> {
+  const body = await get<{ events: BehaviorEventRow[] }>(
+    `/projects/${projectId}/sessions/${encodeURIComponent(sessionId)}/events`
+  )
+  return body.events ?? []
+}
+
+/**
+ * 某个问题最近一次发生所属会话的回放。
+ *
+ * 回放按会话存最新一份，所以不是每个错误都有精确对应的回放。
+ */
+export async function getIssueReplay(
+  projectId: number,
+  issueId: number
+): Promise<{
+  hasReplay: boolean
+  sessionId?: string
+  events: number
+  stream: ReplayStreamEvent[]
+}> {
+  const body = await get<{
+    hasReplay: boolean
+    sessionId?: string
+    events: number
+    stream: ReplayStreamEvent[]
+  }>(`/projects/${projectId}/issues/${issueId}/replay`)
+  return {
+    hasReplay: body.hasReplay ?? false,
+    sessionId: body.sessionId,
+    events: body.events ?? 0,
+    stream: body.stream ?? []
+  }
+}
+
+/* ============================================================
+ * 用户行为
+ * ============================================================ */
+
+export async function getBehaviorSummary(
+  projectId: number,
+  params: { since?: number; until?: number } = {}
+): Promise<BehaviorSummary> {
+  const body = await get<{ summary: BehaviorSummary }>(
+    `/projects/${projectId}/behavior/summary`,
+    params
+  )
+  return body.summary
 }
