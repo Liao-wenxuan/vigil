@@ -377,6 +377,82 @@ export interface AlertEvaluationResult {
 }
 
 /* ============================================================
+ * 回放与行为域
+ * ============================================================ */
+
+/**
+ * 一个会话的汇总。
+ *
+ * 回放**按会话**存最新一份 —— 客户端的缓冲区是滚动窗口，
+ * 每个错误都存一份就是大量重复数据。
+ * 代价是回放展示的是「最近一次快照」，不精确对应每个错误的时间点。
+ */
+export interface SessionRow {
+  sessionId: string
+  userId?: string
+  startedAt: number
+  endedAt: number
+  durationMs: number
+  pageViews: number
+  entryPage?: string
+  exitPage?: string
+  /** 访问路径 */
+  path: string[]
+  browser?: string
+  os?: string
+  device?: string
+  referrer?: string
+  /** 该会话的错误数 */
+  errorCount: number
+  /** 有没有回放流 */
+  hasReplay: boolean
+  /** 回放事件数 */
+  replayEvents: number
+  /** 回放字节数 */
+  replayBytes: number
+  replayUpdatedAt?: number
+}
+
+/**
+ * 一条 rrweb 事件。
+ *
+ * `type` 是 rrweb 的事件编号：
+ * 2 = 全量快照、3 = 增量快照、4 = Meta。
+ * 播放器按编号分派，**编号错了就静默播不出来**。
+ */
+export interface ReplayStreamEvent {
+  type: number
+  timestamp: number
+  data: unknown
+}
+
+export type BehaviorEventType = 'pageview' | 'route' | 'click' | 'blur' | 'focus'
+
+/** 一条行为事件（会话时间线） */
+export interface BehaviorEventRow {
+  type: BehaviorEventType
+  name: string
+  url: string
+  timestamp: number
+  durationMs?: number
+  data?: Record<string, unknown>
+}
+
+/** 行为汇总（服务端算好的） */
+export interface BehaviorSummary {
+  pageViews: number
+  sessions: number
+  users: number
+  avgDurationMs: number
+  topPages: Array<{ path: string; views: number; avgDurationMs: number; bounceRate: number }>
+  entryPages: Array<{ path: string; count: number }>
+  exitPages: Array<{ path: string; count: number }>
+  topPaths: Array<{ path: string[]; count: number }>
+  clicks: Array<{ name: string; count: number }>
+  trend: Array<{ date: string; views: number; sessions: number }>
+}
+
+/* ============================================================
  * 领域词汇表 —— 中文标签
  * ============================================================ */
 
@@ -472,6 +548,14 @@ export const INCIDENT_STATUS_LABELS: Record<AlertIncident['status'], string> = {
   triggered: '已触发',
   resolved: '已恢复',
   muted: '已静默'
+}
+
+export const BEHAVIOR_TYPE_LABELS: Record<BehaviorEventType, string> = {
+  pageview: '页面访问',
+  route: '路由切换',
+  click: '点击',
+  blur: '失焦',
+  focus: '聚焦'
 }
 
 /* ============================================================
