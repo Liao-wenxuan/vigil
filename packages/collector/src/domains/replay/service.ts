@@ -109,7 +109,12 @@ export class ReplayService {
 
       const bytes = payload.bytes ?? 0
 
-      // 会话可能还没上报过（用户没触发任何行为事件），这里补一条
+      // 会话行可能还不存在 —— **回放比行为汇总先到是常态**：
+      // 错误是立即上报的，行为汇总要等攒批或页面卸载。
+      // 只 UPDATE 的话，这一行永远建不出来，
+      // 结果是「回放事件在库里，但会话列表里看不到它」。
+      this.ensureSessionRow(projectId, sessionId, context.userId, now, events)
+
       this.db.run(
         `UPDATE replay_sessions
          SET replay_events = ?, replay_bytes = ?, replay_updated_at = ?, user_id = COALESCE(user_id, ?)
@@ -119,6 +124,36 @@ export class ReplayService {
 
       return { events: events.length, bytes }
     })
+  }
+
+  /**
+   * 保证会话行存在。
+   *
+   * 先由回放到达、行为汇总后到的顺序下，
+   * 这一步是会话能出现在列表里的前提。
+   */
+  private ensureSessionRow(
+    projectId: number,
+    sessionId: string,
+    userId: string | undefined,
+    now: number,
+    events: ReplayEvent[]
+  ): void {
+    const existing = this.db.get<{ id: number }>(
+      'SELECT id FROM replay_sessions WHERE project_id = ? AND session_id = ?',
+      [projectId, sessionId]
+    )
+    if (existing) return
+
+    // 起始时间取流的第一个事件 —— 比用「现在」更接近真实会话开始
+    const startedAt = events[0]?.timestamp ?? now
+
+    this.db.run(
+      `INSERT INTO replay_sessions
+         (project_id, session_id, user_id, started_at, ended_at, duration_ms, page_views, created_at)
+       VALUES (?, ?, ?, ?, ?, 0, 0, ?)`,
+      [projectId, sessionId, userId ?? null, startedAt, now, now]
+    )
   }
 
   /** 写入 / 更新会话汇总 */

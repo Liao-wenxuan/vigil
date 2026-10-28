@@ -6,6 +6,7 @@ import { ArtifactService } from '../src/domains/artifacts/service.js'
 import { PerformanceService } from '../src/domains/performance/service.js'
 import { AlertingService } from '../src/domains/alerting/service.js'
 import { AlertEvaluator } from '../src/domains/alerting/evaluator.js'
+import { ReplayService } from '../src/domains/replay/service.js'
 import type { ErrorEvent, PerformanceEvent } from '@vigil/protocol'
 
 /**
@@ -22,6 +23,7 @@ export function setupDb() {
   const performance = new PerformanceService(db)
   const alerting = new AlertingService(db)
   const evaluator = new AlertEvaluator(db, alerting)
+  const replay = new ReplayService(db)
 
   const organization = tenancy.createOrganization('测试组织')
   const created = tenancy.createProject({ organizationId: organization.id, name: '测试应用' })
@@ -34,6 +36,7 @@ export function setupDb() {
     performance,
     alerting,
     evaluator,
+    replay,
     organization,
     project: created.project,
     runtimeKey: created.runtimeKey,
