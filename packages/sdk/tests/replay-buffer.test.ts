@@ -3,7 +3,8 @@ import {
   applyReplayEvent,
   emptyBuffer,
   estimateSize,
-  FULL_SNAPSHOT_TYPE
+  FULL_SNAPSHOT_TYPE,
+  META_TYPE
 } from '../src/replay/buffer'
 import type { ReplayEvent } from '@vigil/protocol'
 
@@ -42,6 +43,30 @@ describe('applyReplayEvent', () => {
     expect(result.state.events).toHaveLength(1)
     expect(result.state.events[0].type).toBe(FULL_SNAPSHOT_TYPE)
     expect(result.state.bytes).toBe(estimateSize(event(FULL_SNAPSHOT_TYPE)))
+  })
+
+  it('全量快照重置缓冲时保留 Meta（视口尺寸）', () => {
+    // 播放器靠 Meta 里的 width/height 把内容按比例缩放 ——
+    // 丢了 Meta，回放会被裁切。
+    const meta = event(META_TYPE)
+    const state = { events: [meta, event(3)], bytes: 100, droppedSegments: 0 }
+
+    const result = applyReplayEvent(state, event(FULL_SNAPSHOT_TYPE), 10_000)
+
+    expect(result.state.events.map((e) => e.type)).toEqual([META_TYPE, FULL_SNAPSHOT_TYPE])
+    expect(result.state.bytes).toBe(estimateSize(meta) + estimateSize(event(FULL_SNAPSHOT_TYPE)))
+  })
+
+  it('Meta 不会在多次快照后堆积', () => {
+    let state = emptyBuffer()
+    state = applyReplayEvent(state, event(META_TYPE), 10_000).state
+    state = applyReplayEvent(state, event(FULL_SNAPSHOT_TYPE), 10_000).state
+    state = applyReplayEvent(state, event(3), 10_000).state
+    state = applyReplayEvent(state, event(META_TYPE), 10_000).state
+    state = applyReplayEvent(state, event(FULL_SNAPSHOT_TYPE), 10_000).state
+
+    const metas = state.events.filter((e) => e.type === META_TYPE)
+    expect(metas).toHaveLength(1)
   })
 
   it('普通增量事件追加到缓冲尾部', () => {
@@ -93,8 +118,11 @@ describe('applyReplayEvent', () => {
       state = applyReplayEvent(state, e, 10_000).state
     }
 
+    // 只看增量（Meta 不是增量）
     const firstSnapshot = state.events.findIndex((e) => e.type === FULL_SNAPSHOT_TYPE)
-    const firstIncremental = state.events.findIndex((e) => e.type !== FULL_SNAPSHOT_TYPE)
+    const firstIncremental = state.events.findIndex(
+      (e) => e.type !== FULL_SNAPSHOT_TYPE && e.type !== META_TYPE
+    )
 
     expect(firstSnapshot).toBeGreaterThanOrEqual(0)
     expect(firstSnapshot).toBeLessThan(firstIncremental)

@@ -26,6 +26,16 @@ import type { ReplayEvent } from '@vigil/protocol'
  */
 export const FULL_SNAPSHOT_TYPE = 2
 
+/**
+ * rrweb 的 Meta 事件类型。
+ *
+ * Meta 带的是**原始视口尺寸**（`width` / `height`）。
+ * 播放器靠它把内容按比例缩放到容器里 —— 没有 Meta，回放会被裁切。
+ *
+ * 所以全量快照重置缓冲时，**Meta 要留下来**。
+ */
+export const META_TYPE = 4
+
 /** 缓冲区的当前状态 */
 export interface ReplayBufferState {
   /** 缓冲的事件流（按录制顺序） */
@@ -59,8 +69,9 @@ export interface BufferResult {
  *
  * ## 三条规则
  *
- * 1. **全量快照 → 重置缓冲。** 新的快照比旧的增量更完整，
+ * 1. **全量快照 → 重置缓冲（但保留 Meta）。** 新的快照比旧的增量更完整，
  *    保留旧增量只会让链更长。
+ *    Meta 必须留 —— 播放器靠它定视口尺寸，丢了回放会被裁切。
  * 2. **超预算 → 清空并要求重新取快照。** 不能只丢最后一段：
  *    丢中间会让后面的增量全部对不上。
  * 3. **正常事件 → 追加。**
@@ -75,10 +86,15 @@ export function applyReplayEvent(
 
   // 规则 1：全量快照重置缓冲
   if (event.type === FULL_SNAPSHOT_TYPE) {
+    // 只保留 Meta（最多一个），其余旧增量全部作废
+    const metas = state.events.filter((e) => e.type === META_TYPE).slice(-1)
+    const kept = [...metas, event]
+    const bytes = kept.reduce((sum, e) => sum + sizeOf(e), 0)
+
     return {
       state: {
-        events: [event],
-        bytes: size,
+        events: kept,
+        bytes,
         droppedSegments: state.droppedSegments
       },
       overflow: false
