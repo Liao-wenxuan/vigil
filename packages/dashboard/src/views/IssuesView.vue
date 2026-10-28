@@ -14,6 +14,7 @@ import { categoryLabel, relativeTime } from '../format'
 import {
   ISSUE_LEVEL_LABELS,
   PANEL_CONTEXT,
+  resolveTimeRange,
   type ArchiveStrategy,
   type IssueBulkAction,
   type IssueCategory,
@@ -98,13 +99,17 @@ async function load(): Promise<void> {
   loading.value = true
   try {
     const tab = tabs.find((item) => item.key === activeTab.value)
+    // 时间窗跟着顶栏的范围走 —— 列表里的「发生次数」也要是窗口内的
+    const { since, until } = resolveTimeRange(ctx.timeRange)
     const list = await listIssues(projectId, {
       ...tab?.query,
       q: keyword.value || undefined,
       category: category.value || undefined,
       sort: sort.value,
       limit: pageSize.value,
-      offset: (page.value - 1) * pageSize.value
+      offset: (page.value - 1) * pageSize.value,
+      since,
+      until
     })
     issues.value = list.issues
     total.value = list.total
@@ -183,6 +188,11 @@ watch(
 watch(
   () => ctx.refreshToken,
   () => void load()
+)
+// 时间范围变了，列表要跟着变（而且回到第一页 —— 页码在新的结果集里没有意义）
+watch(
+  () => ctx.timeRange,
+  () => reloadFromFirstPage()
 )
 onMounted(() => void load())
 </script>
@@ -287,7 +297,9 @@ onMounted(() => void load())
 
         <el-table-column label="次数" width="86" align="right">
           <template #default="{ row }">
-            <span class="tabular strong">{{ row.count.toLocaleString('zh-CN') }}</span>
+            <span class="tabular strong">
+              {{ (row.window_count ?? row.count).toLocaleString('zh-CN') }}
+            </span>
           </template>
         </el-table-column>
 

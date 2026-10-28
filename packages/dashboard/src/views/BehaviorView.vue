@@ -15,7 +15,7 @@
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getBehaviorSummary } from '../api/client'
-import { PANEL_CONTEXT, type BehaviorSummary } from '../types'
+import { PANEL_CONTEXT, resolveTimeRange, type BehaviorSummary } from '../types'
 import PanelSection from '../components/PanelSection.vue'
 import StatCard from '../components/StatCard.vue'
 import BarList from '../components/BarList.vue'
@@ -54,7 +54,9 @@ async function load(): Promise<void> {
 
   loading.value = true
   try {
-    summary.value = await getBehaviorSummary(projectId)
+    // 时间窗跟着顶栏的范围走 —— 访问次数必须说清是多久的
+    const { since, until } = resolveTimeRange(ctx.timeRange)
+    summary.value = await getBehaviorSummary(projectId, { since, until })
   } catch (error) {
     ElMessage.error(`加载行为数据失败：${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -68,6 +70,10 @@ watch(
 )
 watch(
   () => ctx.refreshToken,
+  () => void load()
+)
+watch(
+  () => ctx.timeRange,
   () => void load()
 )
 onMounted(() => void load())

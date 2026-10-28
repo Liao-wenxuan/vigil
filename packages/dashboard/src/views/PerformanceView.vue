@@ -11,7 +11,12 @@
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { getErrorPerformance, getPerformanceSummary } from '../api/client'
-import { PANEL_CONTEXT, type ErrorPerformanceRow, type PerformanceSummary } from '../types'
+import {
+  PANEL_CONTEXT,
+  resolveTimeRange,
+  type ErrorPerformanceRow,
+  type PerformanceSummary
+} from '../types'
 import PanelSection from '../components/PanelSection.vue'
 import PercentileChart from '../components/PercentileChart.vue'
 
@@ -90,9 +95,11 @@ async function load(): Promise<void> {
 
   loading.value = true
   try {
+    // 时间窗跟着顶栏的范围走 —— 性能数据的「P95」必须说清是多久的 P95
+    const { since, until } = resolveTimeRange(ctx.timeRange)
     const [perf, correlation] = await Promise.all([
-      getPerformanceSummary(projectId),
-      getErrorPerformance(projectId)
+      getPerformanceSummary(projectId, { since, until }),
+      getErrorPerformance(projectId, since)
     ])
     summary.value = perf
     errorRows.value = correlation
@@ -109,6 +116,10 @@ watch(
 )
 watch(
   () => ctx.refreshToken,
+  () => void load()
+)
+watch(
+  () => ctx.timeRange,
   () => void load()
 )
 onMounted(() => void load())
