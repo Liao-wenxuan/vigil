@@ -22,3 +22,7 @@ npm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# Windows 保留设备名：git 有时会在索引里看到一条 NUL，
+# 但文件系统里并不存在这个文件。忽略掉，免得每次 git status 都冒出来。
+NUL
