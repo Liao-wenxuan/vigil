@@ -5,6 +5,7 @@ import { installNetworkCapture, nativeFetch } from './collectors/network'
 import { BlankScreenDetector, PerformanceCollector } from './collectors/performance'
 import { installUnhandledRejectionHandler } from './collectors/promise'
 import { collectContext, detectSelfUrls, isBrowser } from './context'
+import { resolveApiRoot, resolveChannelEndpoint } from './endpoint'
 import { computeFingerprint, normalizeCustomFingerprint } from './fingerprint'
 import { maskRecord, maskUrl, scrubText } from './mask'
 import { DEFAULTS, type ResolvedOptions, type VigilOptions } from './options'
@@ -47,6 +48,8 @@ export interface BreadcrumbInput {
  */
 export class VigilClient {
   private readonly resolved: ResolvedOptions
+  /** API 根地址 —— 性能、行为等兄弟通道都挂在它下面 */
+  private readonly apiRoot: string
   private readonly recorder: BreadcrumbRecorder
   private readonly queue: EventQueue
   private readonly transport: TransportOptions
@@ -99,6 +102,9 @@ export class VigilClient {
           : undefined
     }
 
+    // API 根：性能、行为都是它的兄弟通道
+    this.apiRoot = resolveApiRoot(this.resolved.endpoint)
+
     this.queue = new EventQueue({
       maxSize: this.resolved.maxBatchSize,
       flushIntervalMs: this.resolved.flushIntervalMs,
@@ -115,7 +121,7 @@ export class VigilClient {
 
     this.performanceTransport = {
       ...this.transport,
-      endpoint: this.resolved.endpoint.replace(/\/collect$/, '/performance')
+      endpoint: resolveChannelEndpoint(this.resolved.endpoint, 'performance')
     }
 
     this.performanceQueue = new EventQueue({
@@ -192,13 +198,18 @@ export class VigilClient {
   }
 
   /**
-   * POST 到采集服务的任意路径（插件用）。
+   * POST 到采集服务的某个路径。
    *
-   * 鉴权头自动带上，所以插件不用管 token 放哪。
+   * `path` 是**相对 API 根**的路径（如 `/behavior`）。
+   * API 根从 `endpoint` 推出来 —— `.../api/v1/collect` 的根是 `.../api/v1`。
+   *
+   * ⚠️ 不要把路径直接拼在 endpoint 后面：
+   * 那会得到 `.../api/v1/collect/behavior` —— 404，而且不报错。
    */
   private async postTo(path: string, body: unknown): Promise<void> {
+    const url = `${this.apiRoot}${path.startsWith('/') ? path : `/${path}`}`
     try {
-      const response = await this.transport.fetchImpl(`${this.resolved.endpoint}${path}`, {
+      const response = await this.transport.fetchImpl(url, {
         method: 'POST',
         body: JSON.stringify(body),
         keepalive: true,

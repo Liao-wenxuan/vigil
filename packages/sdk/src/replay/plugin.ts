@@ -80,7 +80,9 @@ export function behaviorPlugin(options: BehaviorOptions = {}): VigilPlugin {
     }
     if (!session.userId && host.userId) session.userId = host.userId
 
-    host.post('/api/v1/behavior', {
+    // 路径相对 API 根 —— 宿主会把它拼到 `.../api/v1` 下面，
+    // 不能写成 `/api/v1/behavior`（那会被拼成 `/api/v1/collect/api/v1/behavior`）
+    host.post('/behavior', {
       appId: host.options.appId,
       sdk: { name: SDK_NAME, version: SDK_VERSION },
       events,

@@ -25,9 +25,15 @@ export interface VigilPluginHost {
   /** 当前用户 ID */
   readonly userId: string | undefined
   /**
-   * POST 到采集服务的某个路径。
+   * POST 到采集服务的某个通道。
+   *
+   * `path` 是**相对 API 根**的路径，例如 `/behavior`。
+   * API 根由 `endpoint` 推导：`.../api/v1/collect` 的根是 `.../api/v1`。
    *
    * 鉴权头自动带上，所以插件不用关心 token 放哪。
+   *
+   * ⚠️ 别把路径写成完整地址再让宿主拼 —— 那样会得到
+   * `.../api/v1/collect/api/v1/behavior`，404 且不报错。
    */
   post(path: string, body: unknown): void
   /** 附加到每一条错误事件上的上下文 */
