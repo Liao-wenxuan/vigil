@@ -8,10 +8,12 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import AppLayout from '../layouts/AppLayout.vue'
 import AlertsView from '../views/AlertsView.vue'
+import BehaviorView from '../views/BehaviorView.vue'
 import IssueDetailView from '../views/IssueDetailView.vue'
 import IssuesView from '../views/IssuesView.vue'
 import OverviewView from '../views/OverviewView.vue'
 import PerformanceView from '../views/PerformanceView.vue'
+import SessionsView from '../views/SessionsView.vue'
 import SettingsView from '../views/SettingsView.vue'
 
 const routes: RouteRecordRaw[] = [
@@ -48,6 +50,18 @@ const routes: RouteRecordRaw[] = [
         name: 'alerts',
         component: AlertsView,
         meta: { title: '告警', desc: '规则、通知通道与触发历史' }
+      },
+      {
+        path: 'sessions',
+        name: 'sessions',
+        component: SessionsView,
+        meta: { title: '会话回放', desc: '出错时刻的页面现场，逐事件回放' }
+      },
+      {
+        path: 'behavior',
+        name: 'behavior',
+        component: BehaviorView,
+        meta: { title: '用户行为', desc: '页面访问、路径与点击分布（不记录输入内容）' }
       },
       {
         path: 'settings',

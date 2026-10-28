@@ -15,9 +15,11 @@ import {
   Files,
   Fold,
   Odometer,
+  Pointer,
   Refresh,
   Setting,
   TrendCharts,
+  VideoCamera,
   Warning
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
@@ -35,6 +37,8 @@ const navItems = [
   { to: '/', label: '总览', icon: Odometer, section: '' },
   { to: '/issues', label: '问题', icon: Warning, section: '' },
   { to: '/performance', label: '性能', icon: TrendCharts, section: '' },
+  { to: '/sessions', label: '会话回放', icon: VideoCamera, section: '' },
+  { to: '/behavior', label: '用户行为', icon: Pointer, section: '' },
   { to: '/alerts', label: '告警', icon: Bell, section: '' },
   {
     to: '/settings?section=environments',
