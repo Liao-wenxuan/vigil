@@ -642,11 +642,42 @@ check(
   `卡片=${cardMap.get('回归中')} · 接口=${stats.regressed.toLocaleString('zh-CN')}`
 )
 
-const topBars = await page.locator('[data-panel="Top 问题"] .bar-chart g').count()
+// 图表从 SVG 改成 HTML/CSS 之后，选择器跟着变了：
+// SVG 里是 `.bar-chart > g`，HTML 里是 `.bar-row`。
+const topBars = await page.locator('[data-panel="Top 问题"] .bar-row').count()
 check(
   '总览渲染了 Top 问题条形图',
   topBars === Math.min(10, issues.length),
   `页面=${topBars} 根条形 · 接口=${Math.min(10, issues.length)} 条问题`
+)
+
+/**
+ * 回归防护：**同屏图表的标签字号必须一致**。
+ *
+ * 之前 BarList 是 SVG + `preserveAspectRatio`，字号是 viewBox 单位，
+ * 实际渲染大小 = 字号 × (面板宽 / 900) —— 面板宽度不同，
+ * 同一个「12px」渲染出来就是两个大小。改成 HTML/CSS 之后才是真实 px。
+ * 这个断言就是为了不让它退回去。
+ */
+const labelSizes = await page.evaluate(() => {
+  const pick = (panel) =>
+    [...document.querySelectorAll(`[data-panel="${panel}"] .bar-label`)].map(
+      (el) => Math.round(parseFloat(getComputedStyle(el).fontSize) * 10) / 10
+    )
+  return {
+    top: pick('Top 问题'),
+    category: pick('分类分布'),
+    culprit: pick('Top 责任点')
+  }
+})
+const allSizes = [...labelSizes.top, ...labelSizes.category, ...labelSizes.culprit]
+const sizeSet = [...new Set(allSizes)]
+check(
+  '同屏图表的标签字号一致',
+  sizeSet.length <= 1,
+  sizeSet.length <= 1
+    ? `统一 ${sizeSet[0]}px（${allSizes.length} 个标签）`
+    : `出现 ${sizeSet.length} 种字号：${sizeSet.join(' / ')}`
 )
 
 const overviewRows = await page.locator('.issue-item').count()
@@ -746,7 +777,8 @@ const lcpText = (await lcpCard.locator('.vital-p95').textContent())?.trim() ?? '
 const expectedLcp = `${perf.vitals.lcp.p95.toLocaleString('zh-CN')}ms`
 check('性能页显示 LCP 的 P95', lcpText === expectedLcp, `页面=${lcpText} · 接口=${expectedLcp}`)
 
-const percentileBars = await page.locator('.pc-chart g').count()
+// 同上：SVG → HTML/CSS 之后，`.pc-chart g` 变成 `.pc-row`
+const percentileBars = await page.locator('.pc-row').count()
 check('性能页渲染了 4 条分位数区间', percentileBars === 4, `${percentileBars} 条`)
 
 const byNameRows = await page.locator('[data-panel="页面维度"]').locator('.el-table__row').count()

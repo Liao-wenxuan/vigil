@@ -35,7 +35,13 @@ const browserGlobals = {
   URLSearchParams: 'readonly',
   TextEncoder: 'readonly',
   TextDecoder: 'readonly',
-  structuredClone: 'readonly'
+  structuredClone: 'readonly',
+  MediaQueryList: 'readonly',
+  MediaQueryListEvent: 'readonly',
+  // Playwright 的 page.evaluate() 里的代码跑在**浏览器**里，
+  // 但 ESLint 按当前文件的语法环境解析 —— 这几个是浏览器全局
+  getComputedStyle: 'readonly',
+  cancelAnimationFrame: 'readonly'
 }
 
 /** Node 全局 */
@@ -86,7 +92,9 @@ export default tseslint.config(
     }
   },
   {
-    // Node 侧脚本
+    // Node 侧脚本。
+    // 浏览器全局也要声明 —— Playwright 的 page.evaluate() 里的代码
+    // 是在**浏览器**里跑的，但 ESLint 按 Node 解析这个文件。
     files: ['scripts/**/*.ts', 'scripts/**/*.mjs'],
     languageOptions: {
       globals: { ...nodeGlobals, ...browserGlobals }

@@ -25,6 +25,7 @@
     "demo": "powershell -ExecutionPolicy Bypass -File scripts/start-demo.ps1",
     "verify": "npm run build --workspace @vigil/sdk && tsx scripts/verify-pipeline.ts",
     "verify:dashboard": "node packages/dashboard/tests/verify-dashboard.mjs --url http://localhost:5174",
+    "audit:ui": "node scripts/audit-ui.mjs --url http://localhost:5174",
     "prepare": "husky"
   },
   "devDependencies": {
