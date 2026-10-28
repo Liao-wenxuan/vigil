@@ -43,6 +43,8 @@ const PAGES = [
   { path: '/', name: '总览' },
   { path: '/issues', name: '问题' },
   { path: '/performance', name: '性能' },
+  { path: '/sessions', name: '会话回放' },
+  { path: '/behavior', name: '用户行为' },
   { path: '/alerts', name: '告警' },
   { path: '/settings', name: '设置' }
 ]
@@ -191,7 +193,15 @@ for (const target of PAGES) {
       ...document.querySelectorAll(
         'a[href], button, input, select, textarea, [tabindex]:not([tabindex="-1"])'
       )
-    ].filter((el) => visible(el) && !el.matches(REPLACED_NATIVE.join(',')))
+    ].filter(
+      (el) =>
+        visible(el) &&
+        !el.matches(REPLACED_NATIVE.join(',')) &&
+        // ⚠️ 禁用的控件**按设计就聚焦不了**（disabled 的 button 不进焦点序列），
+        // 所以它不可能有焦点环。把它算进来，闸门就会因为
+        // 「40 个禁用的回放按钮」而误报 —— 判据错了，不是界面错了。
+        !el.matches(':disabled')
+    )
     let focusableCount = focusables.length
     let withFocusRing = 0
     let tooSmall = 0
@@ -352,6 +362,8 @@ for (const width of [320, 375, 414, 768]) {
     return [...document.querySelectorAll('a[href], button, [tabindex]:not([tabindex="-1"])')]
       .filter((el) => {
         if (el.matches(REPLACED.join(','))) return false
+        // 禁用的控件不是点击目标 —— 它连点都点不动
+        if (el.matches(':disabled')) return false
         // 行内文字按钮是次级操作，不按 44px 判
         if (el.closest('.el-table') && el.classList.contains('is-link')) return false
         const s = getComputedStyle(el)
