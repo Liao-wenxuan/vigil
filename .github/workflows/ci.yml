@@ -38,3 +38,50 @@ jobs:
 
       - name: 端到端闭环验证
         run: npm run verify
+
+  # ============================================================
+  # 面板端到端
+  # ============================================================
+  #
+  # 面板是最容易「本地看着好、CI 挂掉」的一层：
+  # 路由、代理注入、Element Plus 渲染、回放播放器挂载 ——
+  # 任何一环变了，断言立刻能看出来。
+  #
+  # 跑的是**生产构建产物**（vite preview），不是 dev server ——
+  # 两者不是一回事。
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      VIGIL_ADMIN_TOKEN: vigil_ci_admin
+      VIGIL_DB_PATH: ${{ github.workspace }}/data/ci.db
+      PORT: '4318'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: 构建面板与采集服务
+        run: |
+          npm run build --workspace @vigil/dashboard
+          npm run build --workspace @vigil/collector
+
+      - name: 安装浏览器
+        run: npx playwright install --with-deps chromium
+
+      # ⚠️ 起服务和跑测试必须在**同一个 step**。
+      #    GitHub Actions 每个 `run` 块是独立 shell，块结束时
+      #    里面用 `&` 起的后台进程会被杀掉。
+      - name: 面板端到端验证
+        run: |
+          node packages/collector/dist/index.js &
+          npx vite preview packages/dashboard --port 5174 --strictPort &
+          node scripts/wait-for.mjs http://127.0.0.1:4318/api/health http://localhost:5174/
+          node packages/dashboard/tests/verify-dashboard.mjs --url http://localhost:5174
