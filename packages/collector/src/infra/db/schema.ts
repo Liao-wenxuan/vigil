@@ -368,6 +368,81 @@ CREATE INDEX IF NOT EXISTS idx_alert_incidents_dedupe ON alert_incidents(dedupe_
 CREATE INDEX IF NOT EXISTS idx_alert_incidents_rule  ON alert_incidents(rule_id, triggered_at DESC);
 
 -- ============================================================
+-- 会话回放与用户行为
+-- ============================================================
+
+-- 会话：一次标签页访问
+--
+-- ⚠️ 回放事件流**按会话存最新的一份**，不是按错误存。
+--    客户端的缓冲区是滚动窗口，第 2 个错误带的上传窗口比第 1 个更长，
+--    两份都存就是重复数据。代价是：回放展示的是**最近一次快照**，
+--    不精确对应每个错误的时间点 —— 文档里写明了这个限制。
+CREATE TABLE IF NOT EXISTS replay_sessions (
+  id ${PK},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id ${TEXT} NOT NULL,
+  user_id ${TEXT},
+  started_at ${TS} NOT NULL,
+  ended_at ${TS} NOT NULL,
+  duration_ms INTEGER NOT NULL DEFAULT 0,
+  page_views INTEGER NOT NULL DEFAULT 0,
+  entry_page ${TEXT},
+  exit_page ${TEXT},
+  path_json ${JSON},
+  user_agent ${TEXT},
+  browser ${TEXT},
+  os ${TEXT},
+  device ${TEXT},
+  referrer ${TEXT},
+  error_count INTEGER NOT NULL DEFAULT 0,
+  -- 回放流
+  replay_events INTEGER NOT NULL DEFAULT 0,
+  replay_bytes INTEGER NOT NULL DEFAULT 0,
+  replay_updated_at ${TS},
+  created_at ${TS} NOT NULL,
+  UNIQUE (project_id, session_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_sessions_time ON replay_sessions(project_id, started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_replay_sessions_user ON replay_sessions(project_id, user_id);
+
+-- 回放事件流（rrweb 格式）
+--
+-- seq 是**连续**的：rrweb 的数据是「一个全量快照 + 一串增量」，
+-- 丢一段后面全对不上。所以 UNIQUE (project_id, session_id, seq)。
+CREATE TABLE IF NOT EXISTS replay_events (
+  id ${PK},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id ${TEXT} NOT NULL,
+  seq INTEGER NOT NULL,
+  timestamp ${TS} NOT NULL,
+  event_type INTEGER NOT NULL,
+  data_json ${JSON} NOT NULL,
+  created_at ${TS} NOT NULL,
+  UNIQUE (project_id, session_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_events_session ON replay_events(project_id, session_id, seq);
+
+-- 行为事件：PV / 路由 / 点击
+CREATE TABLE IF NOT EXISTS behavior_events (
+  id ${PK},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  session_id ${TEXT} NOT NULL,
+  user_id ${TEXT},
+  type ${TEXT} NOT NULL,
+  name ${TEXT} NOT NULL,
+  url ${TEXT},
+  timestamp ${TS} NOT NULL,
+  duration_ms INTEGER,
+  data_json ${JSON}
+);
+
+CREATE INDEX IF NOT EXISTS idx_behavior_project_time ON behavior_events(project_id, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_behavior_project_type ON behavior_events(project_id, type);
+CREATE INDEX IF NOT EXISTS idx_behavior_session ON behavior_events(project_id, session_id);
+
+-- ============================================================
 -- 制品域：构建产物与 sourcemap
 -- ============================================================
 

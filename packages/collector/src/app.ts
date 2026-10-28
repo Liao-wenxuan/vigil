@@ -1,6 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify'
 import crypto from 'node:crypto'
-import { openDb, type Db } from './infra/db/client.js'
+import { openDb, defaultDbPath, type Db } from './infra/db/client.js'
 import { TokenBucketLimiter } from './infra/ratelimit.js'
 import { TenancyService, type ProjectRow } from './domains/tenancy/service.js'
 import { IssueService } from './domains/issues/service.js'
@@ -8,9 +8,10 @@ import { PerformanceService } from './domains/performance/service.js'
 import { ArtifactService } from './domains/artifacts/service.js'
 import { AlertingService } from './domains/alerting/service.js'
 import { AlertEvaluator } from './domains/alerting/evaluator.js'
+import { ReplayService } from './domains/replay/service.js'
 import { IngestionPipeline } from './domains/ingestion/pipeline.js'
 import { AppError } from './shared/errors.js'
-import type { CollectEnvelope, PerformanceEnvelope } from '@vigil/protocol'
+import type { BehaviorEnvelope, CollectEnvelope, PerformanceEnvelope } from '@vigil/protocol'
 
 /**
  * 采集服务（模块化单体）。
@@ -45,6 +46,7 @@ export interface BuiltApp {
   artifacts: ArtifactService
   alerting: AlertingService
   evaluator: AlertEvaluator
+  replay: ReplayService
   ingestion: IngestionPipeline
 }
 
@@ -65,7 +67,8 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
   const performance = new PerformanceService(db)
   const alerting = new AlertingService(db)
   const evaluator = new AlertEvaluator(db, alerting)
-  const ingestion = new IngestionPipeline(db, issues, performance, artifacts)
+  const replay = new ReplayService(db)
+  const ingestion = new IngestionPipeline(db, issues, performance, artifacts, replay)
 
   const limiter = new TokenBucketLimiter(
     options.rateLimit ?? { capacity: 240, refillPerSecond: 40 }
@@ -88,6 +91,7 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
 
   app.options('/api/v1/collect', async (_request, reply) => reply.code(204).send())
   app.options('/api/v1/performance', async (_request, reply) => reply.code(204).send())
+  app.options('/api/v1/behavior', async (_request, reply) => reply.code(204).send())
   app.options('/api/v1/sourcemaps', async (_request, reply) => reply.code(204).send())
 
   // ---- 错误处理 ----
@@ -185,6 +189,44 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
       enforceRateLimit(limiter, project.id)
 
       const result = ingestion.ingestPerformance(project, body)
+      return reply.send({ ok: true, accepted: result.accepted, dropped: result.dropped })
+    }
+  )
+
+  app.post(
+    '/api/v1/behavior',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['appId', 'events'],
+          properties: {
+            appId: { type: 'string', maxLength: 64 },
+            token: { type: 'string', maxLength: 256 },
+            sdk: {
+              type: 'object',
+              properties: {
+                name: { type: 'string', maxLength: 64 },
+                version: { type: 'string', maxLength: 32 }
+              }
+            },
+            events: {
+              type: 'array',
+              minItems: 0,
+              maxItems: 500,
+              items: { type: 'object', additionalProperties: true }
+            },
+            session: { type: 'object', additionalProperties: true }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const body = request.body as BehaviorEnvelope
+      const { project } = authenticateProject(request, body.token)
+      enforceRateLimit(limiter, project.id)
+
+      const result = ingestion.ingestBehavior(project, body)
       return reply.send({ ok: true, accepted: result.accepted, dropped: result.dropped })
     }
   )
@@ -689,6 +731,76 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     }
   })
 
+  // ---- 会话回放与用户行为 ----
+
+  app.get('/api/v1/projects/:projectId/behavior/summary', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+    return {
+      ok: true,
+      summary: replay.summary(Number(projectId), {
+        since: query.since ? Number(query.since) : undefined,
+        until: query.until ? Number(query.until) : undefined
+      })
+    }
+  })
+
+  app.get('/api/v1/projects/:projectId/sessions', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+    return {
+      ok: true,
+      ...replay.listSessions(Number(projectId), {
+        limit: query.limit ? Number(query.limit) : undefined,
+        offset: query.offset ? Number(query.offset) : undefined
+      })
+    }
+  })
+
+  app.get('/api/v1/projects/:projectId/sessions/:sessionId/replay', admin, async (request) => {
+    const { projectId, sessionId } = request.params as { projectId: string; sessionId: string }
+    const events = replay.getReplay(Number(projectId), sessionId)
+    return { ok: true, sessionId, events: events.length, stream: events }
+  })
+
+  app.get('/api/v1/projects/:projectId/sessions/:sessionId/events', admin, async (request) => {
+    const { projectId, sessionId } = request.params as { projectId: string; sessionId: string }
+    return {
+      ok: true,
+      events: replay.listSessionEvents(Number(projectId), sessionId)
+    }
+  })
+
+  /**
+   * 某个问题的会话回放。
+   *
+   * 回放是**按会话**存的（最新一份），所以这里从该问题最近一次发生
+   * 所属的会话里取。
+   */
+  app.get('/api/v1/projects/:projectId/issues/:issueId/replay', admin, async (request) => {
+    const { projectId, issueId } = request.params as { projectId: string; issueId: string }
+
+    const row = db.get<{ session_id: string | null }>(
+      `SELECT session_id FROM issue_events
+       WHERE issue_id = ? AND project_id = ? AND session_id IS NOT NULL
+       ORDER BY occurred_at DESC LIMIT 1`,
+      [Number(issueId), Number(projectId)]
+    )
+
+    if (!row?.session_id) {
+      return { ok: true, hasReplay: false, events: 0, stream: [] }
+    }
+
+    const stream = replay.getReplay(Number(projectId), row.session_id)
+    return {
+      ok: true,
+      hasReplay: stream.length > 0,
+      sessionId: row.session_id,
+      events: stream.length,
+      stream
+    }
+  })
+
   // ---- 告警 ----
 
   app.get('/api/v1/projects/:projectId/alert-rules', admin, async (request) => {
@@ -821,7 +933,17 @@ export function buildApp(options: BuildAppOptions): BuiltApp {
     }
   }
 
-  return { app, tenancy, issues, performance, artifacts, alerting, evaluator, ingestion }
+  return {
+    app,
+    tenancy,
+    issues,
+    performance,
+    artifacts,
+    alerting,
+    evaluator,
+    replay,
+    ingestion
+  }
 }
 
 /** 管理端鉴权 */
@@ -861,13 +983,14 @@ function isIngestPath(url: string): boolean {
   return (
     url.startsWith('/api/v1/collect') ||
     url.startsWith('/api/v1/performance') ||
+    url.startsWith('/api/v1/behavior') ||
     url.startsWith('/api/v1/sourcemaps')
   )
 }
 
 /** 从环境变量组装服务 */
 export function createAppFromEnv(): BuiltApp & { db: Db } {
-  const db = openDb(process.env.VIGIL_DB_PATH ?? './data/vigil.db')
+  const db = openDb(defaultDbPath())
   const adminToken = process.env.VIGIL_ADMIN_TOKEN ?? crypto.randomBytes(24).toString('hex')
   return { ...buildApp({ db, adminToken }), db }
 }

@@ -4,7 +4,9 @@ import type { ProjectRow } from '../tenancy/service.js'
 import type { IssueService } from '../issues/service.js'
 import type { PerformanceService } from '../performance/service.js'
 import type { ArtifactService } from '../artifacts/service.js'
+import type { ReplayService } from '../replay/service.js'
 import type {
+  BehaviorEnvelope,
   CollectEnvelope,
   ErrorEvent,
   PerformanceEnvelope,
@@ -35,7 +37,8 @@ export class IngestionPipeline {
     private readonly db: Db,
     private readonly issues: IssueService,
     private readonly performance: PerformanceService,
-    private readonly artifacts: ArtifactService
+    private readonly artifacts: ArtifactService,
+    private readonly replay: ReplayService
   ) {}
 
   /**
@@ -54,9 +57,26 @@ export class IngestionPipeline {
       const outcome = this.issues.ingestEvent(project.id, event)
       ids[String(index)] = outcome.issueId
       accepted++
+
+      // 会话回放：随错误一起送来的事件流
+      if (event.replay && event.sessionId) {
+        this.replay.saveReplay(project.id, event.sessionId, event.replay, {
+          userId: event.userId,
+          occurredAt: event.occurredAt
+        })
+        this.replay.incrementSessionError(project.id, event.sessionId)
+      }
     }
 
     return { accepted, dropped: 0, ids }
+  }
+
+  /**
+   * 摄入行为事件（PV / 路由 / 点击 + 会话汇总）。
+   */
+  ingestBehavior(project: ProjectRow, envelope: BehaviorEnvelope): IngestResult {
+    const result = this.replay.ingestBehavior(project.id, envelope)
+    return { accepted: result.accepted, dropped: 0 }
   }
 
   /**
