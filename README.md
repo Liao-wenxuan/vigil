@@ -172,9 +172,36 @@ installVueErrorHandler(app, (err) => vigil.captureException(err))
 npm run test              # 132 条单元测试
 npm run verify            # 20 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 33 条面板渲染断言
+npm run audit:ui          # 15 条界面设计闸门（见下）
 npm run typecheck
 npm run lint
 ```
+
+### 界面设计闸门
+
+`npm run audit:ui` 把「界面好不好看」拆成**可自动测的数字**：
+
+| 闸门 | 判据 |
+|---|---|
+| 字阶对比 | 最大字号 ÷ 最小字号 ≥ 2.5×（没有层级就没有设计感） |
+| 字号档位 | 6–14 档，且不连续堆叠 |
+| 颜色收敛 | 单页 ≤ 24 种 |
+| 动效档位 | ≥ 2 档时长（不能一个 `0.3s ease` 用到底） |
+| 焦点环 | ≥ 90% 可聚焦元素有可见焦点环 |
+| 点击目标 | 桌面主控件 ≥ 32px / 行内按钮 ≥ 24px / 触摸主控件 ≥ 40px |
+| 横向溢出 | 320 / 375 / 414 / 768px 下都不能溢出 |
+| 动效降级 | `prefers-reduced-motion` 下内容不消失、动效被压制 |
+
+同时输出**静帧截图**到 `docs/screenshots/` —— 动效关掉之后长什么样，
+那是「设计感」真正被看见的地方。
+
+<details>
+<summary>总览页静帧</summary>
+
+![总览](docs/screenshots/overview.png)
+
+</details>
+
 
 `npm run verify` 跑的是**真实链路**，断言覆盖：
 
