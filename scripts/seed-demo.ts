@@ -516,35 +516,74 @@ for (let session = 0; session < 40; session++) {
   behaviorCount += events.length
 }
 
-// 造一份回放事件流（rrweb 格式：Meta + FullSnapshot + 增量）
+// 造一份回放事件流（rrweb v2 格式：Meta + FullSnapshot + Incremental）
 //
-// type 4 = Meta，type 3 = FullSnapshot，type 2 = IncrementalSnapshot
-// 真实回放流是连续的，播放器依赖第一个 FullSnapshot 建立 DOM 镜像。
+// ⚠️ 事件类型编号不是随手写的 —— `@rrweb/types` 的 EventType 是
+//   DomContentLoaded=0 / Load=1 / **FullSnapshot=2** / **IncrementalSnapshot=3** / Meta=4
+// 写错的后果很隐蔽：播放器按编号分派，编号错了就**静默播不出来**，不报错。
+//
+// 节点类型同理（NodeType）：Document=0 / DocumentType=1 / Element=2 / Text=3。
+// 把 Element 写成 1（DocumentType）的话，播放器建不出 DOM。
+//
+// 真实回放流是连续的，播放器依赖第一个 FullSnapshot 建立 DOM 镜像 ——
+// 增量事件必须在快照之后出现。
 const replaySessionId = 'sess_demo_replay'
+const replayBase = now - 300_000
 const replayEvents: ReplayEvent[] = [
+  // Meta（4）：播放器据此设置 iframe 尺寸
   {
     type: 4,
     data: { href: 'https://shop.example.com/cart', width: 1440, height: 900 },
-    timestamp: now - 300_000
+    timestamp: replayBase
   },
+  // FullSnapshot（2）：增量链的起点，播放器靠它重建 DOM 镜像
   {
-    type: 3,
-    data: { node: { type: 0, childNodes: [], id: 1, tagName: 'html' } },
-    timestamp: now - 300_000
+    type: 2,
+    data: {
+      node: {
+        type: 0, // Document
+        id: 1,
+        childNodes: [
+          {
+            type: 2, // Element <html>
+            id: 2,
+            tagName: 'html',
+            attributes: {},
+            childNodes: [
+              {
+                type: 2, // Element <body>
+                id: 3,
+                tagName: 'body',
+                attributes: {},
+                childNodes: [
+                  {
+                    type: 2, // Element <div class="cart">
+                    id: 4,
+                    tagName: 'div',
+                    attributes: { class: 'cart' },
+                    childNodes: [{ type: 3, id: 5, textContent: '购物车' }]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      initialOffset: { left: 0, top: 0 }
+    },
+    timestamp: replayBase
   },
-  {
-    type: 3,
-    data: { node: { type: 0, childNodes: [], id: 2, tagName: 'body' } },
-    timestamp: now - 299_990
-  },
+  // IncrementalSnapshot（3）：Mutation 源（source=0），往购物车节点里加一段文本
   {
     type: 3,
     data: {
-      node: { type: 1, childNodes: [], id: 3, tagName: 'div', attributes: { class: 'cart' } }
+      source: 0,
+      adds: [{ type: 3, id: 6, parentId: 4, textContent: '共 3 件商品' }],
+      removes: [],
+      text: '共 3 件商品'
     },
-    timestamp: now - 299_980
-  },
-  { type: 2, data: { source: 3, adds: [], removes: [], text: '购物车' }, timestamp: now - 299_000 }
+    timestamp: replayBase + 1000
+  }
 ]
 replayService.saveReplay(shop.project.id, replaySessionId, {
   events: replayEvents,
