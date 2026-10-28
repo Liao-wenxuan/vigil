@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { buildSchema } from './schema.js'
-import type { Db } from './client.js'
-import type { Dialect } from './dialect.js'
+import type { Db } from './types.js'
+import { ts as tsType, type Dialect } from './dialect.js'
 
 /**
  * 迁移框架。
@@ -18,12 +18,28 @@ import type { Dialect } from './dialect.js'
 export interface Migration {
   version: number
   name: string
-  up(db: Db, dialect: Dialect): void
+  up(db: Db, dialect: Dialect): Promise<void>
 }
 
-/** 表是否存在 */
-function tableExists(db: Db, name: string): boolean {
-  const row = db.get<{ n: number }>(
+/**
+ * 表是否存在。
+ *
+ * 两边查的地方不一样：SQLite 有自己的系统表 `sqlite_master`，
+ * PG 走标准的 `information_schema`。
+ *
+ * ⚠️ `sqlite_master` 在 PG 上**根本不存在** —— 查它会直接报
+ * 「relation does not exist」，整个迁移流程起不来。
+ */
+async function tableExists(db: Db, dialect: Dialect, name: string): Promise<boolean> {
+  if (dialect === 'postgres') {
+    const row = await db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM information_schema.tables
+       WHERE table_schema = 'public' AND table_name = ?`,
+      [name]
+    )
+    return (row?.n ?? 0) > 0
+  }
+  const row = await db.get<{ n: number }>(
     "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name = ?",
     [name]
   )
@@ -31,8 +47,21 @@ function tableExists(db: Db, name: string): boolean {
 }
 
 /** 表里有没有某列 */
-function hasColumn(db: Db, table: string, column: string): boolean {
-  const row = db.get<{ n: number }>(
+async function hasColumn(
+  db: Db,
+  dialect: Dialect,
+  table: string,
+  column: string
+): Promise<boolean> {
+  if (dialect === 'postgres') {
+    const row = await db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = ? AND column_name = ?`,
+      [table, column]
+    )
+    return (row?.n ?? 0) > 0
+  }
+  const row = await db.get<{ n: number }>(
     'SELECT COUNT(*) AS n FROM pragma_table_info(?) WHERE name = ?',
     [table, column]
   )
@@ -57,9 +86,12 @@ function hasColumn(db: Db, table: string, column: string): boolean {
  *
  * 修法：建 v2 的表**之前**先把老表改名，把表名腾出来。
  */
-function renameLegacyTables(db: Db): void {
-  if (tableExists(db, 'sourcemaps') && !hasColumn(db, 'sourcemaps', 'project_id')) {
-    db.exec('ALTER TABLE sourcemaps RENAME TO sourcemaps_legacy')
+async function renameLegacyTables(db: Db, dialect: Dialect): Promise<void> {
+  if (
+    (await tableExists(db, dialect, 'sourcemaps')) &&
+    !(await hasColumn(db, dialect, 'sourcemaps', 'project_id'))
+  ) {
+    await db.exec('ALTER TABLE sourcemaps RENAME TO sourcemaps_legacy')
   }
 }
 
@@ -78,10 +110,10 @@ function renameLegacyTables(db: Db): void {
  * 关键点：**老 token 的哈希直接搬过去**，所以用户已有的上报 token 不会失效。
  * （明文本来就没存，存的是哈希，搬哈希即可。）
  */
-function migrateLegacyV1Data(db: Db): void {
-  if (!tableExists(db, 'apps')) return
+async function migrateLegacyV1Data(db: Db, dialect: Dialect): Promise<void> {
+  if (!(await tableExists(db, dialect, 'apps'))) return
 
-  const legacyApps = db.all<{
+  const legacyApps = await db.all<{
     app_id: string
     name: string
     token_hash: string
@@ -96,35 +128,35 @@ function migrateLegacyV1Data(db: Db): void {
   const now = Date.now()
 
   // 一个组织装下所有老应用 —— 迁移期的临时结构
-  db.run(
-    `INSERT OR IGNORE INTO organizations (id, slug, name, created_at) VALUES (1, 'legacy', 'Legacy', ?)`,
+  await db.run(
+    `INSERT INTO organizations (id, slug, name, created_at) VALUES (1, 'legacy', 'Legacy', ?) ON CONFLICT DO NOTHING`,
     [now]
   )
 
   for (const app of legacyApps) {
     // 老 app_id（app_xxx）直接当 slug，肉眼可辨
-    db.run(
-      `INSERT OR IGNORE INTO projects
+    await db.run(
+      `INSERT INTO projects
          (id, organization_id, slug, name, platform, retention_days, event_quota, created_at)
-       VALUES (?, 1, ?, ?, 'javascript', 90, 1000000, ?)`,
+       VALUES (?, 1, ?, ?, 'javascript', 90, 1000000, ?) ON CONFLICT DO NOTHING`,
       [legacyAppId(app.app_id), app.app_id, app.name, app.created_at]
     )
 
     // 密钥：哈希直接搬，老 token 继续可用
-    db.run(
-      `INSERT OR IGNORE INTO project_keys (project_id, kind, key_hash, label, created_at)
-       VALUES (?, 'runtime', ?, '迁移自 v1', ?)`,
+    await db.run(
+      `INSERT INTO project_keys (project_id, kind, key_hash, label, created_at)
+       VALUES (?, 'runtime', ?, '迁移自 v1', ?) ON CONFLICT DO NOTHING`,
       [legacyAppId(app.app_id), app.token_hash, app.created_at]
     )
-    db.run(
-      `INSERT OR IGNORE INTO project_keys (project_id, kind, key_hash, label, created_at)
-       VALUES (?, 'upload', ?, '迁移自 v1', ?)`,
+    await db.run(
+      `INSERT INTO project_keys (project_id, kind, key_hash, label, created_at)
+       VALUES (?, 'upload', ?, '迁移自 v1', ?) ON CONFLICT DO NOTHING`,
       [legacyAppId(app.app_id), app.upload_token_hash, app.created_at]
     )
   }
 
   // errors → issues
-  const legacyErrors = db.all<{
+  const legacyErrors = await db.all<{
     id: number
     app_id: string
     fingerprint: string
@@ -159,12 +191,12 @@ function migrateLegacyV1Data(db: Db): void {
             .digest('hex')
             .slice(0, 16)
 
-    db.run(
-      `INSERT OR IGNORE INTO issues
+    await db.run(
+      `INSERT INTO issues
          (id, project_id, fingerprint, short_id, category, kind, title, level,
           status, substatus, count, user_count, first_seen, last_seen,
           is_bookmarked, is_subscribed, has_seen, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'error', 'unresolved', 'new', ?, 0, ?, ?, 0, 0, 0, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'error', 'unresolved', 'new', ?, 0, ?, ?, 0, 0, 0, ?, ?) ON CONFLICT DO NOTHING`,
       [
         error.id,
         legacyAppId(error.app_id),
@@ -183,8 +215,8 @@ function migrateLegacyV1Data(db: Db): void {
   }
 
   // error_events → issue_events
-  if (tableExists(db, 'error_events')) {
-    const legacyEvents = db.all<{
+  if (await tableExists(db, dialect, 'error_events')) {
+    const legacyEvents = await db.all<{
       id: number
       app_id: string
       fingerprint: string
@@ -195,10 +227,10 @@ function migrateLegacyV1Data(db: Db): void {
     }>('SELECT * FROM error_events')
 
     for (const event of legacyEvents) {
-      db.run(
-        `INSERT OR IGNORE INTO issue_events
+      await db.run(
+        `INSERT INTO issue_events
            (issue_id, project_id, event_id, occurred_at, received_at, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
         [
           event.error_id ?? 0,
           legacyAppId(event.app_id),
@@ -213,12 +245,12 @@ function migrateLegacyV1Data(db: Db): void {
 
   // 迁移过来的 Issue 也要有活动流 —— 否则详情页是空的，
   // 「这个问题是什么时候出现的」就无从查起。
-  const migrated = db.all<{ id: number; first_seen: number }>(
+  const migrated = await db.all<{ id: number; first_seen: number }>(
     'SELECT id, first_seen FROM issues WHERE id NOT IN (SELECT issue_id FROM issue_activity)'
   )
 
   for (const issue of migrated) {
-    db.run(
+    await db.run(
       `INSERT INTO issue_activity
          (issue_id, actor_type, actor_id, action, reason, data_json, created_at)
        VALUES (?, 'system', NULL, 'created', ?, NULL, ?)`,
@@ -231,8 +263,8 @@ function migrateLegacyV1Data(db: Db): void {
   // ⚠️ 这两张表**同名**，但列不一样（v1 是 app_id + release 字符串，
   //    v2 是 project_id + release_id 外键）。
   //    建表阶段已经把老表改名成 sourcemaps_legacy，把表名腾给 v2 了。
-  if (tableExists(db, 'sourcemaps_legacy')) {
-    const legacyMaps = db.all<{
+  if (await tableExists(db, dialect, 'sourcemaps_legacy')) {
+    const legacyMaps = await db.all<{
       id: number
       app_id: string
       release: string
@@ -244,15 +276,15 @@ function migrateLegacyV1Data(db: Db): void {
 
     // v1 的行按列名取，v2 的行按外键取 —— 两套列名，不能直接搬
     for (const map of legacyMaps) {
-      const releaseRow = db.get<{ id: number }>(
+      const releaseRow = await db.get<{ id: number }>(
         'SELECT id FROM releases WHERE project_id = ? AND version = ?',
         [legacyAppId(map.app_id), map.release]
       )
 
-      db.run(
-        `INSERT OR IGNORE INTO sourcemaps
+      await db.run(
+        `INSERT INTO sourcemaps
            (project_id, release_id, file_name, base_name, map_json, uploaded_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING`,
         [
           legacyAppId(map.app_id),
           releaseRow?.id ?? null,
@@ -264,7 +296,7 @@ function migrateLegacyV1Data(db: Db): void {
       )
     }
 
-    db.exec('DROP TABLE sourcemaps_legacy')
+    await db.exec('DROP TABLE sourcemaps_legacy')
   }
 
   // 老表清空 —— 数据已经搬到新模型，留着只会让人困惑。
@@ -272,7 +304,7 @@ function migrateLegacyV1Data(db: Db): void {
   // ⚠️ 只删**v2 里不存在同名表**的老表。
   //    `sourcemaps` 两边都有，删了就把 v2 的表也毁了。
   for (const table of ['error_events', 'errors', 'apps']) {
-    if (tableExists(db, table)) db.exec(`DROP TABLE ${table}`)
+    if (await tableExists(db, dialect, table)) await db.exec(`DROP TABLE ${table}`)
   }
 }
 
@@ -298,19 +330,19 @@ export const MIGRATIONS: Migration[] = [
   {
     version: 1,
     name: 'core-schema',
-    up(db, dialect) {
+    async up(db, dialect) {
       // ⚠️ 顺序很重要：先腾出与 v2 同名的老表，再建 v2 的表。
       //    `CREATE TABLE IF NOT EXISTS` 遇到同名表会**静默跳过**，
       //    老表结构就被沿用了 —— 症状是 v2 的列根本不存在。
-      renameLegacyTables(db)
-      db.exec(buildSchema(dialect))
+      await renameLegacyTables(db, dialect)
+      await db.exec(buildSchema(dialect))
     }
   },
   {
     version: 2,
     name: 'migrate-legacy-v1-data',
-    up(db) {
-      migrateLegacyV1Data(db)
+    async up(db, dialect) {
+      await migrateLegacyV1Data(db, dialect)
     }
   }
 ]
@@ -320,17 +352,23 @@ export const MIGRATIONS: Migration[] = [
  *
  * @returns 本次实际执行的版本号
  */
-export function runMigrations(db: Db, dialect: Dialect, migrations: Migration[]): number[] {
-  db.exec(
+export async function runMigrations(
+  db: Db,
+  dialect: Dialect,
+  migrations: Migration[]
+): Promise<number[]> {
+  await db.exec(
     `CREATE TABLE IF NOT EXISTS schema_migrations (
        version INTEGER PRIMARY KEY,
        name TEXT NOT NULL,
-       applied_at INTEGER NOT NULL
+       applied_at ${tsType(dialect)} NOT NULL
      )`
   )
 
   const applied = new Set(
-    db.all<{ version: number }>('SELECT version FROM schema_migrations').map((r) => r.version)
+    (await db.all<{ version: number }>('SELECT version FROM schema_migrations')).map(
+      (r) => r.version
+    )
   )
 
   const executed: number[] = []
@@ -339,9 +377,9 @@ export function runMigrations(db: Db, dialect: Dialect, migrations: Migration[])
     if (applied.has(migration.version)) continue
 
     // 每个版本一个事务：迁移失败不会留下半截状态
-    db.transaction(() => {
-      migration.up(db, dialect)
-      db.run('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)', [
+    await db.transaction(async () => {
+      await migration.up(db, dialect)
+      await db.run('INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)', [
         migration.version,
         migration.name,
         Date.now()

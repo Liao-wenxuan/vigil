@@ -3,77 +3,99 @@ import fs from 'node:fs'
 import nodePath from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runMigrations, MIGRATIONS } from './migrate.js'
+import type { Db } from './types.js'
 import type { Dialect } from './dialect.js'
 
-/**
- * 数据访问接口。
- *
- * 领域代码**只依赖这个接口**，不依赖具体驱动。
- * 这样「换数据库」真的就只是换一个实现 —— 而不是重写所有查询。
- *
- * 参数既支持位置（`?`）也支持命名（`@name`），
- * 两种写法在 SQLite 和 PostgreSQL 上语义一致。
- */
-export interface Db {
-  readonly dialect: Dialect
-  /** 执行不返回结果集的语句（DDL 等） */
-  exec(sql: string): void
-  /** 查询多行 */
-  all<T = unknown>(sql: string, params?: unknown[] | Record<string, unknown>): T[]
-  /** 查询单行 */
-  get<T = unknown>(sql: string, params?: unknown[] | Record<string, unknown>): T | undefined
-  /** 执行写语句 */
-  run(sql: string, params?: unknown[] | Record<string, unknown>): { changes: number }
-  /** 在事务里执行 */
-  transaction<T>(fn: () => T): T
-  close(): void
-}
+export type { Db } from './types.js'
 
-/** SQLite 实现 */
+/**
+ * SQLite 实现。
+ *
+ * better-sqlite3 是**同步**驱动，所以这里每个方法都是「同步干活 + 包一层 Promise」。
+ *
+ * ## 事务里为什么可以 await
+ *
+ * 事务体里的 `await` 挂起的是**微任务**，不是宏任务。
+ * Node 的事件循环会先清空微任务队列再回到宏任务 ——
+ * 所以在微任务挂起期间，**另一个请求的 SQL 不会插进这个事务**。
+ *
+ * ⚠️ 这条保证依赖 SQLite 实现**不做真正的异步 IO**。
+ *    PG 实现是另一套逻辑（独占一个连接，见 postgres.ts）。
+ */
 class SqliteDb implements Db {
   readonly dialect: Dialect = 'sqlite'
 
+  /** 事务嵌套深度 —— 内层不重新 BEGIN，靠外层兜住 */
+  private depth = 0
+
   constructor(private readonly db: Database.Database) {}
 
-  exec(sql: string): void {
+  async exec(sql: string): Promise<void> {
     this.db.exec(sql)
   }
 
-  all<T = unknown>(sql: string, params?: unknown[] | Record<string, unknown>): T[] {
+  async all<T = unknown>(sql: string, params?: unknown[] | Record<string, unknown>): Promise<T[]> {
     const statement = this.db.prepare(sql)
     if (params === undefined) return statement.all() as T[]
     return statement.all(params as never) as T[]
   }
 
-  get<T = unknown>(sql: string, params?: unknown[] | Record<string, unknown>): T | undefined {
+  async get<T = unknown>(
+    sql: string,
+    params?: unknown[] | Record<string, unknown>
+  ): Promise<T | undefined> {
     const statement = this.db.prepare(sql)
     if (params === undefined) return statement.get() as T | undefined
     return statement.get(params as never) as T | undefined
   }
 
-  run(sql: string, params?: unknown[] | Record<string, unknown>): { changes: number } {
+  async run(
+    sql: string,
+    params?: unknown[] | Record<string, unknown>
+  ): Promise<{ changes: number }> {
     const statement = this.db.prepare(sql)
     if (params === undefined) return statement.run()
     return statement.run(params as never)
   }
 
-  transaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)()
+  async insert(sql: string, params?: unknown[] | Record<string, unknown>): Promise<number> {
+    // `RETURNING id` —— SQLite 3.35+ 与 PG 都支持
+    const statement = this.db.prepare(`${sql} RETURNING id`)
+    const row = params === undefined ? statement.get() : statement.get(params as never)
+    return Number((row as { id?: number } | undefined)?.id ?? 0)
   }
 
-  close(): void {
+  async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    // 嵌套事务：内层直接跑，靠外层提交
+    if (this.depth > 0) return await fn()
+
+    this.depth++
+    this.db.exec('BEGIN')
+    try {
+      const result = await fn()
+      this.db.exec('COMMIT')
+      return result
+    } catch (error) {
+      this.db.exec('ROLLBACK')
+      throw error
+    } finally {
+      this.depth--
+    }
+  }
+
+  async close(): Promise<void> {
     this.db.close()
   }
 }
 
 /**
- * 打开数据库。
+ * 打开 SQLite 数据库。
  *
  * @param path SQLite 文件路径；':memory:' 表示内存库（测试用）
  * @param options.migrate 是否自动跑迁移。测试造「有历史数据的老库」时
  *        要先关掉 —— 否则迁移先跑完，就没有老表可迁了。
  */
-export function openDb(path: string, options: { migrate?: boolean } = {}): Db {
+export async function openDb(path: string, options: { migrate?: boolean } = {}): Promise<Db> {
   if (path !== ':memory:') {
     // 目录不存在时 SQLite 不会自动建 —— 直接开文件会报 "unable to open database file"
     fs.mkdirSync(nodePath.dirname(nodePath.resolve(path)), { recursive: true })
@@ -92,7 +114,10 @@ export function openDb(path: string, options: { migrate?: boolean } = {}): Db {
 
   const db = new SqliteDb(raw)
   if (options.migrate !== false) {
-    runMigrations(db, 'sqlite', MIGRATIONS)
+    // ⚠️ 迁移必须**等完**才能返回。
+    //    丢弃这个 Promise 会让第一个请求撞上半截 schema ——
+    //    症状是「刚启动的几秒里上报全部 500」。
+    await runMigrations(db, 'sqlite', MIGRATIONS)
   }
   return db
 }
