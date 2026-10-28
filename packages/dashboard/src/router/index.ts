@@ -23,37 +23,37 @@ const routes: RouteRecordRaw[] = [
         path: '',
         name: 'overview',
         component: OverviewView,
-        meta: { title: '总览' }
+        meta: { title: '总览', desc: '当前项目的错误与性能全貌' }
       },
       {
         path: 'issues',
         name: 'issues',
         component: IssuesView,
-        meta: { title: '问题' }
+        meta: { title: '问题', desc: '按指纹聚合的未解决问题，可标记解决与回归' }
       },
       {
         path: 'issues/:id',
         name: 'issue-detail',
         component: IssueDetailView,
-        meta: { title: '问题详情' }
+        meta: { title: '问题详情', desc: '单个问题的生命周期、活动流与现场上下文' }
       },
       {
         path: 'performance',
         name: 'performance',
         component: PerformanceView,
-        meta: { title: '性能' }
+        meta: { title: '性能', desc: '真实用户的加载与交互体验（Web Vitals）' }
       },
       {
         path: 'alerts',
         name: 'alerts',
         component: AlertsView,
-        meta: { title: '告警' }
+        meta: { title: '告警', desc: '规则、通知通道与触发历史' }
       },
       {
         path: 'settings',
         name: 'settings',
         component: SettingsView,
-        meta: { title: '设置' }
+        meta: { title: '设置', desc: '项目、环境、版本与密钥' }
       }
     ]
   },

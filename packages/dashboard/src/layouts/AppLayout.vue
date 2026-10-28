@@ -13,6 +13,7 @@ import { useRoute } from 'vue-router'
 import {
   Bell,
   Files,
+  Fold,
   Odometer,
   Refresh,
   Setting,
@@ -25,6 +26,8 @@ import { PANEL_CONTEXT, type PanelContext, type ProjectRow } from '../types'
 
 const STORAGE_PROJECT = 'vigil.projectId'
 const REFRESH_INTERVAL = 10_000
+/** 窄屏断点：侧边导航收成抽屉 */
+const NARROW_QUERY = '(max-width: 1023px)'
 
 const route = useRoute()
 
@@ -66,11 +69,9 @@ const projectGroups = computed(() =>
   }))
 )
 
-const breadcrumb = computed(() => {
-  const title = typeof route.meta.title === 'string' ? route.meta.title : ''
-  const projectName = context.project?.name ?? '未选择项目'
-  return title ? [projectName, title] : [projectName]
-})
+const pageTitle = computed(() => (typeof route.meta.title === 'string' ? route.meta.title : ''))
+
+const pageDesc = computed(() => (typeof route.meta.desc === 'string' ? route.meta.desc : ''))
 
 const projectSlug = computed(() => context.project?.slug ?? '—')
 
@@ -157,19 +158,46 @@ async function refreshAll(): Promise<void> {
   await loadProjects()
 }
 
+// ============================================================
+// 窄屏：侧边导航收成抽屉
+// ============================================================
+//
+// 224px 的固定侧栏在 375px 的手机上会把内容区挤到 151px ——
+// 直接横向溢出。窄屏改成覆盖式抽屉，点遮罩关闭。
+const isNarrow = ref(false)
+const navOpen = ref(false)
+let mediaQuery: MediaQueryList | null = null
+
+function syncNarrow(event: MediaQueryList | MediaQueryListEvent): void {
+  isNarrow.value = event.matches
+  if (!event.matches) navOpen.value = false
+}
+
+function closeNav(): void {
+  navOpen.value = false
+}
+
 onMounted(async () => {
+  mediaQuery = window.matchMedia(NARROW_QUERY)
+  isNarrow.value = mediaQuery.matches
+  mediaQuery.addEventListener('change', syncNarrow)
+
   await loadProjects()
   restartTimer()
 })
 
 onUnmounted(() => {
   if (timer !== undefined) window.clearInterval(timer)
+  mediaQuery?.removeEventListener('change', syncNarrow)
 })
 </script>
 
 <template>
   <div class="shell">
-    <aside class="sidebar">
+    <!-- 窄屏遮罩 -->
+    <div v-if="isNarrow && navOpen" class="scrim" aria-hidden="true" @click="closeNav"></div>
+
+    <aside class="sidebar" :class="{ 'is-open': navOpen }">
       <div class="brand">
         <span class="brand-mark"></span>
         <span class="brand-name">Vigil</span>
@@ -203,7 +231,7 @@ onUnmounted(() => {
         </el-select>
       </div>
 
-      <nav class="nav">
+      <nav class="nav" @click="closeNav">
         <RouterLink
           v-for="item in navItems"
           :key="`${item.to}-${item.section}`"
@@ -213,6 +241,7 @@ onUnmounted(() => {
         >
           <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
           <span>{{ item.label }}</span>
+          <span class="nav-indicator" aria-hidden="true"></span>
         </RouterLink>
       </nav>
 
@@ -225,9 +254,18 @@ onUnmounted(() => {
     <div class="main">
       <header class="topbar">
         <div class="crumbs">
+          <el-button
+            v-if="isNarrow"
+            class="menu-btn"
+            :icon="Fold"
+            text
+            aria-label="打开导航"
+            @click="navOpen = true"
+          ></el-button>
+
           <span class="crumb-project">{{ context.project?.name ?? '未选择项目' }}</span>
           <span class="crumb-sep">/</span>
-          <span class="crumb-current">{{ breadcrumb[breadcrumb.length - 1] }}</span>
+          <span class="crumb-current">{{ pageTitle }}</span>
         </div>
 
         <div class="topbar-actions">
@@ -239,6 +277,14 @@ onUnmounted(() => {
       </header>
 
       <main class="content">
+        <!-- 页面标题：每个页面都有一个真正的 h1。
+             数据面板的层级不靠字号堆叠，靠的是
+             「26px 标题 / 15px 区块标题 / 13px 正文 / 11px 元信息」四层。 -->
+        <header class="page-head">
+          <h1 class="page-title">{{ pageTitle }}</h1>
+          <p v-if="pageDesc" class="page-desc">{{ pageDesc }}</p>
+        </header>
+
         <RouterView />
       </main>
     </div>
@@ -257,12 +303,12 @@ onUnmounted(() => {
   width: 224px;
   flex: 0 0 224px;
   min-height: 100vh;
-  padding: 18px 14px;
+  padding: var(--vigil-space-5) var(--vigil-space-3);
   background: var(--vigil-bg-sunken);
   border-right: 1px solid var(--vigil-border);
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--vigil-space-4);
   position: sticky;
   top: 0;
   align-self: flex-start;
@@ -271,7 +317,7 @@ onUnmounted(() => {
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: var(--vigil-space-2);
 }
 
 .brand-mark {
@@ -282,22 +328,22 @@ onUnmounted(() => {
 }
 
 .brand-name {
-  font-size: 16px;
+  font-size: var(--vigil-text-md);
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: var(--vigil-tracking-tight);
 }
 
 .brand-sub {
-  margin-top: -10px;
-  font-size: 11px;
+  margin-top: -6px;
+  font-size: var(--vigil-text-2xs);
   color: var(--vigil-text-3);
 }
 
 .picker-label {
-  font-size: 11px;
+  font-size: var(--vigil-text-2xs);
   color: var(--vigil-text-3);
-  letter-spacing: 0.04em;
-  margin-bottom: 6px;
+  letter-spacing: var(--vigil-tracking-wide);
+  margin-bottom: var(--vigil-space-1);
 }
 
 .project-select {
@@ -305,13 +351,13 @@ onUnmounted(() => {
 }
 
 .opt-name {
-  margin-right: 12px;
+  margin-right: var(--vigil-space-3);
 }
 
 .opt-slug {
   float: right;
   color: var(--vigil-text-3);
-  font-size: 11px;
+  font-size: var(--vigil-text-2xs);
 }
 
 .nav {
@@ -322,15 +368,22 @@ onUnmounted(() => {
 }
 
 .nav-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 8px 10px;
-  border-radius: 4px;
+  gap: var(--vigil-space-2);
+  /* 44px：主导航是面板里最高频的点击目标，鼠标和手指都要够得着 */
+  min-height: 44px;
+  padding: var(--vigil-space-2) var(--vigil-space-3);
+  border-radius: var(--vigil-radius);
   color: var(--vigil-text-2);
   text-decoration: none;
-  font-size: 13px;
+  font-size: var(--vigil-text-sm);
   border: 1px solid transparent;
+  transition:
+    background var(--vigil-motion-fast) var(--vigil-ease-standard),
+    color var(--vigil-motion-fast) var(--vigil-ease-standard),
+    border-color var(--vigil-motion-fast) var(--vigil-ease-standard);
 }
 
 .nav-item:hover {
@@ -338,11 +391,29 @@ onUnmounted(() => {
   color: var(--vigil-text-1);
 }
 
-/* 选中态用强调色 —— 强调色只表示「当前在哪」，不表示数据大小 */
+/* 选中态用强调色 —— 强调色只表示「当前在哪」，不表示数据大小。
+   左侧那条竖线是「你在哪」的第二个信号：只看颜色的话，
+   色觉障碍用户分不出，选中态就消失了。 */
 .nav-item.is-active {
   color: var(--vigil-accent);
   border-color: var(--vigil-border-strong);
   background: var(--vigil-bg-raised);
+}
+
+.nav-indicator {
+  position: absolute;
+  left: -13px;
+  top: 50%;
+  width: 2px;
+  height: 18px;
+  margin-top: -9px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background var(--vigil-motion-fast) var(--vigil-ease-standard);
+}
+
+.nav-item.is-active .nav-indicator {
+  background: var(--vigil-accent);
 }
 
 .nav-icon {
@@ -351,19 +422,19 @@ onUnmounted(() => {
 
 .sidebar-foot {
   border-top: 1px solid var(--vigil-border);
-  padding-top: 12px;
+  padding-top: var(--vigil-space-3);
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--vigil-space-1);
 }
 
 .foot-label {
-  font-size: 11px;
+  font-size: var(--vigil-text-2xs);
   color: var(--vigil-text-3);
 }
 
 .foot-slug {
-  font-size: 12px;
+  font-size: var(--vigil-text-xs);
   color: var(--vigil-text-2);
   word-break: break-all;
 }
@@ -371,6 +442,7 @@ onUnmounted(() => {
 /* ---- 顶栏 ---- */
 .main {
   flex: 1;
+  /* 关键：不加 min-width:0，表格的最小宽度会把整个页面撑宽 */
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -381,8 +453,8 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding: 0 22px;
+  gap: var(--vigil-space-4);
+  padding: 0 var(--vigil-space-5);
   border-bottom: 1px solid var(--vigil-border);
   background: var(--vigil-bg-sunken);
   position: sticky;
@@ -392,14 +464,22 @@ onUnmounted(() => {
 
 .crumbs {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 13px;
+  align-items: center;
+  gap: var(--vigil-space-2);
+  font-size: var(--vigil-text-sm);
+  min-width: 0;
+}
+
+.menu-btn {
+  margin-left: -8px;
+  flex: 0 0 auto;
 }
 
 .crumb-project {
-  color: var(--vigil-text-1);
-  font-weight: 500;
+  color: var(--vigil-text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .crumb-sep {
@@ -407,21 +487,79 @@ onUnmounted(() => {
 }
 
 .crumb-current {
-  color: var(--vigil-text-2);
+  color: var(--vigil-text-1);
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 .topbar-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--vigil-space-3);
+  flex: 0 0 auto;
 }
 
+/* ---- 内容区 ---- */
 .content {
-  padding: 20px 22px 48px;
+  padding: var(--vigil-space-6) var(--vigil-space-5) var(--vigil-space-12);
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: var(--vigil-space-5);
   max-width: 1680px;
   width: 100%;
+}
+
+/* 页面标题：整个面板唯一的 26px */
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vigil-space-1);
+  padding-bottom: var(--vigil-space-1);
+}
+
+.page-title {
+  margin: 0;
+  font-size: var(--vigil-text-2xl);
+  font-weight: 600;
+  line-height: var(--vigil-leading-tight);
+  letter-spacing: var(--vigil-tracking-tight);
+  color: var(--vigil-text-1);
+}
+
+.page-desc {
+  margin: 0;
+  font-size: var(--vigil-text-sm);
+  color: var(--vigil-text-3);
+  line-height: var(--vigil-leading-normal);
+}
+
+/* ---- 窄屏 ---- */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  z-index: 30;
+}
+
+@media (max-width: 1023px) {
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    transform: translateX(-100%);
+    transition: transform var(--vigil-motion-standard) var(--vigil-ease-out);
+  }
+
+  .sidebar.is-open {
+    transform: translateX(0);
+  }
+
+  .nav-indicator {
+    display: none;
+  }
+
+  .content {
+    padding: var(--vigil-space-5) var(--vigil-space-4) var(--vigil-space-10);
+  }
 }
 </style>
