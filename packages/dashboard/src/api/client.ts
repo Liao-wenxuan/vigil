@@ -25,6 +25,7 @@ import type {
   CreatedProject,
   EnvironmentRow,
   ErrorPerformanceRow,
+  ErrorTrend,
   IssueBulkAction,
   IssueDetail,
   IssueQueryParams,
@@ -213,7 +214,9 @@ export async function listIssues(
     q: params.q,
     limit: params.limit,
     offset: params.offset,
-    sort: params.sort
+    sort: params.sort,
+    since: params.since,
+    until: params.until
   })
   return { total: body.total ?? 0, issues: body.issues ?? [] }
 }
@@ -317,9 +320,31 @@ export function bulkIssueAction(
   )
 }
 
-export async function getIssueStats(projectId: number): Promise<IssueStats> {
-  const body = await get<{ stats: IssueStats }>(`/projects/${projectId}/stats`)
+export async function getIssueStats(
+  projectId: number,
+  params: { since?: number; until?: number } = {}
+): Promise<IssueStats> {
+  const body = await get<{ stats: IssueStats }>(`/projects/${projectId}/stats`, params)
   return body.stats
+}
+
+/**
+ * 错误趋势。
+ *
+ * `tzOffset` 让「按天」的桶边界对齐用户本地午夜 ——
+ * 不传的话会按 UTC 切，中国用户看到的「今天」要到早上 8 点才开始。
+ */
+export async function getErrorTrend(
+  projectId: number,
+  params: { since?: number; until?: number; bucket?: 'hour' | 'day'; tzOffset?: number }
+): Promise<ErrorTrend> {
+  const body = await get<{ trend: ErrorTrend }>(`/projects/${projectId}/issues/trend`, {
+    since: params.since,
+    until: params.until,
+    bucket: params.bucket,
+    tzOffset: params.tzOffset
+  })
+  return body.trend
 }
 
 /* ============================================================

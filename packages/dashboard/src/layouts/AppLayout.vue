@@ -24,9 +24,17 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { listOrganizations, listProjects } from '../api/client'
-import { PANEL_CONTEXT, type PanelContext, type ProjectRow } from '../types'
+import {
+  DEFAULT_TIME_RANGE,
+  PANEL_CONTEXT,
+  TIME_RANGE_OPTIONS,
+  type PanelContext,
+  type ProjectRow,
+  type TimeRangeKey
+} from '../types'
 
 const STORAGE_PROJECT = 'vigil.projectId'
+const STORAGE_RANGE = 'vigil.timeRange'
 const REFRESH_INTERVAL = 10_000
 /** 窄屏断点：侧边导航收成抽屉 */
 const NARROW_QUERY = '(max-width: 1023px)'
@@ -58,9 +66,12 @@ const context = reactive<PanelContext>({
   loadingProjects: false,
   projectsError: '',
   refreshToken: 0,
+  timeRange: DEFAULT_TIME_RANGE,
+  timeRangeOptions: TIME_RANGE_OPTIONS,
   selectOrganization: () => undefined,
   selectProject: () => undefined,
-  requestRefresh: () => undefined
+  requestRefresh: () => undefined,
+  setTimeRange: () => undefined
 })
 
 provide(PANEL_CONTEXT, context)
@@ -112,6 +123,14 @@ async function loadProjects(): Promise<void> {
   }
 }
 
+/** 恢复上次选的时间范围 */
+function restoreTimeRange(): void {
+  const saved = localStorage.getItem(STORAGE_RANGE) as TimeRangeKey | null
+  if (saved && TIME_RANGE_OPTIONS.some((option) => option.key === saved)) {
+    context.timeRange = saved
+  }
+}
+
 function selectProject(id: number | null): void {
   context.projectId = id
 }
@@ -125,9 +144,23 @@ function requestRefresh(): void {
   context.refreshToken += 1
 }
 
+/**
+ * 切换时间范围。
+ *
+ * 存到 localStorage —— 刷新页面不丢，跟项目选择一样。
+ * 换了范围要立刻重载数据，不能等下一次自动刷新（10 秒）。
+ */
+function setTimeRange(key: TimeRangeKey): void {
+  if (context.timeRange === key) return
+  context.timeRange = key
+  localStorage.setItem(STORAGE_RANGE, key)
+  context.refreshToken += 1
+}
+
 context.selectProject = selectProject
 context.selectOrganization = selectOrganization
 context.requestRefresh = requestRefresh
+context.setTimeRange = setTimeRange
 
 watch(
   () => context.projectId,
@@ -186,6 +219,7 @@ onMounted(async () => {
   isNarrow.value = mediaQuery.matches
   mediaQuery.addEventListener('change', syncNarrow)
 
+  restoreTimeRange()
   await loadProjects()
   restartTimer()
 })
@@ -273,6 +307,20 @@ onUnmounted(() => {
         </div>
 
         <div class="topbar-actions">
+          <!-- 时间范围：全局控制。监控面板最常问的问题是
+               「最近多久」，它得是**一眼可见**的，不能藏在某个页面里。 -->
+          <div class="range">
+            <span class="range-label">时间范围</span>
+            <el-select v-model="context.timeRange" class="range-select" @change="setTimeRange">
+              <el-option
+                v-for="option in context.timeRangeOptions"
+                :key="option.key"
+                :label="option.label"
+                :value="option.key"
+              />
+            </el-select>
+          </div>
+
           <el-tooltip content="每 10 秒自动刷新当前页数据" placement="bottom">
             <el-switch v-model="autoRefresh" />
           </el-tooltip>
@@ -503,6 +551,24 @@ onUnmounted(() => {
   flex: 0 0 auto;
 }
 
+/* ---- 时间范围 ---- */
+.range {
+  display: flex;
+  align-items: center;
+  gap: var(--vigil-space-2);
+}
+
+.range-label {
+  font-size: var(--vigil-text-2xs);
+  color: var(--vigil-text-3);
+  letter-spacing: var(--vigil-tracking-wide);
+  white-space: nowrap;
+}
+
+.range-select {
+  width: 132px;
+}
+
 /* ---- 内容区 ---- */
 .content {
   padding: var(--vigil-space-6) var(--vigil-space-5) var(--vigil-space-12);
@@ -564,6 +630,22 @@ onUnmounted(() => {
 
   .content {
     padding: var(--vigil-space-5) var(--vigil-space-4) var(--vigil-space-10);
+  }
+}
+
+/**
+ * 窄屏：顶栏塞不下「时间范围」四个字了。
+ *
+ * 320px 下多出的 48px 横向溢出就是它造成的 ——
+ * 标签本身是冗余的：选择器里写着「最近 7 天」，意思已经自明。
+ */
+@media (max-width: 768px) {
+  .range-label {
+    display: none;
+  }
+
+  .range-select {
+    width: 112px;
   }
 }
 </style>

@@ -112,6 +112,13 @@ export interface IssueRow {
   release: string | null
   created_at: number
   updated_at: number
+  /**
+   * 时间窗口内的发生次数。
+   *
+   * 只有**带时间范围**的查询才有值 ——
+   * 累计次数（`count`）和窗口次数是两回事，不能混着显示。
+   */
+  window_count?: number
 }
 
 export interface IssueEventDetail {
@@ -210,6 +217,13 @@ export interface IssueStats {
   byCategory: Array<{ category: string; n: number; occurrences: number }>
   byLevel: Array<{ level: string; n: number }>
   topCulprits: Array<{ culprit: string; n: number; occurrences: number }>
+  /** 时间窗口内受影响的用户数（去重）。没有时间范围时是 undefined */
+  users?: number
+  /** 时间窗口内首次出现的问题数。没有时间范围时是 undefined */
+  newIssues?: number
+  /** 生效的时间范围（epoch 毫秒）。没有时间范围时是 undefined */
+  since?: number
+  until?: number
 }
 
 /** 列表查询参数 —— 与 `GET /issues` 的 query 一一对应 */
@@ -224,6 +238,10 @@ export interface IssueQueryParams {
   limit?: number
   offset?: number
   sort?: IssueSort
+  /** 时间范围起点（epoch 毫秒，左闭） */
+  since?: number
+  /** 时间范围终点（epoch 毫秒，右开） */
+  until?: number
 }
 
 export type IssueBulkAction =
@@ -453,6 +471,90 @@ export interface BehaviorSummary {
 }
 
 /* ============================================================
+ * 时间范围
+ * ============================================================ */
+
+/**
+ * 时间范围档位。
+ *
+ * ## 为什么没有「全部时间」
+ *
+ * 有的话，每个页面的语义就不一致了：统计卡是全量的，
+ * 趋势图却只能画最近 30 天（画不下两年）。
+ * 与其让两个数字对不上，不如统一成一个有界的窗口。
+ */
+export type TimeRangeKey = '1h' | '24h' | '7d' | '30d'
+
+export interface TimeRangeOption {
+  key: TimeRangeKey
+  label: string
+  /** 窗口长度（毫秒） */
+  durationMs: number
+  /** 这个窗口用多细的分桶 */
+  bucket: 'hour' | 'day'
+}
+
+export const TIME_RANGE_OPTIONS: TimeRangeOption[] = [
+  { key: '1h', label: '最近 1 小时', durationMs: 3600_000, bucket: 'hour' },
+  { key: '24h', label: '最近 24 小时', durationMs: 24 * 3600_000, bucket: 'hour' },
+  { key: '7d', label: '最近 7 天', durationMs: 7 * 24 * 3600_000, bucket: 'day' },
+  { key: '30d', label: '最近 30 天', durationMs: 30 * 24 * 3600_000, bucket: 'day' }
+]
+
+/**
+ * 默认 7 天。
+ *
+ * 不是 24 小时 —— 24 小时是常见的监控默认值，但演示与真实项目里
+ * 「昨天、前天出的问题」恰恰是最该被看见的那批。
+ */
+export const DEFAULT_TIME_RANGE: TimeRangeKey = '7d'
+
+/**
+ * 把档位解析成实际的时间窗。
+ *
+ * `until` 取「现在」，所以**每次请求都重算** ——
+ * 「最近 1 小时」必须是滚动的，不能是选档那一秒的快照。
+ */
+export function resolveTimeRange(
+  key: TimeRangeKey,
+  now = Date.now()
+): { since: number; until: number; bucket: 'hour' | 'day' } {
+  const option = TIME_RANGE_OPTIONS.find((item) => item.key === key) ?? TIME_RANGE_OPTIONS[2]
+  return { since: now - option.durationMs, until: now, bucket: option.bucket }
+}
+
+/** 本地时区偏移（分钟，UTC 以东为正）。用来让「按天」的桶边界对齐本地午夜。 */
+export function localTzOffsetMinutes(): number {
+  return -new Date().getTimezoneOffset()
+}
+
+/* ============================================================
+ * 趋势
+ * ============================================================ */
+
+export interface TrendPoint {
+  /** 桶的起始时间（epoch 毫秒） */
+  timestamp: number
+  /** 桶内错误发生次数 */
+  occurrences: number
+  /** 桶内受影响的用户数 */
+  users: number
+  /** 桶内有发生的问题数 */
+  issues: number
+  /** 桶内首次出现的问题数 */
+  newIssues: number
+  /** 桶内页面访问次数（错误率的分母） */
+  transactions: number
+  /** 错误率（0~1）。分母为 0 时是 null */
+  errorRate: number | null
+}
+
+export interface ErrorTrend {
+  bucket: 'hour' | 'day'
+  points: TrendPoint[]
+}
+
+/* ============================================================
  * 领域词汇表 —— 中文标签
  * ============================================================ */
 
@@ -578,9 +680,14 @@ export interface PanelContext {
   projectsError: string
   /** 自动刷新计数：顶栏每 10 秒 +1，页面 watch 它来重载数据 */
   refreshToken: number
+  /** 当前时间范围档位 */
+  timeRange: TimeRangeKey
+  /** 时间范围选项（顶栏选择器用） */
+  timeRangeOptions: TimeRangeOption[]
   selectOrganization(id: number): void
   selectProject(id: number): void
   requestRefresh(): void
+  setTimeRange(key: TimeRangeKey): void
 }
 
 export const PANEL_CONTEXT: InjectionKey<PanelContext> = Symbol('vigil-panel-context')
