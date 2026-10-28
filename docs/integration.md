@@ -2,28 +2,41 @@
 
 ## 1. 注册应用
 
+租户模型是 **组织 → 团队 → 项目**（项目下再挂环境与版本）：
+
 ```bash
-npm --prefix packages/collector run app:create -- create "我的应用"
+# 1) 建组织
+npm --prefix packages/collector run cli -- org create "我的组织"
+
+# 2) 在组织下建项目（输出两把密钥）
+npm --prefix packages/collector run cli -- project create 1 "我的应用"
+
+# 3) 建环境与版本（回归判定需要版本锚）
+npm --prefix packages/collector run cli -- env add 1 production "生产环境" --production
+npm --prefix packages/collector run cli -- release add 1 1.0.0
 ```
 
-输出：
+项目创建时输出：
 
 ```
-appId       app_xxxxxxxxxxxx
-name        我的应用
-token       vsk_xxxxxxxx...
-uploadToken vup_xxxxxxxx...
+id          1
+slug       my-app
+runtimeKey vsk_xxxxxxxx...
+uploadKey  vup_xxxxxxxx...
 ```
 
-⚠️ **两个 token 只显示这一次**，数据库里只存哈希。
+⚠️ **两个密钥只显示这一次**，数据库里只存哈希。
 
-| token | 用途 | 放在哪 |
+| 密钥 | 用途 | 放在哪 |
 |---|---|---|
-| `token` | 上报错误 | 前端代码里（可公开） |
-| `uploadToken` | 上传 sourcemap | **只在 CI 里**，绝不能进浏览器 |
+| `runtimeKey`（`vsk_`） | 上报错误 / 性能 / 行为 | 前端代码里（可公开） |
+| `uploadKey`（`vup_`） | 上传 sourcemap | **只在 CI 里**，绝不能进浏览器 |
 
-两者严格分离：运行时 token 在前端代码里，谁拿到它都能上报垃圾数据；
-拿到上传 token 就能上传任意 sourcemap 污染别人应用的错误栈。
+两者严格分离：运行时密钥在前端代码里，谁拿到它都能上报垃圾数据；
+拿到上传密钥就能上传任意 sourcemap 污染别人应用的错误栈。
+
+`sdk` 里用的 `appId` 传的是**项目的 slug**（不是数字 id），
+`token` 传 `runtimeKey`。
 
 ---
 
@@ -81,7 +94,7 @@ ESM 接入下，动态加载的资源（用户上传的图片、懒加载 chunk�
 Vigil.init({
   // ---- 必填 ----
   endpoint: 'https://collector.example.com/api/v1/collect',
-  appId: 'app_xxxxxxxxxxxx',
+  appId: 'my-app',
   token: 'vsk_xxxxxxxx...',
 
   // ---- 可选 ----
@@ -90,13 +103,19 @@ Vigil.init({
   userId: 'u_123',          // 当前用户 ID
 
   sampleRate: 1,            // 会话采样率 0~1，默认全量
+  performanceSampleRate: 0.1, // 性能采样率 0~1，默认 10%
+  enablePerformance: true,  // 是否采集性能数据
+  blankScreenTimeoutMs: 3000, // 白屏判定超时
   maxBreadcrumbs: 30,       // 保留多少条操作轨迹
   flushIntervalMs: 5000,    // 定时上报间隔
   maxBatchSize: 20,         // 一批最多几条
   maxPayloadBytes: 49152,   // 单请求体上限（浏览器限制约 64KB）
   httpErrorPolicy: '5xx',   // 5xx | 4xx | all | none
   captureConsoleBreadcrumbs: true,
-  debug: false
+  debug: false,
+
+  // ---- 插件（回放 / 行为要单独引入入口，见第 5 节）----
+  plugins: []
 })
 ```
 
@@ -138,7 +157,89 @@ installVueErrorHandler(app, (error) => vigil.captureException(error))
 
 ---
 
-## 5. 上传 sourcemap（CI）
+## 5. 会话回放与用户行为（可选）
+
+这两个能力走**独立入口** `@vigil/sdk/replay` —— rrweb 压缩后 74KB gzip，
+打进核心会让 SDK 膨胀 6 倍，而绝大多数用户不需要回放（尤其涉及隐私合规的团队）。
+
+```ts
+import { init } from '@vigil/sdk'
+import { replayPlugin, behaviorPlugin } from '@vigil/sdk/replay'
+
+init({
+  endpoint,
+  appId,
+  token,
+  release,
+  plugins: [replayPlugin(), behaviorPlugin()]
+})
+```
+
+浏览器里用 IIFE：
+
+```html
+<script src="/vigil.iife.js"></script>
+<script src="/vigil.replay.iife.js"></script>
+<script>
+  Vigil.init({
+    endpoint, appId, token, release,
+    plugins: [VigilReplay.replayPlugin(), VigilReplay.behaviorPlugin()]
+  })
+</script>
+```
+
+### ⚠️ 想要完整的首屏快照，就晚一点初始化
+
+rrweb 的**第一帧是全量快照**。在 `<head>` 里同步初始化的话，
+那时 `<body>` 还没解析，快照只能拍到空壳。
+
+```ts
+document.addEventListener('DOMContentLoaded', () => {
+  init({ endpoint, appId, token, release, plugins: [replayPlugin()] })
+})
+```
+
+### 三个配置项
+
+```ts
+replayPlugin({
+  maxBytes: 64 * 1024,   // 缓冲预算，超了就重新取快照（保证回放始终可播）
+  sampleRate: 1,        // 会话采样率
+  blockClass: 'vigil-block' // 完全不录制的元素 class
+})
+
+behaviorPlugin({
+  flushIntervalMs: 10000, // 攒多少条上报一次
+  trackClicks: true       // 是否记录点击
+})
+```
+
+### 回放是怎么上报的
+
+**不是持续上传** —— 一次会话的 rrweb 事件流轻松到几百 KB。
+SDK 在本地缓冲，**出错时随那条错误一起带上去**。
+
+真正有价值的是「出错那一刻，用户之前在干什么」。
+没出错的会话，回放基本没人看。
+
+代价是：回放按**会话**存最新一份，不是每个错误一份。
+面板上看到的是「最近一次快照」，不精确对应每个错误的时间点。
+
+### 隐私边界
+
+**行为采集不记录任何输入内容** —— 只记「点了某个按钮」，
+不记「在搜索框里输入了 xxx」。
+
+回放侧：
+
+- 所有输入框的值都遮罩（`maskAllInputs` 全开）
+- 文本里的手机号 / 邮箱 / 身份证号会被替换成 ●
+- 命中 `vigil-block` class 的元素整块不录
+- 画布默认不录（体积大且常含用户绘制的内容）
+
+---
+
+## 6. 上传 sourcemap（CI）
 
 ```yaml
 # .github/workflows/deploy.yml
@@ -160,7 +261,7 @@ installVueErrorHandler(app, (error) => vigil.captureException(error))
 
 ---
 
-## 6. 手动上报
+## 7. 手动上报
 
 ```ts
 // 上报一个 Error
@@ -186,7 +287,7 @@ SDK 自动算不出稳定指纹时（比如错误发生在 Web Worker 里，没�
 
 ---
 
-## 7. 隐私说明
+## 8. 隐私说明
 
 采集端就会脱敏，**不是**在服务端：
 
@@ -204,11 +305,11 @@ SDK 自动算不出稳定指纹时（比如错误发生在 Web Worker 里，没�
 
 ---
 
-## 8. 排查
+## 9. 排查
 
 ### 报上去了但后台看不到
 
-1. 检查 token 是不是过期或被停用（`PATCH /api/v1/apps/:appId` 可以停用）
+1. 检查 `appId` 传的是**项目 slug**（不是数字 id），`token` 是 `runtimeKey` 不是 `uploadKey`
 2. 检查 `sampleRate` 是不是被设成了 0
 3. 看浏览器控制台有没有 `[vigil] 上报失败`（需要 `debug: true`）
 4. 检查 Collector 的限流日志 —— 429 表示超出配额
@@ -222,3 +323,20 @@ sourcemap 没上传，或者 `release` 对不上。
 
 用的是 ESM 接入。改成 IIFE 放在 `<head>` 里同步初始化。
 原因见 [方式 A](#方式-aiife推荐能收到首屏资源错误)。
+
+### 行为数据一条都没有
+
+检查行为通道的地址。`endpoint` 是错误通道的完整地址，
+行为是它的**兄弟通道**（`.../api/v1/behavior`），地址要**推导**而不是拼接。
+
+拼错的话请求会打到 `.../api/v1/collect/api/v1/behavior` ——
+**404 且不报错**：请求发出去了、服务端也收到了，只是路由不匹配。
+
+### 面板上回放播不出来
+
+面板会先检查流里有没有**全量快照**（rrweb 的 type=2）。
+没有的话面板会直接说「回放流不完整」而不是给一个空白框 ——
+因为播放器在这种情况下是**静默失败**的，不报错。
+
+多半是采集端在录制中途丢了开头，或者手写事件流时把
+`FullSnapshot=2` / `IncrementalSnapshot=3` 的编号写反了。
