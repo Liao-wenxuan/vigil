@@ -1,5 +1,6 @@
 ﻿import { record } from 'rrweb'
 import type { ReplayEvent, ReplayPayload } from '@vigil/protocol'
+import { applyReplayEvent, emptyBuffer, estimateSize, type ReplayBufferState } from './buffer.js'
 
 /**
  * rrweb 事件的最小结构。
@@ -52,16 +53,16 @@ export interface ReplayOptions {
 /** 默认预算：64KB 足够覆盖出错前几十秒的操作，又不会撑爆上报体 */
 const DEFAULT_MAX_BYTES = 64 * 1024
 
-/** rrweb 的全量快照事件类型 */
-const FULL_SNAPSHOT_TYPE = 0
-
 export class ReplayRecorder {
   private readonly options: ReplayOptions
   private readonly sampled: boolean
 
-  private buffer: ReplayEvent[] = []
-  private bytes = 0
-  private droppedSegments = 0
+  /**
+   * 缓冲状态。
+   *
+   * 策略本身在 `buffer.ts`（纯函数）—— 这里只负责把事件喂进去。
+   */
+  private state: ReplayBufferState = emptyBuffer()
   private stopRecording: (() => void) | undefined = undefined
   private started = false
 
@@ -82,7 +83,7 @@ export class ReplayRecorder {
 
   /** 因为超预算被丢弃的段数 */
   get dropped(): number {
-    return this.droppedSegments
+    return this.state.droppedSegments
   }
 
   start(): void {
@@ -107,18 +108,17 @@ export class ReplayRecorder {
    * 「出错前用户在干什么」的上下文。存储成本由服务端按会话去重解决。
    */
   peek(): ReplayPayload | undefined {
-    if (this.buffer.length === 0) return undefined
+    if (this.state.events.length === 0) return undefined
     return {
-      events: this.buffer.slice(),
-      droppedSegments: this.droppedSegments,
-      bytes: this.bytes
+      events: this.state.events.slice(),
+      droppedSegments: this.state.droppedSegments,
+      bytes: this.state.bytes
     }
   }
 
   /** 清空缓冲（会话结束或手动重置） */
   reset(): void {
-    this.buffer = []
-    this.bytes = 0
+    this.state = emptyBuffer()
   }
 
   // ==========================================================
@@ -185,26 +185,17 @@ export class ReplayRecorder {
       timestamp: payload.timestamp
     }
 
-    const size = estimateSize(event)
-
-    // 全量快照 → 缓冲区重置（增量链必须从快照开始）
-    if (event.type === FULL_SNAPSHOT_TYPE) {
-      this.buffer = [event]
-      this.bytes = size
-      return
-    }
-
-    // 超预算 → 重新取快照，保证回放始终可播
     const maxBytes = this.options.maxBytes ?? DEFAULT_MAX_BYTES
-    if (this.bytes + size > maxBytes) {
-      this.droppedSegments++
-      this.reset()
+    const result = applyReplayEvent(this.state, event, maxBytes, estimateSize)
+
+    this.state = result.state
+
+    // 超预算 → 重新录制，保证回放始终可播。
+    // 注意不是「丢掉这一段」—— 丢中间会让后面的增量全部对不上。
+    if (result.overflow) {
       this.restart()
       return
     }
-
-    this.buffer.push(event)
-    this.bytes += size
 
     // isCheckout 表示 rrweb 自己触发的定期全量快照
     void isCheckout
@@ -214,23 +205,8 @@ export class ReplayRecorder {
   private restart(): void {
     this.stopRecording?.()
     this.stopRecording = undefined
-    this.buffer = []
-    this.bytes = 0
+    this.state = emptyBuffer()
     if (this.started) this.startRecording()
-  }
-}
-
-/**
- * 估算事件大小。
- *
- * 用 JSON.stringify 是最准的，但全量快照可能有几十 KB ——
- * 那个开销只在快照时出现一次，可以接受。
- */
-function estimateSize(event: ReplayEvent): number {
-  try {
-    return JSON.stringify(event).length
-  } catch {
-    return 1024
   }
 }
 
