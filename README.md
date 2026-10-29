@@ -396,6 +396,35 @@ rrweb 的回放是「一个全量快照 + 一串增量」。中间丢掉任何�
 
 采集端在写回放时**保证会话行存在**，不依赖行为先到。
 
+### 两种数据库，一套领域代码
+
+采集服务按 `DATABASE_URL` 选库：
+
+| | SQLite | PostgreSQL |
+|---|---|---|
+| 什么时候用 | 本地开发、单实例 | 生产、多副本 |
+| 怎么连 | 一个文件 | 连接串 |
+
+**这个开关决定了能不能多副本**：SQLite 是一个文件，多进程写会锁竞争，
+所以 SQLite 部署的采集服务只能是单副本 —— HPA 形同虚设。
+换 PG 之后采集服务变成**无状态**的，副本之间只共享一个数据库。
+
+代价是 SQL 必须两边都能跑。所以有三条硬规矩：
+
+| SQLite 独有 | 通用写法 |
+|---|---|
+| `last_insert_rowid()` | `INSERT ... RETURNING id` |
+| `INSERT OR REPLACE` | `INSERT ... ON CONFLICT DO UPDATE` |
+| `INSERT OR IGNORE` | `INSERT ... ON CONFLICT DO NOTHING` |
+| `sqlite_master` | `information_schema.tables` |
+
+占位符也不一样：领域代码统一写 `?`，**PG 适配器负责翻译成 `$1`** ——
+所以 100 多处查询一个字符都不用改。
+
+⚠️ 这些不是约定，是**测出来的**：`packages/collector/tests/postgres.test.ts`
+用 PGlite（**WASM 编译的真 PostgreSQL**，不是模拟器）跑完整的领域链路。
+本机没有 PG 也没有 Docker，但它让 CI 和本地都能真验一遍。
+
 ### 行为不记录任何输入内容
 
 只记「点了某个按钮」，不记「在搜索框里输入了 xxx」。
@@ -512,11 +541,12 @@ docker compose up --build
 - [x] **用户行为**（访问 / 路径 / 点击分布，不记录输入内容）
 - [x] 采集端脱敏
 - [x] 管理面板（总览/问题/详情/性能/**回放**/**行为**/告警/设置，8 路由）
-- [x] Docker / K8s 部署形态
-- [x] 165 条单元测试 + 33 条数据链路断言 + 45 条面板断言 + 15 条界面闸门
+- [x] **PostgreSQL 支持**（同一套领域代码，SQLite / PG 双库，PG 上有真库测试）
+- [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
+- [x] 177 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门
 
 待做：
 
 - [ ] npm 发布（`@vigil/sdk` / `@vigil/protocol`）
-- [ ] PostgreSQL 落地 + 真正的多副本
+- [ ] PostgreSQL 高可用（当前是单副本 StatefulSet；抗单点要上流复制或托管实例）
 - [ ] 告警通道：邮件需要 `nodemailer`（已装，配置 SMTP 后可用）

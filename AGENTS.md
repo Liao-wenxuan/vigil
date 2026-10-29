@@ -295,6 +295,40 @@ SDK 侧不采集输入值，rrweb 侧 `maskAllInputs` 全开，文本还会做 P
 分桶表达式的**桶起点**和合并时的 `bucketStart` 必须完全一致，
 否则合并时一个都对不上。
 
+### 22. SQL 必须**两种库都能跑**
+
+领域代码统一写 `?` 占位符，**PG 适配器负责翻译成 `$1`**（`infra/db/postgres.ts`）。
+所以查询语句里**不要**出现 PG 专有的 `$1` 写法。
+
+SQLite 独有的写法一律不许出现在运行时 SQL 里：
+
+| SQLite 独有 | 通用写法 |
+|---|---|
+| `last_insert_rowid()` | `INSERT ... RETURNING id`（用 `db.insert()`） |
+| `INSERT OR REPLACE` | `INSERT ... ON CONFLICT (...) DO UPDATE` |
+| `INSERT OR IGNORE` | `INSERT ... ON CONFLICT DO NOTHING` |
+| `sqlite_master` | `information_schema.tables` |
+| `pragma_table_info` | `information_schema.columns` |
+
+**这不是约定，是测出来的**：`packages/collector/tests/postgres.test.ts`
+用 PGlite（WASM 编译的**真 PostgreSQL**）跑完整领域链路。
+本地没有 PG 也没有 Docker，但它让 CI 和本地都能真验一遍。
+
+### 23. 时间戳列用 `BIGINT`
+
+PG 的 `INTEGER` 是 **int4**，上限 2147483647 ——
+epoch 毫秒（1.7e12）**直接溢出**。
+
+schema 里所有时间列都要用 `ts(dialect)`（SQLite→INTEGER，PG→BIGINT），
+别写死 `INTEGER`。`schema_migrations.applied_at` 就踩过这个坑。
+
+### 24. 生产用 PostgreSQL：设 `DATABASE_URL`
+
+`createAppFromEnv()` 按 `DATABASE_URL` 选库：
+设了就用 PG，没设就退回 SQLite（单实例开发用）。
+
+⚠️ 生产上**必须设** —— 不设的话多副本各写各的本地文件，数据就分裂了。
+
 ---
 
 ## 数据层
@@ -339,9 +373,9 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 157 条
+npm run test              # 177 条
 npm run verify            # 33 条端到端断言
-npm run verify:dashboard  # 45 条面板渲染断言
+npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
 ```
 
@@ -384,9 +418,11 @@ docker compose up --build    # 面板 :8080，接口 :4318
 ```
 
 - `Dockerfile` 多阶段，两个 target（collector / dashboard）
-- `deploy/k8s/` 有 namespace / deployment / service / ingress / HPA / PDB
+- `deploy/k8s/` 有 namespace / postgres / deployment / service / ingress / HPA / PDB
+- `docker compose up --build` 一把起全套（面板 + 接口 + PostgreSQL）
 - ⚠️ **本机 Docker 跑不起来，镜像没有实跑验证过**（缺 WSL2）
-- ⚠️ **多副本前必须换 PostgreSQL** —— SQLite 是单文件，两个进程写同一个文件会锁竞争
+- ✅ **多副本已可行**：采集服务用 PG 时是无状态的，`replicas: 2` + HPA 成立
+- ⚠️ **PG 本身是单副本 StatefulSet** —— 它是单点。抗单点要上流复制或用托管实例
 
 ---
 
