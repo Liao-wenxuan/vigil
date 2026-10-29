@@ -1,3 +1,22 @@
+# 采集服务
+#
+# ## 为什么它现在可以多副本
+#
+# 换 PostgreSQL 之前，这个 Deployment 挂着一个 RWO 卷、`replicas: 2` ——
+# **自相矛盾**：两个 Pod 抢同一个卷，滚动更新时新 Pod 拿不到卷会卡住，
+# 而 SQLite 本身也撑不住两个进程写。
+#
+# 现在它**完全无状态**：
+#   - 不挂任何卷（数据全在 PG 里）
+#   - 只靠 `DATABASE_URL` 连接 PG
+#   - 所以 `replicas: 2` + HPA 是成立的
+#
+# ## 探针的分工
+#
+#   - **存活探针** `/api/health` —— 不碰数据库。
+#     数据库挂了不代表进程该被重启（重启也修不好），重启只会丢内存里的连接池。
+#   - **就绪探针** `/api/ready` —— 要真的连一下数据库。
+#     Pod 可能比 PG 先就绪，这时不该接收流量。
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -40,6 +59,13 @@ spec:
                 secretKeyRef:
                   name: vigil-secret
                   key: VIGIL_ADMIN_TOKEN
+            # ⚠️ 有这个变量就用 PostgreSQL，没有就退回 SQLite（单实例开发用）。
+            #    生产上必须设 —— 不设的话多副本会各自写一个本地文件。
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vigil-postgres
+                  key: DATABASE_URL
             - name: POD_NAME
               valueFrom:
                 fieldRef:
@@ -54,11 +80,7 @@ spec:
             limits:
               cpu: '1'
               memory: 1Gi
-          # SQLite 写入需要正确的 fsync —— NORMAL 模式下进程崩溃不丢数据，
-          # 但节点掉电会丢最后几个事务。
           volumeMounts:
-            - name: data
-              mountPath: /data
             - name: tmp
               mountPath: /tmp
           livenessProbe:
@@ -70,23 +92,17 @@ spec:
             timeoutSeconds: 3
           readinessProbe:
             httpGet:
-              path: /api/health
+              path: /api/ready
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
+            timeoutSeconds: 3
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
             capabilities:
               drop: ['ALL']
       volumes:
-        - name: data
-          # ⚠️ SQLite 是**有状态**的，多副本不能共用一个卷 ——
-          #    两个进程写同一个 SQLite 文件会锁竞争甚至损坏。
-          #    多副本部署前必须换成 PostgreSQL。
-          #    这里用 ReadWriteOnce + 单副本语义（滚动更新时先起新的再停旧的）。
-          persistentVolumeClaim:
-            claimName: vigil-data
         - name: tmp
           emptyDir: {}
 ---
@@ -103,15 +119,3 @@ spec:
       port: 4318
       targetPort: http
   type: ClusterIP
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: vigil-data
-  namespace: vigil
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 20Gi

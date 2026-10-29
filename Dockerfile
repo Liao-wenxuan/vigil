@@ -48,6 +48,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=4318
+# SQLite 模式的数据库路径（不设 DATABASE_URL 时才用到）
 ENV VIGIL_DB_PATH=/data/vigil.db
 
 COPY --from=build /app/node_modules ./node_modules
@@ -55,7 +56,9 @@ COPY --from=build /app/packages/collector/dist ./packages/collector/dist
 COPY --from=build /app/packages/collector/package.json ./packages/collector/package.json
 COPY --from=build /app/packages/protocol ./packages/protocol
 
-# 数据目录挂卷：数据库是唯一有状态的东西
+# SQLite 模式的数据目录。
+# ⚠️ 设了 DATABASE_URL（PostgreSQL）时这个目录**不用挂** ——
+#    采集服务是无状态的，多副本时每个 Pod 各有一份空目录也没关系。
 RUN mkdir -p /data
 VOLUME ["/data"]
 

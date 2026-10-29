@@ -1,0 +1,124 @@
+# PostgreSQL —— 采集服务的存储
+#
+# ## 为什么是它
+#
+# SQLite 是一个文件，**多副本写同一个文件会锁竞争**，极端情况还会损坏文件。
+# 所以 SQLite 部署的采集服务只能是**单副本** —— HPA 形同虚设。
+#
+# 换 PostgreSQL 之后，采集服务变成**无状态**的：
+# 副本之间不共享文件，只共享一个数据库 → 可以随便扩。
+#
+# ## 副本数为什么是 1
+#
+# PG 自己也是**有状态**的（数据在它的卷里）。
+# 所以 PG 用 StatefulSet + PVC，副本数固定 1。
+#
+# ⚠️ **PG 单副本 = 单点**。生产上要抗住它挂掉，得配
+#    流复制（replica）或托管的 PG（RDS / Cloud SQL）。
+#    本清单是最小可用形态，不是高可用方案。
+#
+# 升级 PG 版本用 StatefulSet 的 `RollingUpdate` 策略：
+# 先起新的再停旧的，卷跟着 Pod 走。
+apiVersion: v1
+kind: Service
+metadata:
+  name: vigil-postgres
+  namespace: vigil
+  labels:
+    app: vigil-postgres
+spec:
+  selector:
+    app: vigil-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: vigil-postgres
+  namespace: vigil
+  labels:
+    app: vigil-postgres
+spec:
+  serviceName: vigil-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vigil-postgres
+  strategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: vigil-postgres
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        fsGroup: 999
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: vigil
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: vigil-postgres
+                  key: POSTGRES_USER
+            # 密码来自 Secret，不进镜像、不进 ConfigMap
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: vigil-postgres
+                  key: POSTGRES_PASSWORD
+            # 官方镜像要求这两个目录可写
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: '1'
+              memory: 1Gi
+          livenessProbe:
+            exec:
+              command: ['pg_isready', '-U', 'vigil', '-d', 'vigil']
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command: ['pg_isready', '-U', 'vigil', '-d', 'vigil']
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ['ALL']
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: vigil-postgres-data
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        resources:
+          requests:
+            storage: 20Gi

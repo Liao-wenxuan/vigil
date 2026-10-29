@@ -1,14 +1,24 @@
-# 采集服务自动扩缩容
+# 自动扩缩容
 #
-# 按 CPU 扩缩：上报是突发流量型负载（发版后错误激增），
-# 固定副本数要么浪费要么不够。
+# ## 采集服务现在可以真的扩了
 #
-# ⚠️ **但 SQLite 撑不住多副本** —— 多个进程写同一个数据库文件会锁竞争，
-#    极端情况会损坏文件。上面的 Deployment 用了 RWO 卷 + 2 副本，
-#    滚动更新时新 Pod 拿不到卷会卡住。
+# 之前这份清单是**自相矛盾**的：
+#   - Deployment 写 `replicas: 2`
+#   - 但挂的是 RWO 卷（一个 Pod 独占）
+#   - 而 SQLite 本身也撑不住两个进程写同一个文件
 #
-#    **多副本前必须先换 PostgreSQL。**
-#    换库步骤：改 schema 方言到 postgres + 换连接层 + 改 PVC 为共享存储。
+# 结果是：滚动更新时新 Pod 拿不到卷会卡住，HPA 拉起来的副本直接 CrashLoop。
+#
+# 现在采集服务**无状态**（数据在 PostgreSQL 里），`replicas: 2` + HPA 成立。
+#
+# ## 面板为什么要单独一个 HPA
+#
+# 面板是**纯静态资源 + nginx**，无状态、CPU 消耗低。
+# 但它的并发全在**采集服务的查询接口**上 ——
+# 面板越多副本不一定越快，得看采集服务扛不扛得住。
+#
+# 所以面板的 HPA 上限刻意压得比采集服务低，
+# 避免面板扩容把采集服务压垮。
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
@@ -19,8 +29,8 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: vigil-collector
-  minReplicas: 1
-  maxReplicas: 5
+  minReplicas: 2
+  maxReplicas: 6
   metrics:
     - type: Resource
       resource:
@@ -54,3 +64,34 @@ spec:
   selector:
     matchLabels:
       app: vigil-collector
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vigil-dashboard
+  namespace: vigil
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vigil-dashboard
+  minReplicas: 2
+  maxReplicas: 4
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vigil-dashboard
+  namespace: vigil
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: vigil-dashboard

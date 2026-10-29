@@ -4,18 +4,46 @@
 #   → 面板  http://localhost:8080
 #   → 接口  http://localhost:4318
 #
+# ## 为什么默认带 PostgreSQL
+#
+# SQLite 只能跑**单副本** —— 一个文件，多进程写会锁竞争。
+# PostgreSQL 让采集服务变成**无状态**的，才能水平扩。
+#
+# 不想装 PG？把 collector 的 `DATABASE_URL` 注释掉，
+# 它会退回 SQLite（本地开发够用，但只能单副本）。
+#
 # 管理 token 走环境变量注入，不写进镜像。
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vigil
+      POSTGRES_USER: ${POSTGRES_USER:-vigil}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-vigil} -d vigil']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   collector:
     build:
       context: .
       target: collector
     image: vigil/collector:local
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       PORT: '4318'
-      VIGIL_DB_PATH: /data/vigil.db
+      # ⚠️ 有这个变量就用 PostgreSQL，没有就退回 SQLite（单实例开发用）。
+      DATABASE_URL: postgres://${POSTGRES_USER:-vigil}:${POSTGRES_PASSWORD}@postgres:5432/vigil
       # 生产环境必须显式设置；不设置时服务会随机生成一个并打印
       VIGIL_ADMIN_TOKEN: ${VIGIL_ADMIN_TOKEN:?请在 .env 里设置 VIGIL_ADMIN_TOKEN}
       # 告警评估间隔（秒），0 关闭
@@ -23,14 +51,13 @@ services:
       LOG_LEVEL: info
     ports:
       - '4318:4318'
-    volumes:
-      - collector-data:/data
     healthcheck:
-      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:4318/api/health']
+      # 用 /api/ready —— 它会真的连一下数据库
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:4318/api/ready']
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
 
   dashboard:
     build:
@@ -45,4 +72,4 @@ services:
       - '8080:80'
 
 volumes:
-  collector-data:
+  postgres-data:
