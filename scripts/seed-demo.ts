@@ -361,7 +361,7 @@ for (const [index, template] of shopTemplates.entries()) {
       ...template,
       occurredAt: template.occurredAt - i * 6 * HOUR - (i % 5) * 37 * MINUTE
     })
-    issues.ingestEvent(shop.project.id, event)
+    await issues.ingestEvent(shop.project.id, event)
     totalEvents++
   }
 }
@@ -389,12 +389,12 @@ const blogTemplates: ErrorEvent[] = [
 ]
 
 for (const template of blogTemplates) {
-  issues.ingestEvent(blog.project.id, withFingerprint(template))
+  await issues.ingestEvent(blog.project.id, withFingerprint(template))
   totalEvents++
 }
 
 // ---- 一个已解决的问题 + 一个回归，演示完整生命周期 ----
-const resolvedOutcome = issues.ingestEvent(
+const resolvedOutcome = await issues.ingestEvent(
   shop.project.id,
   withFingerprint(
     jsEvent({
@@ -409,12 +409,12 @@ const resolvedOutcome = issues.ingestEvent(
     })
   )
 )
-issues.resolve(shop.project.id, resolvedOutcome.issueId, {
+await issues.resolve(shop.project.id, resolvedOutcome.issueId, {
   release: '1.4.2',
   reason: '已在 1.4.2 修复空指针'
 })
 // 在更新版本又出现 → 判为回归
-issues.ingestEvent(
+await issues.ingestEvent(
   shop.project.id,
   withFingerprint(
     jsEvent({
@@ -432,7 +432,7 @@ issues.ingestEvent(
 totalEvents++
 
 // ---- 一个归档的问题，演示「归档直到升级」策略 ----
-const archivedOutcome = issues.ingestEvent(
+const archivedOutcome = await issues.ingestEvent(
   shop.project.id,
   withFingerprint(
     httpEvent({
@@ -592,7 +592,7 @@ replayService.saveReplay(shop.project.id, replaySessionId, {
 })
 
 // 让一个错误带上这份回放（回放就是随错误一起送来的）
-const replayOutcome = issues.ingestEvent(
+const replayOutcome = await issues.ingestEvent(
   shop.project.id,
   withFingerprint(
     jsEvent({
@@ -607,7 +607,7 @@ const replayOutcome = issues.ingestEvent(
   )
 )
 // 给事件补上回放与 sessionId
-db.run(`UPDATE issue_events SET session_id = ?, vitals_json = ? WHERE issue_id = ?`, [
+await db.run(`UPDATE issue_events SET session_id = ?, vitals_json = ? WHERE issue_id = ?`, [
   replaySessionId,
   JSON.stringify({ lcp: 2400, fcp: 1100, inp: 180, longTaskCount: 2 }),
   replayOutcome.issueId
@@ -636,7 +636,7 @@ let totalTransactions = 0
 for (let i = 0; i < 160; i++) {
   const name = pages[i % pages.length]
   const slow = name === '/checkout'
-  performance.ingestTransaction(
+  await performance.ingestTransaction(
     shop.project.id,
     transaction({
       name,
@@ -660,21 +660,21 @@ for (let i = 0; i < 160; i++) {
 // ============================================================
 // 告警
 // ============================================================
-const webhook = alerting.createChannel({
+const webhook = await alerting.createChannel({
   projectId: shop.project.id,
   name: '前端群 Webhook',
   type: 'webhook',
   config: { url: 'https://hooks.example.com/vigil' }
 })
 
-const feishu = alerting.createChannel({
+const feishu = await alerting.createChannel({
   projectId: shop.project.id,
   name: '飞书告警群',
   type: 'feishu',
   config: { url: 'https://open.feishu.cn/open-apis/bot/v2/hook/xxxxx' }
 })
 
-alerting.createRule({
+await alerting.createRule({
   projectId: shop.project.id,
   name: '新问题出现',
   type: 'issue.new',
@@ -683,7 +683,7 @@ alerting.createRule({
   channelIds: [feishu.id]
 })
 
-alerting.createRule({
+await alerting.createRule({
   projectId: shop.project.id,
   name: '单问题 10 分钟内超过 20 次',
   type: 'issue.count',
@@ -693,7 +693,7 @@ alerting.createRule({
   channelIds: [feishu.id, webhook.id]
 })
 
-alerting.createRule({
+await alerting.createRule({
   projectId: shop.project.id,
   name: 'LCP P95 超过 2.5 秒',
   type: 'metric.lcp_p95',
@@ -706,7 +706,7 @@ alerting.createRule({
 // 汇总
 // ============================================================
 const stats = issues.stats(shop.project.id)
-const perf = performance.summary({ projectId: shop.project.id })
+const perf = await performance.summary({ projectId: shop.project.id })
 
 console.log('')
 console.log('[seed] 演示数据写入完成')

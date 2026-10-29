@@ -61,7 +61,7 @@ async function waitFor<T>(
 ): Promise<T | undefined> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const value = fn()
+    const value = await fn()
     if (value !== undefined) return value
     await sleep(intervalMs)
   }
@@ -123,7 +123,7 @@ if (!fs.existsSync(SDK_DIST) || !fs.existsSync(SDK_IIFE) || !fs.existsSync(SDK_R
 // ============================================================
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vigil-e2e-'))
 const dbPath = path.join(tmpDir, 'e2e.db')
-const db: Db = openDb(dbPath)
+const db: Db = await openDb(dbPath)
 
 const tenancy = new TenancyService(db)
 const artifacts = new ArtifactService(db)
@@ -132,8 +132,8 @@ const performance = new PerformanceService(db)
 const alerting = new AlertingService(db)
 const evaluator = new AlertEvaluator(db, alerting)
 
-const organization = tenancy.createOrganization('E2E 组织')
-const project = tenancy.createProject({
+const organization = await tenancy.createOrganization('E2E 组织')
+const project = await tenancy.createProject({
   organizationId: organization.id,
   name: 'E2E 应用',
   slug: 'e2e-app'
@@ -145,7 +145,7 @@ console.log(`[Vigil E2E] 项目 ${project.project.id} (${project.project.slug})\
 // ============================================================
 // 2. 启动 Collector
 // ============================================================
-const built = buildApp({ db, adminToken: ADMIN_TOKEN })
+const built = await buildApp({ db, adminToken: ADMIN_TOKEN })
 const collector = built.app
 await collector.listen({ port: 0, host: '127.0.0.1' })
 const address = collector.server.address()
@@ -344,15 +344,17 @@ await page.waitForFunction(
 // ============================================================
 // 5. 等事件落库
 // ============================================================
-const countRows = () =>
-  db.get<{ n: number }>('SELECT COUNT(*) AS n FROM issues WHERE project_id = ?', [
-    project.project.id
-  ])?.n ?? 0
+const countRows = async () =>
+  (
+    await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM issues WHERE project_id = ?', [
+      project.project.id
+    ])
+  )?.n ?? 0
 
-await waitFor(() => (countRows() >= 5 ? true : undefined), 20000)
+await waitFor(async () => ((await countRows()) >= 5 ? true : undefined), 20000)
 
-const totalDistinct = countRows()
-const totals = db.get<{ c: number }>(
+const totalDistinct = await countRows()
+const totals = await db.get<{ c: number }>(
   'SELECT COALESCE(SUM(count), 0) AS c FROM issues WHERE project_id = ?',
   [project.project.id]
 )
@@ -364,7 +366,7 @@ check(
   `去重后 ${totalDistinct} 条错误 / 累计 ${totals?.c} 次发生`
 )
 
-const byCategory = db.all<{ category: string; n: number; occurrences: number }>(
+const byCategory = await db.all<{ category: string; n: number; occurrences: number }>(
   'SELECT category, COUNT(*) AS n, COALESCE(SUM(count), 0) AS occurrences FROM issues WHERE project_id = ? GROUP BY category',
   [project.project.id]
 )
@@ -388,7 +390,7 @@ check(
 // ============================================================
 // 6. Issue 生命周期：聚合 → 解决 → 回归
 // ============================================================
-const aggregated = db.get<{ fingerprint: string; count: number }>(
+const aggregated = await db.get<{ fingerprint: string; count: number }>(
   `SELECT fingerprint, count FROM issues
    WHERE project_id = ? AND message LIKE '%聚合验证%'`,
   [project.project.id]
@@ -430,20 +432,20 @@ lifecycleEvent.fingerprint = computeFingerprint({
   frames: lifecycleEvent.frames
 })
 
-const outcome = issues.ingestEvent(project.project.id, lifecycleEvent)
-const resolved = issues.resolve(project.project.id, outcome.issueId, { release: '1.0.0' })
+const outcome = await issues.ingestEvent(project.project.id, lifecycleEvent)
+const resolved = await issues.resolve(project.project.id, outcome.issueId, { release: '1.0.0' })
 check(
   '标记已解决 → 状态 resolved 且记录了版本',
   resolved.status === 'resolved' && resolved.resolvedInRelease === '1.0.0',
   `status=${resolved.status} resolvedInRelease=${resolved.resolvedInRelease ?? 'N/A'}`
 )
 
-issues.ingestEvent(project.project.id, {
+await issues.ingestEvent(project.project.id, {
   ...lifecycleEvent,
   release: '1.0.1',
   occurredAt: Date.now()
 })
-const regressed = issues.getIssue(project.project.id, outcome.issueId)
+const regressed = await issues.getIssue(project.project.id, outcome.issueId)
 check(
   '在更新版本重新出现 → 判为回归（Resolve with Release）',
   regressed.status === 'unresolved' && regressed.substatus === 'regressed',
@@ -451,18 +453,18 @@ check(
 )
 
 // 同版本再次出现 → 应保持 resolved（是噪音，不是回归）
-const noiseOutcome = issues.ingestEvent(project.project.id, {
+const noiseOutcome = await issues.ingestEvent(project.project.id, {
   ...lifecycleEvent,
   release: '1.0.0',
   occurredAt: Date.now()
 })
-issues.resolve(project.project.id, noiseOutcome.issueId, { release: '1.0.0' })
-issues.ingestEvent(project.project.id, {
+await issues.resolve(project.project.id, noiseOutcome.issueId, { release: '1.0.0' })
+await issues.ingestEvent(project.project.id, {
   ...lifecycleEvent,
   release: '1.0.0',
   occurredAt: Date.now() + 1000
 })
-const noise = issues.getIssue(project.project.id, noiseOutcome.issueId)
+const noise = await issues.getIssue(project.project.id, noiseOutcome.issueId)
 check(
   '在同版本重新出现 → 保持 resolved（是噪音不是回归）',
   noise.status === 'resolved',
@@ -470,7 +472,7 @@ check(
 )
 
 // 活动流
-const activity = db.all<{ action: string }>(
+const activity = await db.all<{ action: string }>(
   'SELECT action FROM issue_activity WHERE issue_id = ? ORDER BY id',
   [outcome.issueId]
 )
@@ -485,7 +487,7 @@ check(
 // 7. sourcemap 还原
 // ============================================================
 // v2 里原始栈与还原后的栈住在 issues 表上（入库时还原一次）
-const minifiedError = db.get<{ raw_stack: string | null; resolved_stack: string | null }>(
+const minifiedError = await db.get<{ raw_stack: string | null; resolved_stack: string | null }>(
   `SELECT raw_stack, resolved_stack FROM issues
    WHERE project_id = ? AND message LIKE '%压缩产物%'`,
   [project.project.id]
@@ -510,7 +512,7 @@ check(
 // ============================================================
 // 8. 脱敏
 // ============================================================
-const storedUrl = db.get<{ url: string }>(
+const storedUrl = await db.get<{ url: string }>(
   'SELECT url FROM issues WHERE project_id = ? ORDER BY id LIMIT 1',
   [project.project.id]
 )
@@ -523,7 +525,7 @@ check(
 // ============================================================
 // 9. 无递归
 // ============================================================
-const selfReports = db.get<{ n: number }>(
+const selfReports = await db.get<{ n: number }>(
   `SELECT COUNT(*) AS n FROM issues
    WHERE project_id = ? AND (url LIKE '%/api/v1/collect%' OR message LIKE '%/api/v1/collect%')`,
   [project.project.id]
@@ -534,7 +536,7 @@ check('上报请求自身没有被当成错误（无递归）', selfReports?.n =
 // 10. 性能事务
 // ============================================================
 for (let i = 0; i < 20; i++) {
-  performance.ingestTransaction(project.project.id, {
+  await performance.ingestTransaction(project.project.id, {
     name: '/checkout',
     type: 'page',
     startedAt: Date.now() - i * 1000,
@@ -548,7 +550,7 @@ for (let i = 0; i < 20; i++) {
   })
 }
 
-const perfSummary = performance.summary({ projectId: project.project.id })
+const perfSummary = await performance.summary({ projectId: project.project.id })
 check(
   '性能事务入库且分位数可查',
   perfSummary.transactions === 20 && perfSummary.vitals.lcp.count === 20,
@@ -559,7 +561,7 @@ check(
 // 11. 错误与性能关联
 // ============================================================
 // SDK 在报错时会带上当时的 vitals 快照。服务端存在 issue_events.vitals_json。
-const withVitals = db.get<{ n: number }>(
+const withVitals = await db.get<{ n: number }>(
   `SELECT COUNT(*) AS n FROM issue_events
    WHERE project_id = ? AND vitals_json IS NOT NULL`,
   [project.project.id]
@@ -573,14 +575,14 @@ check(
 // ============================================================
 // 12. 告警
 // ============================================================
-const channel = alerting.createChannel({
+const channel = await alerting.createChannel({
   projectId: project.project.id,
   name: 'E2E webhook',
   type: 'webhook',
   config: { url: 'http://127.0.0.1:1/never' }
 })
 
-alerting.createRule({
+await alerting.createRule({
   projectId: project.project.id,
   name: '错误过多',
   type: 'issue.count',
@@ -590,7 +592,7 @@ alerting.createRule({
 })
 
 const alertResult = await evaluator.evaluateProject(project.project.id)
-const incidentCount = db.get<{ n: number }>(
+const incidentCount = await db.get<{ n: number }>(
   'SELECT COUNT(*) AS n FROM alert_incidents WHERE project_id = ?',
   [project.project.id]
 )
@@ -602,7 +604,7 @@ check(
 
 // 去重：再评估一次不应重复落库
 await evaluator.evaluateProject(project.project.id)
-const incidentCountAfter = db.get<{ n: number }>(
+const incidentCountAfter = await db.get<{ n: number }>(
   'SELECT COUNT(*) AS n FROM alert_incidents WHERE project_id = ?',
   [project.project.id]
 )
@@ -617,8 +619,8 @@ check(
 // ============================================================
 // ⚠️ 这里的计数要**现查** —— 上面��生命周期测试又新增了 Issue，
 //    用之前缓存的快照比对会误报。
-const currentDistinct = countRows()
-const currentTotals = db.get<{ c: number }>(
+const currentDistinct = await countRows()
+const currentTotals = await db.get<{ c: number }>(
   'SELECT COALESCE(SUM(count), 0) AS c FROM issues WHERE project_id = ?',
   [project.project.id]
 )
@@ -652,7 +654,7 @@ check(
 const beforeUnload = totals?.c ?? 0
 await page.goto('about:blank')
 await sleep(1500)
-const afterUnload = db.get<{ c: number }>(
+const afterUnload = await db.get<{ c: number }>(
   'SELECT COALESCE(SUM(count), 0) AS c FROM issues WHERE project_id = ?',
   [project.project.id]
 )
@@ -692,14 +694,14 @@ await replayPage.waitForFunction(
 )
 
 // ---- 回放事件流入库 ----
-const countReplayEvents = () =>
-  db.get<{ n: number }>('SELECT COUNT(*) AS n FROM replay_events WHERE project_id = ?', [
+const countReplayEvents = async () =>
+  (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM replay_events WHERE project_id = ?', [
     project.project.id
-  ])?.n ?? 0
+  ])?.n) ?? 0
 
 await waitFor(() => (countReplayEvents() > 0 ? true : undefined), 20000)
 
-const replayRows = db.all<{ seq: number; event_type: number }>(
+const replayRows = await db.all<{ seq: number; event_type: number }>(
   `SELECT seq, event_type FROM replay_events
    WHERE project_id = ? ORDER BY seq`,
   [project.project.id]
@@ -748,7 +750,7 @@ check(
 )
 
 // ---- 会话汇总入库 ----
-const sessionRow = db.get<{ n: number; replay_events: number }>(
+const sessionRow = await db.get<{ n: number; replay_events: number }>(
   `SELECT COUNT(*) AS n, COALESCE(SUM(replay_events), 0) AS replay_events
    FROM replay_sessions WHERE project_id = ?`,
   [project.project.id]
@@ -784,14 +786,14 @@ check(
 )
 
 // ---- 行为域 ----
-const countBehavior = () =>
-  db.get<{ n: number }>('SELECT COUNT(*) AS n FROM behavior_events WHERE project_id = ?', [
+const countBehavior = async () =>
+  (await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM behavior_events WHERE project_id = ?', [
     project.project.id
-  ])?.n ?? 0
+  ])?.n) ?? 0
 
 await waitFor(() => (countBehavior() > 0 ? true : undefined), 20000)
 
-const behaviorRows = db.all<{ type: string }>(
+const behaviorRows = await db.all<{ type: string }>(
   'SELECT type FROM behavior_events WHERE project_id = ?',
   [project.project.id]
 )

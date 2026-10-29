@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { openDb } from '../src/infra/db/client.js'
+import type { Db } from '../src/infra/db/types.js'
 import { runMigrations, MIGRATIONS } from '../src/infra/db/migrate.js'
 
 /**
@@ -65,28 +66,28 @@ CREATE TABLE sourcemaps (
 `
 
 /** 造一个"有历史数据的老库" */
-function createLegacyDb() {
-  const db = openDb(':memory:', { migrate: false })
-  db.exec(LEGACY_DDL)
+async function createLegacyDb() {
+  const db = await openDb(':memory:', { migrate: false })
+  await db.exec(LEGACY_DDL)
 
-  db.run(
+  await db.run(
     `INSERT INTO apps (app_id, name, token_hash, upload_token_hash, enabled, created_at)
      VALUES ('app_legacy1', '老应用', 'hash_runtime', 'hash_upload', 1, ?)`,
     [1000]
   )
-  db.run(
+  await db.run(
     `INSERT INTO errors
        (id, app_id, fingerprint, category, kind, name, message, first_seen, last_seen, count)
      VALUES (1, 'app_legacy1', 'fingerprint1', 'javascript', 'js', 'TypeError', 'boom', 2000, 3000, 5)`,
     []
   )
-  db.run(
+  await db.run(
     `INSERT INTO error_events
        (id, app_id, fingerprint, error_id, occurred_at, received_at, payload_json)
      VALUES (1, 'app_legacy1', 'fingerprint1', 1, 2000, 2100, '{"message":"boom"}')`,
     []
   )
-  db.run(
+  await db.run(
     `INSERT INTO sourcemaps (app_id, release, file_name, base_name, map_json, uploaded_at)
      VALUES ('app_legacy1', '1.0.0', 'assets/index.js', 'index.js', '{"version":3}', 2500)`,
     []
@@ -95,8 +96,8 @@ function createLegacyDb() {
   return db
 }
 
-function tableExists(db: ReturnType<typeof openDb>, name: string): boolean {
-  const row = db.get<{ n: number }>(
+async function tableExists(db: Db, name: string): Promise<boolean> {
+  const row = await db.get<{ n: number }>(
     "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='table' AND name = ?",
     [name]
   )
@@ -104,50 +105,50 @@ function tableExists(db: ReturnType<typeof openDb>, name: string): boolean {
 }
 
 describe('v1 → v2 数据迁移', () => {
-  it('老表被清理，新表建好', () => {
-    const db = createLegacyDb()
-    runMigrations(db, 'sqlite', MIGRATIONS)
+  it('老表被清理，新表建好', async () => {
+    const db = await createLegacyDb()
+    await runMigrations(db, 'sqlite', MIGRATIONS)
 
-    expect(tableExists(db, 'apps')).toBe(false)
-    expect(tableExists(db, 'errors')).toBe(false)
-    expect(tableExists(db, 'error_events')).toBe(false)
+    expect(await tableExists(db, 'apps')).toBe(false)
+    expect(await tableExists(db, 'errors')).toBe(false)
+    expect(await tableExists(db, 'error_events')).toBe(false)
 
-    expect(tableExists(db, 'organizations')).toBe(true)
-    expect(tableExists(db, 'projects')).toBe(true)
-    expect(tableExists(db, 'issues')).toBe(true)
-    expect(tableExists(db, 'issue_events')).toBe(true)
-    db.close()
+    expect(await tableExists(db, 'organizations')).toBe(true)
+    expect(await tableExists(db, 'projects')).toBe(true)
+    expect(await tableExists(db, 'issues')).toBe(true)
+    expect(await tableExists(db, 'issue_events')).toBe(true)
+    await db.close()
   })
 
-  it('sourcemaps 表不会被误删（v1 与 v2 同名）', () => {
+  it('sourcemaps 表不会被误删（v1 与 v2 同名）', async () => {
     // ⚠️ 回归测试：之前迁移里直接 DROP sourcemaps，
     //    结果把 v2 刚建好的同名表也删了 ——
     //    症状是任何上报都在查 sourcemaps 时抛错，整个摄入链路 500。
-    const db = createLegacyDb()
-    runMigrations(db, 'sqlite', MIGRATIONS)
+    const db = await createLegacyDb()
+    await runMigrations(db, 'sqlite', MIGRATIONS)
 
-    expect(tableExists(db, 'sourcemaps')).toBe(true)
-    db.close()
+    expect(await tableExists(db, 'sourcemaps')).toBe(true)
+    await db.close()
   })
 
-  it('sourcemap 数据被搬到 v2 结构（project_id + release_id）', () => {
-    const db = createLegacyDb()
-    runMigrations(db, 'sqlite', MIGRATIONS)
+  it('sourcemap 数据被搬到 v2 结构（project_id + release_id）', async () => {
+    const db = await createLegacyDb()
+    await runMigrations(db, 'sqlite', MIGRATIONS)
 
-    const rows = db.all<{ file_name: string; base_name: string; map_json: string }>(
+    const rows = await db.all<{ file_name: string; base_name: string; map_json: string }>(
       'SELECT file_name, base_name, map_json FROM sourcemaps'
     )
     expect(rows).toHaveLength(1)
     expect(rows[0].file_name).toBe('assets/index.js')
     expect(rows[0].map_json).toBe('{"version":3}')
-    db.close()
+    await db.close()
   })
 
-  it('老错误被搬进 issues，且带上活动流起点', () => {
-    const db = createLegacyDb()
-    runMigrations(db, 'sqlite', MIGRATIONS)
+  it('老错误被搬进 issues，且带上活动流起点', async () => {
+    const db = await createLegacyDb()
+    await runMigrations(db, 'sqlite', MIGRATIONS)
 
-    const issues = db.all<{
+    const issues = await db.all<{
       fingerprint: string
       count: number
       status: string
@@ -160,43 +161,44 @@ describe('v1 → v2 数据迁移', () => {
     expect(issues[0].status).toBe('unresolved')
 
     // 迁移过来的 Issue 也要有活动流 —— 否则详情页是空的
-    const activity = db.all<{ action: string; reason: string }>(
+    const activity = await db.all<{ action: string; reason: string }>(
       'SELECT action, reason FROM issue_activity'
     )
     expect(activity).toHaveLength(1)
     expect(activity[0].action).toBe('created')
-    db.close()
+    await db.close()
   })
 
-  it('老 token 的哈希被搬过去（老密钥继续可用）', () => {
-    const db = createLegacyDb()
-    runMigrations(db, 'sqlite', MIGRATIONS)
+  it('老 token 的哈希被搬过去（老密钥继续可用）', async () => {
+    const db = await createLegacyDb()
+    await runMigrations(db, 'sqlite', MIGRATIONS)
 
-    const keys = db.all<{ kind: string; key_hash: string }>(
+    const keys = await db.all<{ kind: string; key_hash: string }>(
       'SELECT kind, key_hash FROM project_keys'
     )
     expect(keys).toHaveLength(2)
     expect(keys.find((k) => k.kind === 'runtime')?.key_hash).toBe('hash_runtime')
     expect(keys.find((k) => k.kind === 'upload')?.key_hash).toBe('hash_upload')
-    db.close()
+    await db.close()
   })
 
-  it('老事件明细被搬进 issue_events', () => {
-    const db = createLegacyDb()
-    runMigrations(db, 'sqlite', MIGRATIONS)
+  it('老事件明细被搬进 issue_events', async () => {
+    const db = await createLegacyDb()
+    await runMigrations(db, 'sqlite', MIGRATIONS)
 
-    const events = db.all<{ event_id: string }>('SELECT event_id FROM issue_events')
+    const events = await db.all<{ event_id: string }>('SELECT event_id FROM issue_events')
     expect(events).toHaveLength(1)
     expect(events[0].event_id).toBe('legacy-1')
-    db.close()
+    await db.close()
   })
 
-  it('全新库（没有老表）不会触发数据迁移', () => {
-    const db = openDb(':memory:', { migrate: false })
-    runMigrations(db, 'sqlite', MIGRATIONS)
+  it('全新库（没有老表）不会触发数据迁移', async () => {
+    const db = await openDb(':memory:', { migrate: false })
+    await runMigrations(db, 'sqlite', MIGRATIONS)
 
-    expect(tableExists(db, 'sourcemaps')).toBe(true)
-    expect(db.get<{ n: number }>('SELECT COUNT(*) AS n FROM issues')?.n).toBe(0)
-    db.close()
+    expect(await tableExists(db, 'sourcemaps')).toBe(true)
+    const row = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM issues')
+    expect(row?.n).toBe(0)
+    await db.close()
   })
 })

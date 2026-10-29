@@ -4,18 +4,18 @@ import { fp, makeEvent, setupDb } from './helpers.js'
 describe('告警引擎', () => {
   describe('规则评估', () => {
     it('issue.count 超过阈值时触发', async () => {
-      const { issues, alerting, evaluator, project } = setupDb()
+      const { issues, alerting, evaluator, project } = await setupDb()
       const base = Date.now()
 
       // 三次独立的发生（时间戳不同，否则会被 event_id 去重）
       for (let i = 0; i < 3; i++) {
-        issues.ingestEvent(
+        await issues.ingestEvent(
           project.id,
           makeEvent({ fingerprint: fp('count'), occurredAt: base + i * 1000 })
         )
       }
 
-      const rule = alerting.createRule({
+      const rule = await alerting.createRule({
         projectId: project.id,
         name: '错误过多',
         type: 'issue.count',
@@ -26,16 +26,16 @@ describe('告警引擎', () => {
       const result = await evaluator.evaluateProject(project.id)
       expect(result.triggered).toBe(1)
 
-      const incidents = alerting.listIncidents(project.id)
+      const incidents = await alerting.listIncidents(project.id)
       expect(incidents).toHaveLength(1)
       expect(incidents[0].ruleId).toBe(rule.id)
     })
 
     it('没超过阈值不触发', async () => {
-      const { issues, alerting, evaluator, project } = setupDb()
-      issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('low') }))
+      const { issues, alerting, evaluator, project } = await setupDb()
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('low') }))
 
-      alerting.createRule({
+      await alerting.createRule({
         projectId: project.id,
         name: '错误过多',
         type: 'issue.count',
@@ -48,16 +48,19 @@ describe('告警引擎', () => {
     })
 
     it('告警去重：同一窗口内不重复触发（避免告警疲劳）', async () => {
-      const { issues, alerting, evaluator, project } = setupDb()
+      const { issues, alerting, evaluator, project } = await setupDb()
       const base = Date.now()
 
-      issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('dedupe'), occurredAt: base }))
-      issues.ingestEvent(
+      await issues.ingestEvent(
+        project.id,
+        makeEvent({ fingerprint: fp('dedupe'), occurredAt: base })
+      )
+      await issues.ingestEvent(
         project.id,
         makeEvent({ fingerprint: fp('dedupe'), occurredAt: base + 1000 })
       )
 
-      alerting.createRule({
+      await alerting.createRule({
         projectId: project.id,
         name: '错误过多',
         type: 'issue.count',
@@ -71,15 +74,15 @@ describe('告警引擎', () => {
       expect(first.triggered).toBe(1)
       // 第二次被去重键挡掉
       expect(second.triggered).toBe(0)
-      expect(alerting.listIncidents(project.id)).toHaveLength(1)
+      expect(await alerting.listIncidents(project.id)).toHaveLength(1)
     })
 
     it('metric.error_count 按项目错误总数触发', async () => {
-      const { issues, alerting, evaluator, project } = setupDb()
-      issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('m1') }))
-      issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('m2') }))
+      const { issues, alerting, evaluator, project } = await setupDb()
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('m1') }))
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('m2') }))
 
-      alerting.createRule({
+      await alerting.createRule({
         projectId: project.id,
         name: '项目错误总数',
         type: 'metric.error_count',
@@ -92,8 +95,8 @@ describe('告警引擎', () => {
     })
 
     it('metric.lcp_p95 超阈值时触发', async () => {
-      const { performance, alerting, evaluator, project } = setupDb()
-      performance.ingestTransaction(project.id, {
+      const { performance, alerting, evaluator, project } = await setupDb()
+      await performance.ingestTransaction(project.id, {
         name: '/checkout',
         type: 'page',
         startedAt: Date.now(),
@@ -104,7 +107,7 @@ describe('告警引擎', () => {
         sessionId: 's1'
       })
 
-      alerting.createRule({
+      await alerting.createRule({
         projectId: project.id,
         name: 'LCP 太慢',
         type: 'metric.lcp_p95',
@@ -117,12 +120,12 @@ describe('告警引擎', () => {
     })
 
     it('条件过滤：环境不匹配时不触发', async () => {
-      const { issues, alerting, evaluator, project } = setupDb()
+      const { issues, alerting, evaluator, project } = await setupDb()
       const event = makeEvent({ fingerprint: fp('env'), environment: 'staging' })
-      issues.ingestEvent(project.id, event)
-      issues.ingestEvent(project.id, event)
+      await issues.ingestEvent(project.id, event)
+      await issues.ingestEvent(project.id, event)
 
-      alerting.createRule({
+      await alerting.createRule({
         projectId: project.id,
         name: '生产环境错误',
         type: 'issue.count',
@@ -156,22 +159,25 @@ describe('告警引擎', () => {
       const port = (server.address() as { port: number }).port
 
       try {
-        const { issues, alerting, evaluator, project } = setupDb()
+        const { issues, alerting, evaluator, project } = await setupDb()
         const base = Date.now()
-        issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('hook'), occurredAt: base }))
-        issues.ingestEvent(
+        await issues.ingestEvent(
+          project.id,
+          makeEvent({ fingerprint: fp('hook'), occurredAt: base })
+        )
+        await issues.ingestEvent(
           project.id,
           makeEvent({ fingerprint: fp('hook'), occurredAt: base + 1000 })
         )
 
-        const channel = alerting.createChannel({
+        const channel = await alerting.createChannel({
           projectId: project.id,
           name: '测试 webhook',
           type: 'webhook',
           config: { url: `http://127.0.0.1:${port}/hook` }
         })
 
-        alerting.createRule({
+        await alerting.createRule({
           projectId: project.id,
           name: '错误过多',
           type: 'issue.count',
@@ -207,18 +213,18 @@ describe('告警引擎', () => {
       const port = (server.address() as { port: number }).port
 
       try {
-        const { issues, alerting, evaluator, project } = setupDb()
+        const { issues, alerting, evaluator, project } = await setupDb()
         const event = makeEvent({ fingerprint: fp('feishu') })
-        issues.ingestEvent(project.id, event)
+        await issues.ingestEvent(project.id, event)
 
-        const channel = alerting.createChannel({
+        const channel = await alerting.createChannel({
           projectId: project.id,
           name: '飞书',
           type: 'feishu',
           config: { url: `http://127.0.0.1:${port}/feishu` }
         })
 
-        alerting.createRule({
+        await alerting.createRule({
           projectId: project.id,
           name: '新问题',
           type: 'issue.count',

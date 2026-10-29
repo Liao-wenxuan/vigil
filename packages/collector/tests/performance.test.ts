@@ -38,10 +38,10 @@ describe('性能域', () => {
   })
 
   describe('事务摄入', () => {
-    it('写入事务与 span', () => {
-      const { performance, project } = setupDb()
+    it('写入事务与 span', async () => {
+      const { performance, project } = await setupDb()
 
-      const result = performance.ingestTransaction(
+      const result = await performance.ingestTransaction(
         project.id,
         makeTransaction({
           spans: [
@@ -61,67 +61,67 @@ describe('性能域', () => {
       expect(result.spans).toBe(2)
     })
 
-    it('汇总能算出 LCP 分位数', () => {
-      const { performance, project } = setupDb()
+    it('汇总能算出 LCP 分位数', async () => {
+      const { performance, project } = await setupDb()
 
       for (const lcp of [1000, 2000, 3000, 4000, 5000]) {
-        performance.ingestTransaction(
+        await performance.ingestTransaction(
           project.id,
           makeTransaction({ vitals: { lcp }, sessionId: `s_${lcp}` })
         )
       }
 
-      const summary = performance.summary({ projectId: project.id })
+      const summary = await performance.summary({ projectId: project.id })
       expect(summary.transactions).toBe(5)
       expect(summary.vitals.lcp.p95).toBe(5000)
       expect(summary.vitals.lcp.avg).toBe(3000)
     })
 
-    it('按环境过滤', () => {
-      const { performance, project } = setupDb()
+    it('按环境过滤', async () => {
+      const { performance, project } = await setupDb()
 
-      performance.ingestTransaction(
+      await performance.ingestTransaction(
         project.id,
         makeTransaction({ environment: 'production', vitals: { lcp: 1000 } })
       )
-      performance.ingestTransaction(
+      await performance.ingestTransaction(
         project.id,
         makeTransaction({ environment: 'staging', vitals: { lcp: 9000 } })
       )
 
-      const prod = performance.summary({ projectId: project.id, environment: 'production' })
+      const prod = await performance.summary({ projectId: project.id, environment: 'production' })
       expect(prod.transactions).toBe(1)
       expect(prod.vitals.lcp.p95).toBe(1000)
     })
 
-    it('能列出最慢的接口', () => {
-      const { performance, project } = setupDb()
+    it('能列出最慢的接口', async () => {
+      const { performance, project } = await setupDb()
 
-      performance.ingestTransaction(
+      await performance.ingestTransaction(
         project.id,
         makeTransaction({
           spans: [{ name: 'GET /api/slow', type: 'http', durationMs: 5000, statusCode: 200 }]
         })
       )
-      performance.ingestTransaction(
+      await performance.ingestTransaction(
         project.id,
         makeTransaction({
           spans: [{ name: 'GET /api/fast', type: 'http', durationMs: 50, statusCode: 200 }]
         })
       )
 
-      const summary = performance.summary({ projectId: project.id })
+      const summary = await performance.summary({ projectId: project.id })
       expect(summary.topSpans[0].name).toBe('GET /api/slow')
       expect(summary.topSpans[0].p95).toBe(5000)
     })
   })
 
   describe('错误与性能关联', () => {
-    it('能查出哪些错误发生时页面 LCP 更差', () => {
-      const { issues, performance, project } = setupDb()
+    it('能查出哪些错误发生时页面 LCP 更差', async () => {
+      const { issues, performance, project } = await setupDb()
 
       // 一个带性能快照的错误
-      issues.ingestEvent(
+      await issues.ingestEvent(
         project.id,
         makeEvent({
           fingerprint: 'f'.repeat(16),
@@ -129,7 +129,7 @@ describe('性能域', () => {
         })
       )
 
-      const rows = performance.errorPerformanceCorrelation(project.id)
+      const rows = await performance.errorPerformanceCorrelation(project.id)
       expect(rows.length).toBeGreaterThan(0)
       expect(rows[0].avgLcp).toBe(4000)
     })

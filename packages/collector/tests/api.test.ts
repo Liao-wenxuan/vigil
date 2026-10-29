@@ -6,12 +6,12 @@ import { fp, makeEvent } from './helpers.js'
 
 const ADMIN = 'admin_test_token'
 
-function setup() {
-  const db = openDb(':memory:')
+async function setup() {
+  const db = await openDb(':memory:')
   const tenancy = new TenancyService(db)
-  const organization = tenancy.createOrganization('测试组织')
-  const created = tenancy.createProject({ organizationId: organization.id, name: '测试应用' })
-  const built = buildApp({ db, adminToken: ADMIN })
+  const organization = await tenancy.createOrganization('测试组织')
+  const created = await tenancy.createProject({ organizationId: organization.id, name: '测试应用' })
+  const built = await buildApp({ db, adminToken: ADMIN })
 
   return {
     db,
@@ -30,7 +30,7 @@ const adminHeader = { 'x-vigil-admin-token': ADMIN }
 describe('HTTP 接口', () => {
   describe('健康检查', () => {
     it('GET /api/health 返回 ok', async () => {
-      const { app } = setup()
+      const { app } = await setup()
       const response = await app.inject({ method: 'GET', url: '/api/health' })
       expect(response.statusCode).toBe(200)
       expect(response.json().ok).toBe(true)
@@ -39,7 +39,7 @@ describe('HTTP 接口', () => {
 
   describe('摄入', () => {
     it('缺密钥 → 401', async () => {
-      const { app, project } = setup()
+      const { app, project } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/collect',
@@ -49,7 +49,7 @@ describe('HTTP 接口', () => {
     })
 
     it('密钥无效 → 401', async () => {
-      const { app, project } = setup()
+      const { app, project } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/collect',
@@ -60,7 +60,7 @@ describe('HTTP 接口', () => {
     })
 
     it('带密钥上报成功并入库', async () => {
-      const { app, db, project, runtimeKey } = setup()
+      const { app, db, project, runtimeKey } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/collect',
@@ -71,12 +71,12 @@ describe('HTTP 接口', () => {
       expect(response.statusCode).toBe(200)
       expect(response.json().accepted).toBe(1)
 
-      const row = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM issues')
+      const row = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM issues')
       expect(row?.n).toBe(1)
     })
 
     it('上传密钥不能用于上报（两把密钥严格分离）', async () => {
-      const { app, project, uploadKey } = setup()
+      const { app, project, uploadKey } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/collect',
@@ -87,7 +87,7 @@ describe('HTTP 接口', () => {
     })
 
     it('运行时密钥不能用于上传 sourcemap（密钥有效但类型不对 → 403）', async () => {
-      const { app, project, runtimeKey } = setup()
+      const { app, project, runtimeKey } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/sourcemaps',
@@ -102,7 +102,7 @@ describe('HTTP 接口', () => {
     })
 
     it('上传密钥能上传 sourcemap', async () => {
-      const { app, db, project, uploadKey } = setup()
+      const { app, db, project, uploadKey } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/sourcemaps',
@@ -117,12 +117,12 @@ describe('HTTP 接口', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      const row = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM sourcemaps')
+      const row = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM sourcemaps')
       expect(row?.n).toBe(1)
     })
 
     it('性能事务上报', async () => {
-      const { app, db, project, runtimeKey } = setup()
+      const { app, db, project, runtimeKey } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: '/api/v1/performance',
@@ -145,12 +145,12 @@ describe('HTTP 接口', () => {
       })
 
       expect(response.statusCode).toBe(200)
-      const row = db.get<{ n: number }>('SELECT COUNT(*) AS n FROM transactions')
+      const row = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM transactions')
       expect(row?.n).toBe(1)
     })
 
     it('CORS 预检返回允许跨域的响应头', async () => {
-      const { app } = setup()
+      const { app } = await setup()
       const response = await app.inject({ method: 'OPTIONS', url: '/api/v1/collect' })
 
       expect(response.statusCode).toBe(204)
@@ -161,7 +161,7 @@ describe('HTTP 接口', () => {
 
   describe('管理接口', () => {
     it('缺 admin token → 401', async () => {
-      const { app, project } = setup()
+      const { app, project } = await setup()
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/projects/${project.id}/issues`
@@ -170,7 +170,7 @@ describe('HTTP 接口', () => {
     })
 
     it('admin token 不匹配 → 403', async () => {
-      const { app, project } = setup()
+      const { app, project } = await setup()
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/projects/${project.id}/issues`,
@@ -180,7 +180,7 @@ describe('HTTP 接口', () => {
     })
 
     it('创建项目返回两把密钥（只此一次可见）', async () => {
-      const { app, organization } = setup()
+      const { app, organization } = await setup()
       const response = await app.inject({
         method: 'POST',
         url: `/api/v1/organizations/${organization.id}/projects`,
@@ -196,7 +196,7 @@ describe('HTTP 接口', () => {
     })
 
     it('能查 Issue 列表与详情', async () => {
-      const { app, project, runtimeKey } = setup()
+      const { app, project, runtimeKey } = await setup()
 
       await app.inject({
         method: 'POST',
@@ -224,7 +224,7 @@ describe('HTTP 接口', () => {
     })
 
     it('能解决 Issue（Resolve with Release）', async () => {
-      const { app, project, runtimeKey } = setup()
+      const { app, project, runtimeKey } = await setup()
 
       await app.inject({
         method: 'POST',
@@ -253,7 +253,7 @@ describe('HTTP 接口', () => {
     })
 
     it('告警规则能创建和查询', async () => {
-      const { app, project } = setup()
+      const { app, project } = await setup()
 
       const created = await app.inject({
         method: 'POST',
@@ -273,7 +273,7 @@ describe('HTTP 接口', () => {
     })
 
     it('性能汇总接口可用', async () => {
-      const { app, project } = setup()
+      const { app, project } = await setup()
       const response = await app.inject({
         method: 'GET',
         url: `/api/v1/projects/${project.id}/performance`,

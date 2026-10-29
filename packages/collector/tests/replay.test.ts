@@ -54,22 +54,22 @@ function behaviorEvent(overrides: Partial<BehaviorEvent> = {}): BehaviorEvent {
 }
 
 describe('回放服务', () => {
-  it('回放先到时也会建出会话行（否则会话列表里看不到回放）', () => {
-    const { replay, project } = setupDb()
+  it('回放先到时也会建出会话行（否则会话列表里看不到回放）', async () => {
+    const { replay, project } = await setupDb()
 
     // 只写回放，不写行为汇总
-    replay.saveReplay(project.id, 'sess-1', { events: replayStream(), bytes: 120 })
+    await replay.saveReplay(project.id, 'sess-1', { events: replayStream(), bytes: 120 })
 
-    const sessions = replay.listSessions(project.id)
+    const sessions = await replay.listSessions(project.id)
     expect(sessions.total).toBe(1)
     expect(sessions.sessions[0].hasReplay).toBe(true)
     expect(sessions.sessions[0].replayEvents).toBe(3)
   })
 
-  it('行为先到、回放后到也能标记有回放', () => {
-    const { replay, project } = setupDb()
+  it('行为先到、回放后到也能标记有回放', async () => {
+    const { replay, project } = await setupDb()
 
-    replay.ingestBehavior(project.id, {
+    await replay.ingestBehavior(project.id, {
       appId: 'app',
       sdk: { name: '@vigil/sdk', version: '0.1.0' },
       events: [behaviorEvent()],
@@ -83,19 +83,19 @@ describe('回放服务', () => {
       }
     })
 
-    replay.saveReplay(project.id, 'sess-2', { events: replayStream(), bytes: 120 })
+    await replay.saveReplay(project.id, 'sess-2', { events: replayStream(), bytes: 120 })
 
-    const sessions = replay.listSessions(project.id)
+    const sessions = await replay.listSessions(project.id)
     expect(sessions.total).toBe(1)
     expect(sessions.sessions[0].hasReplay).toBe(true)
     expect(sessions.sessions[0].replayEvents).toBe(3)
   })
 
-  it('回放后到的行为汇总不会把回放标记冲掉', () => {
-    const { replay, project } = setupDb()
+  it('回放后到的行为汇总不会把回放标记冲掉', async () => {
+    const { replay, project } = await setupDb()
 
-    replay.saveReplay(project.id, 'sess-3', { events: replayStream(), bytes: 120 })
-    replay.upsertSession(project.id, {
+    await replay.saveReplay(project.id, 'sess-3', { events: replayStream(), bytes: 120 })
+    await replay.upsertSession(project.id, {
       sessionId: 'sess-3',
       startedAt: Date.now() - 5000,
       endedAt: Date.now(),
@@ -104,54 +104,54 @@ describe('回放服务', () => {
       path: ['/', '/cart']
     })
 
-    const sessions = replay.listSessions(project.id)
+    const sessions = await replay.listSessions(project.id)
     expect(sessions.sessions[0].hasReplay).toBe(true)
     expect(sessions.sessions[0].pageViews).toBe(2)
   })
 
-  it('同一会话存两份回放，只保留最新一份', () => {
-    const { replay, project } = setupDb()
+  it('同一会话存两份回放，只保留最新一份', async () => {
+    const { replay, project } = await setupDb()
 
-    replay.saveReplay(project.id, 'sess-4', { events: replayStream(), bytes: 120 })
+    await replay.saveReplay(project.id, 'sess-4', { events: replayStream(), bytes: 120 })
     const longer = [...replayStream(), { type: INCREMENTAL, timestamp: Date.now(), data: {} }]
-    replay.saveReplay(project.id, 'sess-4', { events: longer, bytes: 200 })
+    await replay.saveReplay(project.id, 'sess-4', { events: longer, bytes: 200 })
 
-    const stream = replay.getReplay(project.id, 'sess-4')
+    const stream = await replay.getReplay(project.id, 'sess-4')
     expect(stream).toHaveLength(4)
   })
 
-  it('回放事件流按 seq 顺序返回（播放器要求连续）', () => {
-    const { replay, project } = setupDb()
+  it('回放事件流按 seq 顺序返回（播放器要求连续）', async () => {
+    const { replay, project } = await setupDb()
 
-    replay.saveReplay(project.id, 'sess-5', { events: replayStream(), bytes: 120 })
+    await replay.saveReplay(project.id, 'sess-5', { events: replayStream(), bytes: 120 })
 
-    const stream = replay.getReplay(project.id, 'sess-5')
+    const stream = await replay.getReplay(project.id, 'sess-5')
     expect(stream.map((e) => e.type)).toEqual([META, FULL_SNAPSHOT, INCREMENTAL])
   })
 
-  it('会话错误数累加', () => {
-    const { replay, project } = setupDb()
+  it('会话错误数累加', async () => {
+    const { replay, project } = await setupDb()
 
-    replay.upsertSession(project.id, {
+    await replay.upsertSession(project.id, {
       sessionId: 'sess-6',
       startedAt: Date.now(),
       endedAt: Date.now(),
       durationMs: 1000,
       pageViews: 1
     })
-    replay.incrementSessionError(project.id, 'sess-6')
-    replay.incrementSessionError(project.id, 'sess-6')
+    await replay.incrementSessionError(project.id, 'sess-6')
+    await replay.incrementSessionError(project.id, 'sess-6')
 
-    const sessions = replay.listSessions(project.id)
+    const sessions = await replay.listSessions(project.id)
     expect(sessions.sessions[0].errorCount).toBe(2)
   })
 })
 
 describe('行为服务', () => {
-  it('行为事件入库并能按类型聚合', () => {
-    const { replay, project } = setupDb()
+  it('行为事件入库并能按类型聚合', async () => {
+    const { replay, project } = await setupDb()
 
-    replay.ingestBehavior(project.id, {
+    await replay.ingestBehavior(project.id, {
       appId: 'app',
       sdk: { name: '@vigil/sdk', version: '0.1.0' },
       events: [
@@ -160,16 +160,16 @@ describe('行为服务', () => {
       ]
     })
 
-    const summary = replay.summary(project.id)
+    const summary = await replay.summary(project.id)
     expect(summary.pageViews).toBe(1)
     expect(summary.sessions).toBe(1)
     expect(summary.clicks[0]?.name).toBe('button:去结算')
   })
 
-  it('行为事件带上会话归属', () => {
-    const { replay, project } = setupDb()
+  it('行为事件带上会话归属', async () => {
+    const { replay, project } = await setupDb()
 
-    replay.ingestBehavior(project.id, {
+    await replay.ingestBehavior(project.id, {
       appId: 'app',
       sdk: { name: '@vigil/sdk', version: '0.1.0' },
       events: [behaviorEvent({ type: 'route', name: '/checkout' })],
@@ -182,7 +182,7 @@ describe('行为服务', () => {
       }
     })
 
-    const events = replay.listSessionEvents(project.id, 'sess-7')
+    const events = await replay.listSessionEvents(project.id, 'sess-7')
     expect(events).toHaveLength(1)
     expect(events[0].type).toBe('route')
   })

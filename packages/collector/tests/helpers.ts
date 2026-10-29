@@ -15,8 +15,8 @@ import type { ErrorEvent, PerformanceEvent } from '@vigil/protocol'
  * 每个测试拿到一个**全新的内存库** —— 状态机测试要能精确断言
  * 「流转前是什么、流转后是什么」，数据库里有别的数据就会干扰。
  */
-export function setupDb() {
-  const db = openDb(':memory:')
+export async function setupDb() {
+  const db = await openDb(':memory:')
   const tenancy = new TenancyService(db)
   const artifacts = new ArtifactService(db)
   const issues = new IssueService(db, artifacts.sourcemapResolver)
@@ -25,8 +25,8 @@ export function setupDb() {
   const evaluator = new AlertEvaluator(db, alerting)
   const replay = new ReplayService(db)
 
-  const organization = tenancy.createOrganization('测试组织')
-  const created = tenancy.createProject({ organizationId: organization.id, name: '测试应用' })
+  const organization = await tenancy.createOrganization('测试组织')
+  const created = await tenancy.createProject({ organizationId: organization.id, name: '测试应用' })
 
   return {
     db,
