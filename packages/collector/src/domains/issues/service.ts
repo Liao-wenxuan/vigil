@@ -109,6 +109,11 @@ export interface IssueStats {
 }
 
 export class IssueService {
+  /** 数学函数可用性（探测一次就够，见 supportsMath） */
+  private mathSupport: boolean | undefined
+  /** 降级告警只喊一次，别把日志刷满 */
+  private mathWarned = false
+
   constructor(
     private readonly db: Db,
     private readonly resolver: SourcemapResolver
@@ -402,98 +407,223 @@ export class IssueService {
    *
    * 排序支持 `priority` —— 综合「相对量、绝对量、时近性、问题年龄」，
    * 而不是简单的按次数排。见 computePriority 的说明。
+   *
+   * ## 全部下推到 SQL
+   *
+   * 旧实现是「全量 SELECT * → 在 JS 里排序 → slice 分页」。三个问题：
+   *   1. `SELECT *` 没有 LIMIT，5000 个 issue 会把每行的 raw_stack 一起搬出来
+   *   2. 排序在内存里做，分页在内存里切，数据库完全没用上索引
+   *   3. `total` 和列表是两次不一致的扫描
+   *
+   * 现在过滤、聚合、排序、分页全在 SQL 里，只回传当前页。
+   *
+   * ## 窗口查询的两个加速点
+   *
+   * 1. **必要条件预过滤**：窗口内发生过事件 ⇒ `last_seen >= since`，
+   *    且 ⇒ `first_seen < until`。这两条走 `idx_issues_project_last`，
+   *    把候选集从「项目全部问题」砍到「窗口内可能发生的」，
+   *    它只是加速，正确性仍由 EXISTS 保证。
+   * 2. **窗口计数先限定 issue 集合**：CTE `scope` 先算出符合过滤条件的问题，
+   *    计数只在这些问题的事件里做 GROUP BY。
    */
   async listIssues(query: IssueQuery): Promise<{ total: number; issues: IssueRow[] }> {
-    const conditions: string[] = ['project_id = ?']
+    const limit = clampInt(query.limit, 50, 1, 200)
+    const offset = Math.max(0, Math.trunc(query.offset ?? 0))
+    const hasWindow = query.since !== undefined || query.until !== undefined
+
+    // ---- 过滤条件 ----
+    // 统一带 `i.` 前缀：窗口 CTE 里会出现同名子查询，不限定别名会让
+    // `project_id = ?` 变成歧义引用。
+    const conditions: string[] = ['i.project_id = ?']
     const params: unknown[] = [query.projectId]
 
     if (query.status) {
-      conditions.push('status = ?')
+      conditions.push('i.status = ?')
       params.push(query.status)
     }
     if (query.substatus) {
-      conditions.push('substatus = ?')
+      conditions.push('i.substatus = ?')
       params.push(query.substatus)
     }
     if (query.category) {
-      conditions.push('category = ?')
+      conditions.push('i.category = ?')
       params.push(query.category)
     }
     if (query.level) {
-      conditions.push('level = ?')
+      conditions.push('i.level = ?')
       params.push(query.level)
     }
+    if (query.environment) {
+      conditions.push('i.environment = ?')
+      params.push(query.environment)
+    }
+    if (query.release) {
+      conditions.push('i.release = ?')
+      params.push(query.release)
+    }
     if (query.assigneeId !== undefined) {
-      conditions.push('assignee_id = ?')
+      conditions.push('i.assignee_id = ?')
       params.push(query.assigneeId)
     }
     if (query.isBookmarked !== undefined) {
-      conditions.push('is_bookmarked = ?')
+      conditions.push('i.is_bookmarked = ?')
       params.push(query.isBookmarked ? 1 : 0)
     }
     if (query.query) {
-      conditions.push('(title LIKE ? OR message LIKE ? OR culprit LIKE ?)')
+      conditions.push('(i.title LIKE ? OR i.message LIKE ? OR i.culprit LIKE ?)')
       const like = `%${query.query}%`
       params.push(like, like, like)
     }
 
-    const where = conditions.join(' AND ')
-
-    // ---- 时间窗口 ----
-    //
-    // 给了窗口就只列「窗口内有发生」的问题 —— 这是监控面板的基本要求：
-    // 「过去 1 小时有没有新问题」和「历史上共有多少问题」是两个问题。
-    const hasWindow = query.since !== undefined || query.until !== undefined
-    const windowConditions = ['project_id = ?']
-    const windowParams: unknown[] = [query.projectId]
+    // ---- 窗口的必要条件（只管加速，不改语义）----
     if (query.since !== undefined) {
-      windowConditions.push('occurred_at >= ?')
-      windowParams.push(query.since)
+      conditions.push('i.last_seen >= ?')
+      params.push(query.since)
     }
     if (query.until !== undefined) {
-      windowConditions.push('occurred_at < ?')
-      windowParams.push(query.until)
+      conditions.push('i.first_seen < ?')
+      params.push(query.until)
     }
-    const windowWhere = windowConditions.join(' AND ')
 
-    const scopedWhere = hasWindow
-      ? `${where} AND id IN (SELECT issue_id FROM issue_events WHERE ${windowWhere})`
-      : where
+    const where = conditions.join(' AND ')
 
-    const total = (
-      (await this.db.get<{ n: number }>(`SELECT COUNT(*) AS n FROM issues WHERE ${scopedWhere}`, [
-        ...params,
-        ...(hasWindow ? windowParams : [])
-      ])) as { n: number }
-    ).n
+    const since = query.since ?? 0
+    const until = query.until ?? MAX_TIMESTAMP
 
-    const rows = await this.db.all<IssueRow>(`SELECT * FROM issues WHERE ${scopedWhere}`, [
-      ...params,
-      ...(hasWindow ? windowParams : [])
-    ])
+    // ---- 总数 ----
+    // 与列表用同一份 where，两个数字不可能对不上。
+    const totalRow = hasWindow
+      ? await this.db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM issues i
+           WHERE ${where}
+             AND EXISTS (
+               SELECT 1 FROM issue_events e
+               WHERE e.issue_id = i.id AND e.occurred_at >= ? AND e.occurred_at < ?
+             )`,
+          [...params, since, until]
+        )
+      : await this.db.get<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM issues i WHERE ${where}`,
+          params
+        )
+    const total = Number(totalRow?.n ?? 0)
 
-    // 窗口内的发生次数：一条 GROUP BY 就够，别按行去查
+    if (total === 0) return { total, issues: [] }
+
+    // ---- 排序 ----
+    let sort = query.sort ?? 'priority'
+    if (sort === 'priority' && !(await this.supportsMath())) {
+      // 老版本 SQLite 可能没编进数学函数。降级成 last_seen 而不是让整个列表 500 ——
+      // 但要在日志里喊一声，不然「排序顺序不对」会变成一个没人查得清的悬案。
+      if (!this.mathWarned) {
+        this.mathWarned = true
+        console.warn('[vigil] 当前 SQLite 未启用数学函数，priority 排序退化为 last_seen')
+      }
+      sort = 'last_seen'
+    }
+    const order = this.buildOrderBy(sort, hasWindow)
+
+    // ---- 当前页 ----
     if (hasWindow) {
-      const counts = await this.db.all<{ issue_id: number; n: number }>(
-        `SELECT issue_id, COUNT(*) AS n FROM issue_events
-         WHERE ${windowWhere} GROUP BY issue_id`,
-        windowParams
+      const rows = await this.db.all<IssueRow>(
+        `WITH scope AS (
+           SELECT i.id AS id FROM issues i WHERE ${where}
+         ),
+         wc AS (
+           SELECT e.issue_id AS issue_id, COUNT(*) AS n
+           FROM issue_events e
+           WHERE e.project_id = ?
+             AND e.occurred_at >= ?
+             AND e.occurred_at < ?
+             AND e.issue_id IN (SELECT id FROM scope)
+           GROUP BY e.issue_id
+         )
+         SELECT i.*, wc.n AS window_count
+         FROM issues i
+         INNER JOIN wc ON wc.issue_id = i.id
+         ORDER BY ${order.sql}
+         LIMIT ? OFFSET ?`,
+        [...params, query.projectId, since, until, ...order.params, limit, offset]
       )
-      const countMap = new Map(counts.map((row) => [row.issue_id, row.n]))
-      for (const row of rows) row.window_count = countMap.get(row.id) ?? 0
+      // PG 的 COUNT(*) 是 bigint，驱动会回传字符串 —— 统一收敛成数字，
+      // 否则面板上会出现「2 次」和「"2" 次」两种形态
+      for (const row of rows) row.window_count = Number(row.window_count ?? 0)
+      return { total, issues: rows }
     }
 
-    // 有窗口时按**窗口内**的次数排 —— 用户选了「最近 1 小时」，
-    // 排序就该按这段时间的量，而不是历史累计。
-    const sorted = sortIssues(
-      rows,
-      query.sort ?? 'priority',
-      hasWindow ? (row) => row.window_count ?? 0 : undefined
+    const rows = await this.db.all<IssueRow>(
+      `SELECT i.* FROM issues i WHERE ${where} ORDER BY ${order.sql} LIMIT ? OFFSET ?`,
+      [...params, ...order.params, limit, offset]
     )
-    const limit = query.limit ?? 50
-    const offset = query.offset ?? 0
+    return { total, issues: rows }
+  }
 
-    return { total, issues: sorted.slice(offset, offset + limit) }
+  /**
+   * 排序表达式。
+   *
+   * `priority` 的公式必须和 `computePriority` **逐项对齐** ——
+   * 两边算的不是同一个东西，就会出现「列表顺序和单条详情的手感不一致」。
+   * 单测里有一条断言专门比对两者的排序结果。
+   */
+  private buildOrderBy(
+    sort: NonNullable<IssueQuery['sort']>,
+    hasWindow: boolean
+  ): { sql: string; params: unknown[] } {
+    // 次级排序固定按 id：页码之间的顺序必须稳定，
+    // 否则翻页时同一条会重复出现或直接漏掉（优先级有大量并列）
+    const tie = ', i.id DESC'
+
+    switch (sort) {
+      case 'last_seen':
+        return { sql: `i.last_seen DESC${tie}`, params: [] }
+      case 'first_seen':
+        return { sql: `i.first_seen DESC${tie}`, params: [] }
+      case 'user_count':
+        return { sql: `i.user_count DESC${tie}`, params: [] }
+      case 'count':
+        // 有窗口就按窗口内的次数排：用户选了「最近 1 小时」，
+        // 排序就该按这段时间的量，而不是历史累计
+        return { sql: hasWindow ? `wc.n DESC${tie}` : `i.count DESC${tie}`, params: [] }
+      case 'priority':
+      default: {
+        const now = Date.now()
+        // PG 没有双参 MAX（那是聚合），标量最大是 GREATEST
+        const clamp = this.db.dialect === 'postgres' ? 'GREATEST' : 'MAX'
+        const sql = `(
+          LN(1.0 + i.count)
+          + 1.5 * LN(1.0 + i.user_count)
+          + 4 * EXP(-${clamp}(? - i.last_seen, 0) / 86400000.0)
+          + 3 * EXP(-${clamp}(? - i.first_seen, 0) / 259200000.0)
+          + CASE
+              WHEN i.status = 'archived' THEN -100
+              WHEN i.status = 'resolved' THEN -50
+              WHEN i.substatus = 'escalating' THEN 40
+              WHEN i.substatus = 'regressed' THEN 30
+              WHEN i.substatus = 'new' THEN 20
+              ELSE 0
+            END
+        ) DESC${tie}`
+        return { sql, params: [now, now] }
+      }
+    }
+  }
+
+  /**
+   * 当前库是否支持 LN/EXP。
+   *
+   * better-sqlite3 自带数学函数，PostgreSQL 原生就有；
+   * 但 SQLite 的数学函数是**编译期开关**，不能假设它一定在。
+   */
+  private async supportsMath(): Promise<boolean> {
+    if (this.mathSupport === undefined) {
+      try {
+        await this.db.get('SELECT LN(2) AS x')
+        this.mathSupport = true
+      } catch {
+        this.mathSupport = false
+      }
+    }
+    return this.mathSupport
   }
 
   /** Issue 详情 */
@@ -1161,6 +1291,21 @@ export function inferLevel(event: ErrorEvent): IssueLevel {
   return 'error'
 }
 
+/**
+ * 时间戳上界。
+ *
+ * 只给了 `since`（比如「最近 24 小时」）时，窗口右界是开放的 ——
+ * 用 `Number.MAX_SAFE_INTEGER` 顶上去，让区间条件保持两段式写法，
+ * 不必在 SQL 里拼「有没有 until」的两套分支。
+ */
+const MAX_TIMESTAMP = Number.MAX_SAFE_INTEGER
+
+/** 取整并夹在区间内 —— 直接信任 query 里的 limit 会让一次请求捞出全表 */
+function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, Math.trunc(value)))
+}
+
 /** 没有 eventId 时生成一个可去重的 ID */
 function generateEventId(event: ErrorEvent, occurredAt: number): string {
   return crypto
@@ -1185,6 +1330,13 @@ function generateEventId(event: ErrorEvent, occurredAt: number): string {
  *   - 时近性：越近越优先，指数衰减
  *   - 问题年龄：越新越优先
  *   - 状态：escalating / regressed 的优先级显著更高
+ *
+ * ## 这是「参考实现」，不是运行路径
+ *
+ * 真正的排序在 SQL 里算（见 `buildOrderBy`）—— 分页必须由数据库完成。
+ * 这个函数留着是因为它是**公式的可读版本**：
+ *   1. 单测拿它和 SQL 的排序结果逐条比对，两边一旦漂移立刻红
+ *   2. 想在别处（比如导出、CLI）复用同一套优先级时，不必再拼一遍 SQL
  */
 export function computePriority(issue: IssueRow, now: number): number {
   const volumeScore = Math.log1p(issue.count)
@@ -1225,6 +1377,10 @@ function statePriority(status: string, substatus: string): number {
  * `countOf` 让调用方决定「发生次数」看哪个口径：
  * 有时间窗口时看窗口内的次数，没有时看累计次数。
  * 两者混用会让「选了最近 1 小时却按历史总量排序」这种怪事发生。
+ *
+ * ⚠️ 列表接口**不走这里** —— 分页必须由数据库完成（见 `listIssues`）。
+ *    这个函数只给「已经在手里的一小批数据」排序用（导出、报表、测试）。
+ *    别拿它去排全表：那正是分页要解决的问题。
  */
 export function sortIssues(
   rows: IssueRow[],

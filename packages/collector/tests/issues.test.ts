@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { computePriority } from '../src/domains/issues/service.js'
 import { fp, makeEvent, setupDb } from './helpers.js'
 
 describe('Issue 服务', () => {
@@ -237,5 +238,144 @@ describe('Issue 服务', () => {
       expect(stats.unresolved).toBe(1)
       expect(stats.new).toBe(1)
     })
+  })
+})
+
+/**
+ * 列表分页与排序。
+ *
+ * 这一组守的是「面板在数据量大时还能用」：
+ * 过滤、排序、分页必须在 SQL 里完成，只回传当前页。
+ */
+describe('列表分页与排序', () => {
+  /** 造 n 个互不相同的问题，发生次数依次为 i % 4 + 1 */
+  async function seed(
+    n: number
+  ): Promise<{ issues: Awaited<ReturnType<typeof setupDb>>['issues']; projectId: number }> {
+    const ctx = await setupDb()
+    const base = Date.now() - 3600_000
+
+    for (let i = 0; i < n; i++) {
+      const occurrences = (i % 4) + 1
+      for (let k = 0; k < occurrences; k++) {
+        await ctx.issues.ingestEvent(
+          ctx.project.id,
+          makeEvent({ fingerprint: fp(`page-${i}`), occurredAt: base + i * 1000 + k })
+        )
+      }
+    }
+
+    return { issues: ctx.issues, projectId: ctx.project.id }
+  }
+
+  it('limit/offset 只取当前页，三页拼起来不重不漏', async () => {
+    const { issues, projectId } = await seed(25)
+
+    const page1 = await issues.listIssues({ projectId, limit: 10, offset: 0, sort: 'last_seen' })
+    const page2 = await issues.listIssues({ projectId, limit: 10, offset: 10, sort: 'last_seen' })
+    const page3 = await issues.listIssues({ projectId, limit: 10, offset: 20, sort: 'last_seen' })
+
+    expect(page1.total).toBe(25)
+    expect(page1.issues).toHaveLength(10)
+    expect(page3.issues).toHaveLength(5)
+
+    const ids = [...page1.issues, ...page2.issues, ...page3.issues].map((row) => row.id)
+    expect(ids).toHaveLength(25)
+    expect(new Set(ids).size).toBe(25)
+  })
+
+  it('优先级并列时靠 id 兜底，翻页仍然稳定', async () => {
+    const { issues, projectId } = await seed(12)
+
+    // 全部同样次数、同样时近性 → 优先级分数大量并列
+    const first = await issues.listIssues({ projectId, limit: 5, offset: 0, sort: 'priority' })
+    const second = await issues.listIssues({ projectId, limit: 5, offset: 5, sort: 'priority' })
+
+    const overlap = first.issues.filter((a) => second.issues.some((b) => b.id === a.id))
+    expect(overlap).toHaveLength(0)
+  })
+
+  it('limit 有上限，一次请求拉不走全表', async () => {
+    const { issues, projectId } = await seed(8)
+
+    const result = await issues.listIssues({ projectId, limit: 100_000 })
+    expect(result.issues.length).toBeLessThanOrEqual(200)
+    expect(result.total).toBe(8)
+  })
+
+  it('priority 排序结果与 computePriority 的 JS 实现一致', async () => {
+    const ctx = await setupDb()
+    const now = Date.now()
+
+    // 刻意让四个维度各不相同：量级、用户数、时近性、状态
+    const cases: Array<{ label: string; times: number; ageMs: number; users: number }> = [
+      { label: 'loud-old', times: 30, ageMs: 30 * 24 * 3600_000, users: 1 },
+      { label: 'few-recent', times: 2, ageMs: 60_000, users: 2 },
+      { label: 'many-users', times: 5, ageMs: 3600_000, users: 9 },
+      { label: 'single-new', times: 1, ageMs: 10_000, users: 0 }
+    ]
+
+    for (const item of cases) {
+      for (let k = 0; k < item.times; k++) {
+        await ctx.issues.ingestEvent(
+          ctx.project.id,
+          makeEvent({
+            fingerprint: fp(item.label),
+            occurredAt: now - item.ageMs + k,
+            userId: k < item.users ? `u-${item.label}-${k}` : undefined
+          })
+        )
+      }
+    }
+
+    const viaSql = await ctx.issues.listIssues({
+      projectId: ctx.project.id,
+      sort: 'priority',
+      limit: 50
+    })
+
+    const viaJs = [...viaSql.issues].sort(
+      (a, b) => computePriority(b, Date.now()) - computePriority(a, Date.now())
+    )
+
+    expect(viaSql.issues.map((row) => row.id)).toEqual(viaJs.map((row) => row.id))
+  })
+
+  it('有窗口时窗口计数跟着分页走，累计次数不被改写', async () => {
+    const ctx = await setupDb()
+    const now = Date.now()
+
+    // a：窗口内 1 次，历史上 3 次
+    for (let k = 0; k < 3; k++) {
+      await ctx.issues.ingestEvent(
+        ctx.project.id,
+        makeEvent({ fingerprint: fp('win-a'), occurredAt: now - 5 * 86400_000 + k })
+      )
+    }
+    // b：窗口内 4 次，另有一次在 10 天前（累计 5 次）
+    for (let k = 0; k < 4; k++) {
+      await ctx.issues.ingestEvent(
+        ctx.project.id,
+        makeEvent({ fingerprint: fp('win-b'), occurredAt: now - 3600_000 + k })
+      )
+    }
+    await ctx.issues.ingestEvent(
+      ctx.project.id,
+      makeEvent({ fingerprint: fp('win-b'), occurredAt: now - 10 * 86400_000 })
+    )
+
+    const page = await ctx.issues.listIssues({
+      projectId: ctx.project.id,
+      since: now - 2 * 3600_000,
+      sort: 'count',
+      limit: 1,
+      offset: 0
+    })
+
+    expect(page.total).toBe(1)
+    expect(page.issues[0].fingerprint).toBe(fp('win-b'))
+    expect(page.issues[0].window_count).toBe(4)
+    // 累计次数是另一个口径，不能被窗口计数覆盖
+    expect(page.issues[0].count).toBe(5)
   })
 })

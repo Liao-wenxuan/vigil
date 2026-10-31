@@ -272,13 +272,22 @@ function onEventReceived(
 ): TransitionResult {
   const count = state.count + 1
   const userCount = state.userCount + (event.userIsNew ? 1 : 0)
+
+  // ⚠️ `last_seen` 必须是**最大**的发生时间，不能直接赋值成这次的时间。
+  //
+  // 事件不保证按时间顺序到达：SDK 离线补报、网络重试、客户端时钟偏差，
+  // 都会让一条**更早**的事件后到。直接覆盖会把 last_seen 拖回过去 ——
+  // 后果是「刚刚还在报错的问题」在按最近发生排序时沉到列表底部，
+  // 而且窗口查询（last_seen >= since）会把真正在窗口内发生过的问题漏掉。
+  const lastSeen = Math.max(state.lastSeen, event.now)
+
   const changes: TransitionResult['changes'] = {
     count,
     userCount,
-    lastSeen: event.now
+    lastSeen
   }
   const activities: ActivityDraft[] = []
-  let next: IssueState = { ...state, count, userCount, lastSeen: event.now }
+  let next: IssueState = { ...state, count, userCount, lastSeen }
 
   if (state.status === 'resolved') {
     // 关键判定：**在解决它的那个版本或更早版本**出现 → 算噪音，不重新打开
