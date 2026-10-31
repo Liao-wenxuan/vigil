@@ -17,7 +17,6 @@
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { getErrorTrend, getIssueStats, listIssues } from '../api/client'
 import { categoryLabel } from '../format'
 import {

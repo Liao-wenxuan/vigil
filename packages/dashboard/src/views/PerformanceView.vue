@@ -9,7 +9,6 @@
  * 平均 200 毫秒看着挺好，实际上有一半用户等了三秒。
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 import { getErrorPerformance, getPerformanceSummary } from '../api/client'
 import {
   PANEL_CONTEXT,

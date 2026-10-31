@@ -9,7 +9,6 @@
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createAlertRule,
   createChannel,
@@ -308,13 +307,15 @@ onMounted(() => void load())
             <el-switch
               :model-value="row.enabled"
               @click.stop
-              @change="(value: string | number | boolean) => toggleRule(row, Boolean(value))"
+              @change="
+                (value: string | number | boolean) => toggleRule(row as AlertRule, Boolean(value))
+              "
             />
           </template>
         </el-table-column>
         <el-table-column label="操作" width="90" fixed="right">
           <template #default="{ row }">
-            <el-button link size="small" @click.stop="removeRule(row)">删除</el-button>
+            <el-button link size="small" @click.stop="removeRule(row as AlertRule)">删除</el-button>
           </template>
         </el-table-column>
         <template #empty>

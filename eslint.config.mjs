@@ -49,7 +49,12 @@ const browserGlobals = {
   // Playwright 的 page.evaluate() 里的代码跑在**浏览器**里，
   // 但 ESLint 按当前文件的语法环境解析 —— 这几个是浏览器全局
   getComputedStyle: 'readonly',
-  cancelAnimationFrame: 'readonly'
+  cancelAnimationFrame: 'readonly',
+  // Element Plus 的 API 是**自动导入**的（unplugin-auto-import）——
+  // TS 靠 auto-imports.d.ts 知道它们存在，ESLint 不会读那个文件，
+  // 所以这里要显式声明，否则 no-undef 会报「ElMessage 未定义」。
+  ElMessage: 'readonly',
+  ElMessageBox: 'readonly'
 }
 
 /** Node 全局 */

@@ -21,7 +21,6 @@
  * 所以挂载前先验一遍，缺快照就把话说清楚，而不是给一个空白框。
  */
 import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 import { VideoPause, VideoPlay } from '@element-plus/icons-vue'
 import type PlayerClass from 'rrweb-player'
 import 'rrweb-player/dist/style.css'
@@ -275,7 +274,7 @@ onUnmounted(() => destroyPlayer())
         </el-table-column>
         <el-table-column label="设备" min-width="180">
           <template #default="{ row }">
-            <span class="muted">{{ deviceLabel(row) }}</span>
+            <span class="muted">{{ deviceLabel(row as SessionRow) }}</span>
           </template>
         </el-table-column>
         <el-table-column label="开始时间" width="150">
@@ -314,7 +313,7 @@ onUnmounted(() => destroyPlayer())
               size="small"
               :icon="VideoPlay"
               :disabled="!row.hasReplay"
-              @click="openReplay(row)"
+              @click="openReplay(row as SessionRow)"
             >
               回放
             </el-button>

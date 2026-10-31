@@ -8,7 +8,7 @@
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
+import type { TableInstance } from 'element-plus'
 import { bulkIssueAction, listIssues } from '../api/client'
 import { categoryLabel, relativeTime } from '../format'
 import {
@@ -329,7 +329,7 @@ onMounted(() => void load())
 
         <el-table-column label="操作" width="80" fixed="right">
           <template #default="{ row }">
-            <el-button link size="small" @click.stop="openIssue(row)">详情</el-button>
+            <el-button link size="small" @click.stop="openIssue(row as IssueRow)">详情</el-button>
           </template>
         </el-table-column>
 

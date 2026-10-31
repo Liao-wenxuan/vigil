@@ -8,7 +8,6 @@
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import {
   archiveIssue,
   assignIssue,

@@ -22,7 +22,6 @@ import {
   VideoCamera,
   Warning
 } from '@element-plus/icons-vue'
-import { ElMessage } from 'element-plus'
 import { listOrganizations, listProjects } from '../api/client'
 import {
   DEFAULT_TIME_RANGE,

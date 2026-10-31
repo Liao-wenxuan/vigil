@@ -9,7 +9,6 @@
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createEnvironment,
   createOrganization,

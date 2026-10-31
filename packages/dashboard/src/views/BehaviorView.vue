@@ -13,7 +13,6 @@
  * 这个边界是设计出来的，不是没实现。
  */
 import { computed, inject, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 import { getBehaviorSummary } from '../api/client'
 import { PANEL_CONTEXT, resolveTimeRange, type BehaviorSummary } from '../types'
 import PanelSection from '../components/PanelSection.vue'
