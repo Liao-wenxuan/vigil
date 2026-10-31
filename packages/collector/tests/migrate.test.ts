@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { openDb } from '../src/infra/db/client.js'
 import type { Db } from '../src/infra/db/types.js'
 import { runMigrations, MIGRATIONS } from '../src/infra/db/migrate.js'
+import { fp, makeEvent, setupDb } from './helpers.js'
 
 /**
  * v1（老版本）的表结构。
@@ -200,5 +201,56 @@ describe('v1 → v2 数据迁移', () => {
     const row = await db.get<{ n: number }>('SELECT COUNT(*) AS n FROM issues')
     expect(row?.n).toBe(0)
     await db.close()
+  })
+})
+
+/**
+ * v3：用量计数器的回填。
+ *
+ * 这一段的关键在「**已经有数据的库**」上：计数器从 0 起步看起来能跑，
+ * 但等于给每个老项目凭空多发了一整个配额。这种错不会报错，只会让限额失效。
+ */
+describe('迁移 v3：用量计数器', () => {
+  it('老库里已摄入的事件条数被回填进计数器', async () => {
+    const { db, issues, project } = await setupDb()
+
+    for (let i = 0; i < 3; i++) {
+      await issues.ingestEvent(
+        project.id,
+        makeEvent({ fingerprint: fp(`old-${i}`), occurredAt: Date.now() + i })
+      )
+    }
+
+    // 退回到 v3 之前的状态：删表 + 删迁移记录
+    await db.exec('DROP TABLE project_usage')
+    await db.run('DELETE FROM schema_migrations WHERE version = 3')
+
+    const applied = await runMigrations(db, 'sqlite', MIGRATIONS)
+    expect(applied).toContain(3)
+
+    const row = await db.get<{ events_total: number }>(
+      'SELECT events_total FROM project_usage WHERE project_id = ?',
+      [project.id]
+    )
+    expect(Number(row?.events_total)).toBe(3)
+  })
+
+  it('没有任何事件的项目也会建出计数行（值为 0）', async () => {
+    const { db, tenancy, organization } = await setupDb()
+
+    const empty = await tenancy.createProject({
+      organizationId: organization.id,
+      name: '空项目'
+    })
+
+    await db.exec('DROP TABLE project_usage')
+    await db.run('DELETE FROM schema_migrations WHERE version = 3')
+    await runMigrations(db, 'sqlite', MIGRATIONS)
+
+    const row = await db.get<{ events_total: number }>(
+      'SELECT events_total FROM project_usage WHERE project_id = ?',
+      [empty.project.id]
+    )
+    expect(Number(row?.events_total)).toBe(0)
   })
 })

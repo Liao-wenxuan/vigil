@@ -45,6 +45,16 @@ export function bool(_dialect: Dialect): string {
   return 'INTEGER'
 }
 
+/**
+ * 单调计数器。
+ *
+ * SQLite 只有 INTEGER（8 字节，够到 9e18）；PG 必须写 BIGINT ——
+ * 用 INTEGER 会在 21 亿封顶，一个日活百万的应用一年就能撑爆。
+ */
+export function bigInt(dialect: Dialect): string {
+  return dialect === 'postgres' ? 'BIGINT' : 'INTEGER'
+}
+
 /** JSON */
 export function json(dialect: Dialect): string {
   return dialect === 'postgres' ? 'JSONB' : 'TEXT'

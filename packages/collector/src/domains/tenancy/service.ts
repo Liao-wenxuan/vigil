@@ -242,6 +242,16 @@ export class TenancyService {
       [projectId, 'upload', hashKey(uploadKey), '上传密钥', createdAt]
     )
 
+    // 用量行随项目一起建。
+    //
+    // 不能等到第一次上报才补建 —— 那一次要 `COUNT(*) issue_events` 才能知道起点，
+    // 正是这张计数表要消除的成本。新项目的起点永远是 0，没有历史要数。
+    await this.db.run(
+      `INSERT INTO project_usage (project_id, events_total, updated_at) VALUES (?, 0, ?)
+       ON CONFLICT DO NOTHING`,
+      [projectId, createdAt]
+    )
+
     return {
       project: await this.getProject(projectId),
       runtimeKey,

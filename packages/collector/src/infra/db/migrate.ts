@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { buildSchema } from './schema.js'
+import { buildSchema, projectUsageDdl } from './schema.js'
 import type { Db } from './types.js'
 import { ts as tsType, type Dialect } from './dialect.js'
 
@@ -343,6 +343,37 @@ export const MIGRATIONS: Migration[] = [
     name: 'migrate-legacy-v1-data',
     async up(db, dialect) {
       await migrateLegacyV1Data(db, dialect)
+    }
+  },
+  {
+    version: 3,
+    name: 'project-usage-counter',
+    async up(db, dialect) {
+      await db.exec(projectUsageDdl(dialect))
+
+      // 回放清理要靠时间索引，否则裁剪任务每次全表扫
+      await db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_replay_events_time ON replay_events(project_id, timestamp)'
+      )
+
+      // ⚠️ 老库必须回填，否则计数器从 0 起步，老项目会**凭空多出一整个配额**。
+      //    events_total 是「累计摄入量」，所以回填值就是现存事件数 ——
+      //    已经过期被删掉的部分无法还原，这是可接受的近似（只会让配额偏紧，不会偏松）。
+      const now = Date.now()
+      await db.run(
+        `INSERT INTO project_usage (project_id, events_total, updated_at)
+         SELECT project_id, COUNT(*), ? FROM issue_events WHERE 1 = 1 GROUP BY project_id
+         ON CONFLICT DO NOTHING`,
+        [now]
+      )
+
+      // 一条事件都没有的项目也要有行 —— 否则第一次上报还要走一次回填查询
+      await db.run(
+        `INSERT INTO project_usage (project_id, events_total, updated_at)
+         SELECT id, 0, ? FROM projects WHERE 1 = 1
+         ON CONFLICT DO NOTHING`,
+        [now]
+      )
     }
   }
 ]

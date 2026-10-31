@@ -210,6 +210,14 @@ export async function openPostgres(
  *
  * `pg` 是**可选依赖** —— 用 SQLite 部署的人不必装它。
  * 所以这里用动态 import：真的要用 PG 时才加载驱动。
+ *
+ * ## 为什么每个超时都要显式设
+ *
+ * `pg` 的默认值是「不超时」。一条写错的看板查询会永久占住一个连接；
+ * 连接池默认只有 10 个，占满之后**整个采集服务假死** ——
+ * 连 `/api/ready` 都连不上数据库，K8s 把 Pod 判成不健康再重启，
+ * 重启后流量照旧，于是循环。这类故障最难查的地方是：
+ * 日志里一条报错都没有，只有「服务突然不响应了」。
  */
 async function createPgPool(connectionString: string): Promise<PgPool> {
   try {
@@ -219,12 +227,60 @@ async function createPgPool(connectionString: string): Promise<PgPool> {
     }
     const PoolCtor = pg.default?.Pool ?? pg.Pool
     if (!PoolCtor) throw new Error('pg 模块没有导出 Pool')
-    return new PoolCtor({ connectionString })
+
+    const ssl = sslFromEnv()
+
+    return new PoolCtor({
+      connectionString,
+      // 连接数上限。给多了会顶穿 PG 的 max_connections（默认 100），
+      // 多副本时尤其要算总量：副本数 × max 必须小于 PG 的连接上限。
+      max: intFromEnv('VIGIL_PG_POOL_MAX', 10),
+      // 空闲连接回收，别长期占着 PG 的连接额度
+      idleTimeoutMillis: intFromEnv('VIGIL_PG_IDLE_TIMEOUT_MS', 30_000),
+      // 建连超时：PG 不可达时快速失败，而不是让请求挂住
+      connectionTimeoutMillis: intFromEnv('VIGIL_PG_CONNECT_TIMEOUT_MS', 5_000),
+      // 语句超时（服务端执行，PG 自己会杀掉）
+      statement_timeout: intFromEnv('VIGIL_PG_STATEMENT_TIMEOUT_MS', 15_000),
+      // 客户端超时：兜住「连接还在但不再回包」这种半死状态
+      query_timeout: intFromEnv('VIGIL_PG_QUERY_TIMEOUT_MS', 20_000),
+      // 出事时能在 pg_stat_activity 里认出是谁连的
+      application_name: 'vigil-collector',
+      ...(ssl ? { ssl } : {})
+    })
   } catch (error) {
     throw new Error(
       `无法加载 pg 驱动（PostgreSQL 支持需要它）：${error instanceof Error ? error.message : String(error)}`
     )
   }
+}
+
+/** 读正整数环境变量，缺失或非法时用默认值 */
+function intFromEnv(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (!raw) return fallback
+  const value = Number(raw)
+  return Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback
+}
+
+/**
+ * TLS 配置。
+ *
+ * 云数据库（RDS / 云厂商 PG）基本都强制 TLS，
+ * 但内网自建的 PG 常常没配证书 —— 所以给三档，别让人为了连通性
+ * 去改代码。
+ *
+ *   VIGIL_PG_SSL 缺失 / disable   → 不开 TLS
+ *   VIGIL_PG_SSL=no-verify        → 加密但不校验证书（自签证书）
+ *   VIGIL_PG_SSL=verify           → 加密且校验证书（生产该用这个）
+ */
+function sslFromEnv(): false | { rejectUnauthorized: boolean } | undefined {
+  const mode = (process.env.VIGIL_PG_SSL ?? '').toLowerCase()
+  if (!mode || mode === 'disable' || mode === 'false') return undefined
+  if (mode === 'verify' || mode === 'require' || mode === 'true') {
+    return { rejectUnauthorized: true }
+  }
+  // no-verify 及其它非空取值：加密但跳过证书校验
+  return { rejectUnauthorized: false }
 }
 
 /** 命名参数转成位置参数 —— PG 不支持 SQLite 的命名参数 */
