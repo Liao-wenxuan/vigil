@@ -1,10 +1,10 @@
-import crypto from 'node:crypto'
 import type { Db } from '../../infra/db/client.js'
 import { fromBool, readJson, writeJson } from '../../infra/db/dialect.js'
 import { AppError } from '../../shared/errors.js'
 import { pathOf } from '../../shared/url.js'
 import { parseStack } from '../artifacts/parse-stack.js'
 import { SourcemapResolver, type ResolvedFrame } from '../artifacts/sourcemap.js'
+import { generateEventId } from './event-identity.js'
 import {
   transition,
   type ActivityDraft,
@@ -1304,17 +1304,6 @@ const MAX_TIMESTAMP = Number.MAX_SAFE_INTEGER
 function clampInt(value: number | undefined, fallback: number, min: number, max: number): number {
   if (value === undefined || !Number.isFinite(value)) return fallback
   return Math.min(max, Math.max(min, Math.trunc(value)))
-}
-
-/** 没有 eventId 时生成一个可去重的 ID */
-function generateEventId(event: ErrorEvent, occurredAt: number): string {
-  return crypto
-    .createHash('sha256')
-    .update(
-      `${event.fingerprint}|${occurredAt}|${event.userId ?? ''}|${event.sessionId ?? ''}|${event.url ?? ''}`
-    )
-    .digest('hex')
-    .slice(0, 32)
 }
 
 /**
