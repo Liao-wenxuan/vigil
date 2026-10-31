@@ -1,4 +1,30 @@
-import { bool, json, longText, pk, text, ts, type Dialect } from './dialect.js'
+import { bigInt, bool, json, longText, pk, text, ts, type Dialect } from './dialect.js'
+
+/**
+ * 项目用量计数表。
+ *
+ * ## 为什么单独一张表，而不是 COUNT(*) issue_events
+ *
+ * 配额检查在**每一个上报请求**的热路径上，而 issue_events 会长到百万行 ——
+ * `COUNT(*)` 是不可接受的（全表或全索引扫描，随数据量线性变慢）。
+ * 一次主键点查 + 一次 UPSERT，成本是常数。
+ *
+ * ## 为什么是单调递增
+ *
+ * 保留策略会删掉过期事件。如果配额看的是「库里现存多少行」，
+ * 项目只要等 retention 跑完，配额就自己回来了 —— 那配额就是假的。
+ *
+ * 单独抽成函数是因为**迁移也要用同一份 DDL**：
+ * 两边各写一份，迟早漂移成一新一旧，而那种 bug 只在老库上出现。
+ */
+export function projectUsageDdl(dialect: Dialect): string {
+  return `CREATE TABLE IF NOT EXISTS project_usage (
+  project_id INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+  -- 累计摄入的事件条数（单调递增，不受保留策略影响）
+  events_total ${bigInt(dialect)} NOT NULL DEFAULT 0,
+  updated_at ${ts(dialect)} NOT NULL
+);`
+}
 
 /**
  * 数据表结构（v2）。
@@ -77,6 +103,9 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at ${TS} NOT NULL,
   UNIQUE (organization_id, slug)
 );
+
+-- 配额判定用的累计计数器（见 projectUsageDdl 的说明）
+${projectUsageDdl(dialect)}
 
 CREATE TABLE IF NOT EXISTS project_members (
   project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -423,6 +452,8 @@ CREATE TABLE IF NOT EXISTS replay_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_replay_events_session ON replay_events(project_id, session_id, seq);
+-- 保留策略按时间裁剪：没有这条索引，清理任务会全表扫
+CREATE INDEX IF NOT EXISTS idx_replay_events_time   ON replay_events(project_id, timestamp);
 
 -- 行为事件：PV / 路由 / 点击
 CREATE TABLE IF NOT EXISTS behavior_events (

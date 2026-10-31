@@ -10,22 +10,24 @@ import { defaultDbPath } from './infra/db/client.js'
  *   VIGIL_DB_PATH     数据库路径，默认 ./data/vigil.db
  *   VIGIL_ADMIN_TOKEN 管理端 token。不设置就随机生成并打印一次
  *   VIGIL_ALERT_INTERVAL 告警评估间隔（秒），默认 60；设 0 关闭
+ *   VIGIL_RETENTION_INTERVAL 保留策略清理间隔（秒），默认 3600；设 0 关闭
  *   LOG_LEVEL         'silent' 关闭日志
  */
 const port = Number(process.env.PORT ?? 4318)
 const host = process.env.HOST ?? '0.0.0.0'
 const adminTokenGenerated = !process.env.VIGIL_ADMIN_TOKEN
 
-const { app, db, evaluator } = await createAppFromEnv()
+const { app, db, evaluator, retention, adminToken } = await createAppFromEnv()
 
 try {
   await app.listen({ port, host })
   console.log(`[vigil] 采集服务已启动 http://${host}:${port}`)
   console.log(`[vigil] 数据库 ${defaultDbPath()}`)
   if (adminTokenGenerated) {
-    console.log(
-      `[vigil] 管理 token（本次随机生成，重启后会变）：${process.env.VIGIL_ADMIN_TOKEN ?? ''}`
-    )
+    // ⚠️ 必须打印**实际生效的那个** token。
+    //    之前打的是 process.env，随机生成的场景下这行是空的 ——
+    //    用户没设环境变量，就永远登不进去，而且日志看起来一切正常。
+    console.log(`[vigil] 管理 token（本次随机生成，重启后会变）：${adminToken}`)
   }
 } catch (error) {
   app.log.error(error)
@@ -50,6 +52,32 @@ if (alertIntervalSeconds > 0) {
   }, alertIntervalSeconds * 1000)
 
   // 不要因为定时器而阻止进程退出
+  timer.unref?.()
+}
+
+// ---- 保留策略循环 ----
+// 数据不裁剪就没有上界。启动先跑一轮（进程重启后立刻对齐），之后每小时一次。
+const retentionIntervalSeconds = Number(process.env.VIGIL_RETENTION_INTERVAL ?? 3600)
+
+if (retentionIntervalSeconds > 0) {
+  const runRetention = () =>
+    retention
+      .sweep()
+      .then((report) => {
+        // 上一轮还没跑完，本轮跳过 —— 这是正常情况，不刷日志
+        if (report.skipped) return
+        const total = Object.values(report.deleted).reduce((sum, n) => sum + n, 0)
+        if (total > 0) {
+          console.log(
+            `[vigil] 保留策略：${report.projects} 个项目，删除 ${total} 条过期数据（${report.durationMs}ms）`
+          )
+        }
+      })
+      .catch((error) => console.error('[vigil] 保留策略执行失败:', error))
+
+  void runRetention()
+
+  const timer = setInterval(runRetention, retentionIntervalSeconds * 1000)
   timer.unref?.()
 }
 

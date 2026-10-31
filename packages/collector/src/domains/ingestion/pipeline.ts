@@ -5,6 +5,7 @@ import type { IssueService } from '../issues/service.js'
 import type { PerformanceService } from '../performance/service.js'
 import type { ArtifactService } from '../artifacts/service.js'
 import type { ReplayService } from '../replay/service.js'
+import type { UsageService } from '../usage/service.js'
 import type {
   BehaviorEnvelope,
   CollectEnvelope,
@@ -38,7 +39,8 @@ export class IngestionPipeline {
     private readonly issues: IssueService,
     private readonly performance: PerformanceService,
     private readonly artifacts: ArtifactService,
-    private readonly replay: ReplayService
+    private readonly replay: ReplayService,
+    private readonly usage: UsageService
   ) {}
 
   /**
@@ -48,7 +50,7 @@ export class IngestionPipeline {
     const events = envelope.events ?? []
     if (events.length === 0) return { accepted: 0, dropped: 0 }
 
-    await this.checkQuota(project, events.length)
+    await this.usage.assertWithinQuota(project, events.length)
 
     const ids: Record<string, number> = {}
     let accepted = 0
@@ -67,6 +69,13 @@ export class IngestionPipeline {
         await this.replay.incrementSessionError(project.id, event.sessionId)
       }
     }
+
+    // 用量按**受理的条数**累加（含被 event_id 去重的事件 —— 上报即消耗配额）。
+    //
+    // ⚠️ 这里不在事务里：万一循环中途抛错，本条请求的用量会少记。
+    //    这是有意的取舍 —— 配额是软闸门（防止打爆存储，不是计费单），
+    //    为它把 200 条事件塞进一个大事务，代价远大于收益。
+    await this.usage.addEvents(project.id, accepted)
 
     return { accepted, dropped: 0, ids }
   }
@@ -89,7 +98,7 @@ export class IngestionPipeline {
     const transactions = envelope.transactions ?? []
     if (transactions.length === 0) return { accepted: 0, dropped: 0 }
 
-    await this.checkQuota(project, transactions.length)
+    await this.usage.assertWithinQuota(project, transactions.length)
 
     const context = {
       environmentId: await this.resolveEnvironmentId(
@@ -123,28 +132,6 @@ export class IngestionPipeline {
       release: body.release,
       files: body.files
     })
-  }
-
-  /**
-   * 配额检查。
-   *
-   * 配额按**已摄入事件总数**算，不是按 issue 数 ——
-   * issue 数只反映「有多少类问题」，不反映「占了多少存储」。
-   */
-  private async checkQuota(project: ProjectRow, incoming: number): Promise<void> {
-    if (!project.event_quota || project.event_quota <= 0) return
-
-    const row = await this.db.get<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ?',
-      [project.id]
-    )
-
-    const used = row?.n ?? 0
-    if (used + incoming > project.event_quota) {
-      throw AppError.tooManyRequests(
-        `项目 ${project.slug} 的事件配额已用尽（${used}/${project.event_quota}）`
-      )
-    }
   }
 
   private async resolveEnvironmentId(

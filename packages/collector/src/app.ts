@@ -10,6 +10,8 @@ import { ArtifactService } from './domains/artifacts/service.js'
 import { AlertingService } from './domains/alerting/service.js'
 import { AlertEvaluator } from './domains/alerting/evaluator.js'
 import { ReplayService } from './domains/replay/service.js'
+import { RetentionService } from './domains/retention/service.js'
+import { UsageService } from './domains/usage/service.js'
 import { TrendService } from './domains/trend/service.js'
 import { IngestionPipeline } from './domains/ingestion/pipeline.js'
 import { AppError } from './shared/errors.js'
@@ -51,6 +53,8 @@ export interface BuiltApp {
   replay: ReplayService
   ingestion: IngestionPipeline
   trend: TrendService
+  usage: UsageService
+  retention: RetentionService
 }
 
 export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
@@ -71,7 +75,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const alerting = new AlertingService(db)
   const evaluator = new AlertEvaluator(db, alerting)
   const replay = new ReplayService(db)
-  const ingestion = new IngestionPipeline(db, issues, performance, artifacts, replay)
+  const usage = new UsageService(db)
+  const retention = new RetentionService(db)
+  const ingestion = new IngestionPipeline(db, issues, performance, artifacts, replay, usage)
   const trendService = new TrendService(db)
 
   const limiter = new TokenBucketLimiter(
@@ -398,11 +404,14 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
 
   app.get('/api/v1/projects/:projectId', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
+    const project = await tenancy.getProject(Number(projectId))
     return {
       ok: true,
-      project: await tenancy.getProject(Number(projectId)),
+      project,
       environments: await tenancy.listEnvironments(Number(projectId)),
-      releases: await tenancy.listReleases(Number(projectId))
+      releases: await tenancy.listReleases(Number(projectId)),
+      // 用量给面板一个可观测的配额读数 —— 否则「配额满了」只能从 429 里猜
+      usage: await usage.snapshot(project)
     }
   })
 
@@ -954,6 +963,19 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     return { ok: true, incidents: await alerting.listIncidents(Number(projectId)) }
   })
 
+  // ---- 运维 ----
+
+  /**
+   * 手动触发一轮保留策略清理。
+   *
+   * 定时任务每小时跑一次，但这个接口依然必要：
+   *   - 运维要能在「磁盘快满」时立刻裁一次，而不是等下一个整点
+   *   - 测试要用它验证「真的删掉了」，而不是验证「代码被调用了」
+   */
+  app.post('/api/v1/maintenance/retention', admin, async () => {
+    return { ok: true, result: await retention.sweep() }
+  })
+
   app.post('/api/v1/projects/:projectId/alerts/evaluate', admin, async (request) => {
     const { projectId } = request.params as { projectId: string }
     const result = await evaluator.evaluateProject(Number(projectId))
@@ -995,7 +1017,9 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     evaluator,
     replay,
     ingestion,
-    trend: trendService
+    trend: trendService,
+    usage,
+    retention
   }
 }
 
@@ -1054,9 +1078,11 @@ function isIngestPath(url: string): boolean {
  * 所以生产部署只要设 `DATABASE_URL` 就行，领域代码一行不用改 ——
  * 两种库走的是同一套方言层（`infra/db/dialect.ts`）。
  */
-export async function createAppFromEnv(): Promise<BuiltApp & { db: Db }> {
+export async function createAppFromEnv(): Promise<BuiltApp & { db: Db; adminToken: string }> {
   const databaseUrl = process.env.DATABASE_URL
   const db = databaseUrl ? await openPostgres(databaseUrl) : await openDb(defaultDbPath())
   const adminToken = process.env.VIGIL_ADMIN_TOKEN ?? crypto.randomBytes(24).toString('hex')
-  return { ...(await buildApp({ db, adminToken })), db }
+  // 把生效的 token 一并交出去 —— 随机生成时启动日志要打这个值，
+  // 否则用户拿不到任何可用的凭据
+  return { ...(await buildApp({ db, adminToken })), db, adminToken }
 }
