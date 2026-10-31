@@ -329,6 +329,20 @@ schema 里所有时间列都要用 `ts(dialect)`（SQLite→INTEGER，PG→BIGIN
 
 ⚠️ 生产上**必须设** —— 不设的话多副本各写各的本地文件，数据就分裂了。
 
+### 25. SQLite 预编译语句缓存：DDL 只能走 `exec()`
+
+`SqliteDb` 缓存预编译语句（`db.prepare()` 每次都重新编译 SQL，
+摄入热路径上这是纯浪费；缓存后 0.14 ms/条 → 0.031 ms/条，**快 4.5 倍**）。
+
+两条约束：
+
+1. **DDL 必须走 `exec()`** —— DDL 会让已缓存语句的编译结果失效，
+   所以 `exec()` 里先 `statements.clear()` 再执行，顺序不能反。
+   ⚠️ 绕过 `exec()` 直接改表结构，缓存里会留着针对旧表结构的语句。
+2. **语句不能重入** —— better-sqlite3 在语句执行中再执行同一条会报
+   "This statement is busy executing a query"。命中缓存时先看 `busy`，
+   忙就临时准备一条新的（不进缓存）。
+
 ---
 
 ## 数据层
