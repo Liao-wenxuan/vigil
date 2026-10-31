@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { openDb } from '../src/infra/db/client.js'
+import type { Db } from '../src/infra/db/types.js'
 import { TenancyService } from '../src/domains/tenancy/service.js'
 import { IssueService } from '../src/domains/issues/service.js'
 import { ArtifactService } from '../src/domains/artifacts/service.js'
@@ -15,8 +16,9 @@ import type { ErrorEvent, PerformanceEvent } from '@vigil/protocol'
  * 每个测试拿到一个**全新的内存库** —— 状态机测试要能精确断言
  * 「流转前是什么、流转后是什么」，数据库里有别的数据就会干扰。
  */
-export async function setupDb() {
-  const db = await openDb(':memory:')
+export async function setupDb(options: { transformDb?: (db: Db) => Db } = {}) {
+  const raw = await openDb(':memory:')
+  const db = options.transformDb ? options.transformDb(raw) : raw
   const tenancy = new TenancyService(db)
   const artifacts = new ArtifactService(db)
   const issues = new IssueService(db, artifacts.sourcemapResolver)
@@ -41,6 +43,45 @@ export async function setupDb() {
     project: created.project,
     runtimeKey: created.runtimeKey,
     uploadKey: created.uploadKey
+  }
+}
+
+/** 读查询计数 —— 用来断言「查询次数不随数据量/规则数增长」 */
+export interface ReadCounter {
+  reads: number
+}
+
+/**
+ * 包一层 Db，统计**读**查询（get / all）。
+ *
+ * 写查询不算 —— 告警落库本来就一条规则一次。
+ */
+export function countingDb(inner: Db, counter: ReadCounter): Db {
+  return {
+    dialect: inner.dialect,
+    async exec(sql) {
+      return inner.exec(sql)
+    },
+    async all(sql, params) {
+      counter.reads++
+      return inner.all(sql, params)
+    },
+    async get(sql, params) {
+      counter.reads++
+      return inner.get(sql, params)
+    },
+    async run(sql, params) {
+      return inner.run(sql, params)
+    },
+    async insert(sql, params) {
+      return inner.insert(sql, params)
+    },
+    async transaction(fn) {
+      return inner.transaction(fn)
+    },
+    async close() {
+      return inner.close()
+    }
   }
 }
 

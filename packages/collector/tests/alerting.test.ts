@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fp, makeEvent, setupDb } from './helpers.js'
+import { countingDb, fp, makeEvent, setupDb, type ReadCounter } from './helpers.js'
 
 describe('告警引擎', () => {
   describe('规则评估', () => {
@@ -45,6 +45,43 @@ describe('告警引擎', () => {
 
       const result = await evaluator.evaluateProject(project.id)
       expect(result.triggered).toBe(0)
+    })
+
+    it('同类型的规则只跑一次相同的查询', async () => {
+      // ⚠️ 这条断言的是**查询次数**，不是触发结果 ——
+      // 因为「评估一轮要查多少次库」才是规模上来后真正会痛的地方。
+      //
+      // 5 条同样窗口的 lcp 规则，如果每条各查一次，
+      // 读查询数会从 2 涨到 6；加了缓存之后应该**一条都不涨**。
+      const counter: ReadCounter = { reads: 0 }
+      const { alerting, evaluator, project } = await setupDb({
+        transformDb: (db) => countingDb(db, counter)
+      })
+
+      const makeLcpRule = (name: string) =>
+        alerting.createRule({
+          projectId: project.id,
+          name,
+          type: 'metric.lcp_p95',
+          // 阈值给到极高 —— 不触发，就不会去写告警记录，
+          // 读查询数才干净可比
+          threshold: 1_000_000,
+          windowSeconds: 300
+        })
+
+      await makeLcpRule('LCP 1')
+      const beforeOne = counter.reads
+      await evaluator.evaluateProject(project.id)
+      const readsOne = counter.reads - beforeOne
+
+      for (let i = 2; i <= 5; i++) await makeLcpRule(`LCP ${i}`)
+      const beforeFive = counter.reads
+      await evaluator.evaluateProject(project.id)
+      const readsFive = counter.reads - beforeFive
+
+      expect(readsFive).toBe(readsOne)
+      // 顺带钉住绝对值：规则列表 1 次 + lcp 查询 1 次
+      expect(readsFive).toBe(2)
     })
 
     it('告警去重：同一窗口内不重复触发（避免告警疲劳）', async () => {

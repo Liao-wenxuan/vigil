@@ -53,6 +53,39 @@ export class AlertEvaluator {
     private readonly alerting: AlertingService
   ) {}
 
+  /**
+   * 单轮评估内的查询缓存。
+   *
+   * ## 为什么需要
+   *
+   * 同类型的每条规则跑的是**完全相同**的查询：
+   *   - 3 条 `metric.lcp_p95` 规则 → 3 次同样的 `SELECT lcp FROM transactions`
+   *   - 3 条 `issue.*` 规则      → 3 次同样的 `loadIssues`
+   *
+   * 规则一多，评估一轮的查询数就线性涨。
+   *
+   * ## 缓存键为什么带 `now`
+   *
+   * 键里有 `now`，所以**不同轮次不会互相污染** ——
+   * 即使两轮评估重叠（定时器 + 手动触发），也不会读到对方窗口的数据。
+   *
+   * 每轮评估开始时清空，避免无限增长。
+   */
+  private readonly reads = new Map<string, Promise<unknown>>()
+
+  /**
+   * 走缓存的查询。
+   *
+   * 缓存的是 **Promise** 而不是结果 —— 这样**并发的相同查询也只会跑一次**。
+   */
+  private async cached<T>(key: string, load: () => Promise<T>): Promise<T> {
+    const hit = this.reads.get(key)
+    if (hit) return hit as T
+    const promise = load()
+    this.reads.set(key, promise)
+    return promise
+  }
+
   /** 评估所有项目的所有规则 */
   async evaluateAll(now = Date.now()): Promise<EvaluationResult> {
     const result: EvaluationResult = { evaluated: 0, triggered: 0, skipped: 0, failed: 0 }
@@ -77,6 +110,8 @@ export class AlertEvaluator {
     const result: EvaluationResult = { evaluated: 0, triggered: 0, skipped: 0, failed: 0 }
 
     const rules = (await this.alerting.listRules(projectId)).filter((rule) => rule.enabled)
+    // 每轮清空：缓存只在单轮内有效
+    this.reads.clear()
 
     for (const rule of rules) {
       result.evaluated++
@@ -128,7 +163,7 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const subjects = (await this.loadIssues(rule.projectId, windowStart))
+    const subjects = (await this.loadIssues(rule.projectId, windowStart, now))
       .filter((issue) => issue.status === 'unresolved')
       .filter((issue) => issue.windowCount > 0)
       .filter((issue) => this.matchesConditions(issue, rule.conditions))
@@ -155,7 +190,7 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const subjects = (await this.loadIssues(rule.projectId, windowStart))
+    const subjects = (await this.loadIssues(rule.projectId, windowStart, now))
       .filter((issue) => issue.windowCount >= rule.threshold)
       .filter((issue) => this.matchesConditions(issue, rule.conditions))
 
@@ -179,7 +214,7 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const subjects = (await this.loadIssues(rule.projectId, windowStart))
+    const subjects = (await this.loadIssues(rule.projectId, windowStart, now))
       .filter((issue) => issue.windowCount > 0)
       .filter((issue) => this.matchesConditions(issue, rule.conditions))
 
@@ -213,9 +248,11 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const row = await this.db.get<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ? AND occurred_at >= ?',
-      [rule.projectId, windowStart]
+    const row = await this.cached(`errorCount|${now}|${rule.projectId}|${windowStart}`, () =>
+      this.db.get<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ? AND occurred_at >= ?',
+        [rule.projectId, windowStart]
+      )
     )
     const count = row?.n ?? 0
     if (count < rule.threshold) return 0
@@ -236,16 +273,20 @@ export class AlertEvaluator {
     windowStart: number,
     now: number
   ): Promise<number> {
-    const errors = await this.db.get<{ n: number }>(
-      'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ? AND occurred_at >= ?',
-      [rule.projectId, windowStart]
+    const errors = await this.cached(`errorCount|${now}|${rule.projectId}|${windowStart}`, () =>
+      this.db.get<{ n: number }>(
+        'SELECT COUNT(*) AS n FROM issue_events WHERE project_id = ? AND occurred_at >= ?',
+        [rule.projectId, windowStart]
+      )
     )
     const errorCount = errors?.n ?? 0
 
     // 分母用会话数（去重的 session_id）
-    const sessions = await this.db.get<{ n: number }>(
-      'SELECT COUNT(DISTINCT session_id) AS n FROM transactions WHERE project_id = ? AND started_at >= ?',
-      [rule.projectId, windowStart]
+    const sessions = await this.cached(`sessions|${now}|${rule.projectId}|${windowStart}`, () =>
+      this.db.get<{ n: number }>(
+        'SELECT COUNT(DISTINCT session_id) AS n FROM transactions WHERE project_id = ? AND started_at >= ?',
+        [rule.projectId, windowStart]
+      )
     )
     const sessionCount = sessions?.n ?? 0
 
@@ -267,9 +308,11 @@ export class AlertEvaluator {
   // metric.lcp_p95 —— LCP P95 超阈值
   // ==========================================================
   private async evaluateLcpP95(rule: AlertRule, windowStart: number, now: number): Promise<number> {
-    const rows = await this.db.all<{ lcp: number | null }>(
-      'SELECT lcp FROM transactions WHERE project_id = ? AND started_at >= ? AND lcp IS NOT NULL',
-      [rule.projectId, windowStart]
+    const rows = await this.cached(`lcp|${now}|${rule.projectId}|${windowStart}`, () =>
+      this.db.all<{ lcp: number | null }>(
+        'SELECT lcp FROM transactions WHERE project_id = ? AND started_at >= ? AND lcp IS NOT NULL',
+        [rule.projectId, windowStart]
+      )
     )
     if (rows.length === 0) return 0
 
@@ -290,10 +333,16 @@ export class AlertEvaluator {
 
   /**
    * 载入窗口内有发生的问题，并附上窗口内计数。
+   *
+   * ⚠️ `now` 参与缓存键 —— 不同轮次的窗口不同，不能共用。
    */
-  private async loadIssues(projectId: number, windowStart: number): Promise<IssueSubject[]> {
-    return (
-      await this.db.all<{
+  private async loadIssues(
+    projectId: number,
+    windowStart: number,
+    now: number
+  ): Promise<IssueSubject[]> {
+    const rows = await this.cached(`issues|${now}|${projectId}|${windowStart}`, () =>
+      this.db.all<{
         id: number
         short_id: string
         fingerprint: string
@@ -318,7 +367,9 @@ export class AlertEvaluator {
          WHERE i.project_id = ?`,
         [windowStart, projectId]
       )
-    ).map((row) => ({
+    )
+
+    return rows.map((row) => ({
       id: row.id,
       shortId: row.short_id,
       fingerprint: row.fingerprint,
