@@ -52,8 +52,36 @@ export function stripBuildHash(filename: string): string {
 }
 
 export class SourcemapResolver {
-  /** TraceMap 缓存：projectId|release|baseName → TraceMap */
-  private readonly cache = new Map<string, TraceMap>()
+  /**
+   * 命中的 TraceMap 缓存：projectId|release|baseName → TraceMap
+   *
+   * ⚠️ TraceMap 是**重对象**（整个 sourcemap 解析后的结构），
+   *    所以数量必须封顶 —— 否则一个上传了几百个 chunk map 的项目
+   *    会把内存吃光。封顶后最坏情况只是多查一次库。
+   */
+  private readonly hitCache = new Map<string, TraceMap>()
+
+  /**
+   * 未命中缓存：projectId|release|baseName → true
+   *
+   * ## 为什么必须缓存「没有」
+   *
+   * 没上传 sourcemap 的项目**很常见**（只上传了部分产物、
+   * 或者 map 是后来才补传的）。而未命中如果不缓存，
+   * **每一条错误事件都要白跑一次库** ——
+   * 摄入热路径 5 次往返里有 1 次是它。
+   *
+   * 在 PostgreSQL 部署下这是实打实的一次**网络往返**，
+   * 5 次 → 4 次就是 20% 的摄入延迟。
+   *
+   * 未命中条目很轻（只有一个 key），所以可以放很多。
+   */
+  private readonly missCache = new Map<string, true>()
+
+  /** TraceMap 缓存上限 —— 重对象，少放几个 */
+  private static readonly HIT_CACHE_MAX = 32
+  /** 未命中缓存上限 —— 轻对象，可以多放 */
+  private static readonly MISS_CACHE_MAX = 4096
 
   constructor(private readonly db: Db) {}
 
@@ -117,8 +145,14 @@ export class SourcemapResolver {
     if (!base) return undefined
 
     const cacheKey = `${projectId}|${release}|${base}`
-    const cached = this.cache.get(cacheKey)
-    if (cached) return cached
+
+    // 命中缓存
+    const hit = this.hitCache.get(cacheKey)
+    if (hit) return hit
+
+    // 未命中缓存 —— 这里必须用 `has` 而不是 `get`：
+    // 存的是 `true`，`get` 拿到的是 `true`，跟「没缓存过」区分不开
+    if (this.missCache.has(cacheKey)) return undefined
 
     const row = await this.db.get<{ map_json: string }>(
       `SELECT map_json FROM sourcemaps
@@ -129,28 +163,59 @@ export class SourcemapResolver {
       [projectId, projectId, release, base]
     )
 
-    if (!row) return undefined
+    if (!row) {
+      this.rememberMiss(cacheKey)
+      return undefined
+    }
 
     try {
       const traceMap = new TraceMap(row.map_json)
-      this.cache.set(cacheKey, traceMap)
+      this.rememberHit(cacheKey, traceMap)
       return traceMap
     } catch {
+      // map 坏了 —— 也记成「没有」，省得每条事件都重新解析一遍。
+      // 重新上传会 invalidate 这条缓存，所以不会一直卡在坏 map 上。
+      this.rememberMiss(cacheKey)
       return undefined
+    }
+  }
+
+  /** 记一次命中，并给重对象缓存封顶 */
+  private rememberHit(key: string, traceMap: TraceMap): void {
+    this.hitCache.set(key, traceMap)
+    while (this.hitCache.size > SourcemapResolver.HIT_CACHE_MAX) {
+      const oldest = this.hitCache.keys().next().value
+      if (oldest === undefined) break
+      this.hitCache.delete(oldest)
+    }
+  }
+
+  /** 记一次未命中，并给轻量缓存封顶 */
+  private rememberMiss(key: string): void {
+    this.missCache.set(key, true)
+    while (this.missCache.size > SourcemapResolver.MISS_CACHE_MAX) {
+      const oldest = this.missCache.keys().next().value
+      if (oldest === undefined) break
+      this.missCache.delete(oldest)
     }
   }
 
   /** 上传后清掉对应缓存 —— 否则旧的 map 会一直生效 */
   invalidate(projectId: number, release?: string): void {
     const prefix = release ? `${projectId}|${release}|` : `${projectId}|`
-    for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) this.cache.delete(key)
+    for (const key of this.hitCache.keys()) {
+      if (key.startsWith(prefix)) this.hitCache.delete(key)
+    }
+    // ⚠️ 未命中缓存也必须清 —— 否则后补传的 map 不生效
+    for (const key of this.missCache.keys()) {
+      if (key.startsWith(prefix)) this.missCache.delete(key)
     }
   }
 
   /** 清空全部缓存 */
   clear(): void {
-    this.cache.clear()
+    this.hitCache.clear()
+    this.missCache.clear()
   }
 }
 
