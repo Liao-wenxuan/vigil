@@ -78,6 +78,28 @@ cp .env.example .env
 | `POSTGRES_USER` | 自己起，如 `vigil` | 数据库用户 |
 | `POSTGRES_PASSWORD` | `openssl rand -hex 24` | 数据库密码 |
 
+可选（有默认值，调优时才动）：
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `VIGIL_RETENTION_INTERVAL` | `3600` | 保留策略执行间隔（秒）。**设 0 会关掉清理**，表就只增不减 |
+| `VIGIL_PG_POOL_MAX` | `10` | 单副本连接池上限。**副本数 × 这个值必须小于 PG 的 `max_connections`** |
+| `VIGIL_PG_STATEMENT_TIMEOUT_MS` | `15000` | 单条语句超时。没有它，一个写错的查询能占死连接池，整个服务假死 |
+| `VIGIL_PG_CONNECT_TIMEOUT_MS` | `5000` | 建连超时 |
+| `VIGIL_PG_SSL` | 不设 | `verify` 校验证书（云数据库）；`no-verify` 加密但不校验（自签）；不设则不开 TLS |
+
+`retention_days` 是**每个项目**自己的配置（默认 90 天，建项目时定）。
+保留策略会裁掉 `issue_events` / `replay_events` / `behavior_events` /
+`transactions` / `replay_sessions` 里超期的行，**用量计数器不回退** ——
+配额记的是「累计摄入量」，不能靠等过期洗回来。
+
+手动触发一次（磁盘告急时不用等整点）：
+
+```bash
+curl -X POST -H "x-vigil-admin-token: $VIGIL_ADMIN_TOKEN" \
+  http://127.0.0.1:4318/api/v1/maintenance/retention
+```
+
 ⚠️ **`VIGIL_ADMIN_TOKEN` 泄露 = 全部错误数据泄露。**
 它会出现在面板的网络请求里（面板的 dev proxy 自动注入），
 所以生产必须走 HTTPS。
