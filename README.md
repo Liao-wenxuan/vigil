@@ -204,10 +204,11 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 197 条单元测试（Collector 122 + SDK 75）
+npm run test              # 216 条单元测试（Collector 141 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
+npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走索引）
 npm run typecheck
 npm run lint
 ```
@@ -229,6 +230,23 @@ npm run lint
 
 同时输出**静帧截图**到 `docs/screenshots/` —— 动效关掉之后长什么样，
 那是「设计感」真正被看见的地方。
+
+### 查询计划闸门
+
+演示库只有几十行，**缺索引的查询在演示数据上完全正常** ——
+但线上 `issue_events` / `transactions` / `alert_incidents` 随流量线性增长，
+缺索引的查询到 10 万行时是全表扫描。
+
+`npm run audit:plans` 把这件事变成可自动测的数字：
+
+1. `app.inject()` 打一遍管理端所有 GET 接口，**插桩记录实际执行的 SQL**
+2. 复制一份库，灌合成数据把增长表放大到 2 万行
+3. 对每条 SQL 跑 `EXPLAIN QUERY PLAN`，扫增长表上的 `SCAN`
+
+已用它抓到一次真问题：`alert_incidents` 的两个旧索引首列是
+`dedupe_key` / `rule_id`，不是 `project_id`，
+于是告警历史列表退化成「全表扫描 + 临时排序」。
+修法是迁移 v4 补 `idx_alert_incidents_project`。
 
 <details>
 <summary>总览页静帧</summary>
@@ -601,7 +619,7 @@ docker compose up --build
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 197 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门
+- [x] 216 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 1 条查询计划闸门
 
 待做：
 
