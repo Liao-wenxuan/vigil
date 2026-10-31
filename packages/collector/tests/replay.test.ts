@@ -147,6 +147,92 @@ describe('回放服务', () => {
   })
 })
 
+describe('回放增量写入', () => {
+  /** 用固定的 base 造链 —— 每次调用 replayStream() 会取新的 Date.now()，
+   *  那样每次都是「新快照」，测不出增量写入 */
+  function chain(base: number, increments: number): ReplayEvent[] {
+    const events: ReplayEvent[] = [
+      { type: META, timestamp: base, data: { href: '/cart', width: 1440, height: 900 } },
+      { type: FULL_SNAPSHOT, timestamp: base, data: { node: { type: 0, id: 1 } } }
+    ]
+    for (let i = 1; i <= increments; i++) {
+      events.push({ type: INCREMENTAL, timestamp: base + i * 1000, data: { text: `step-${i}` } })
+    }
+    return events
+  }
+
+  async function seqZeroId(
+    db: Awaited<ReturnType<typeof setupDb>>['db'],
+    projectId: number,
+    sessionId: string
+  ): Promise<number | undefined> {
+    const row = await db.get<{ id: number }>(
+      'SELECT id FROM replay_events WHERE project_id = ? AND session_id = ? AND seq = 0',
+      [projectId, sessionId]
+    )
+    return row?.id
+  }
+
+  it('同一条链的更长窗口只追加尾部，不重写历史', async () => {
+    const { db, replay, project } = await setupDb()
+    const base = Date.now() - 60_000
+
+    await replay.saveReplay(project.id, 'chain-1', { events: chain(base, 1), bytes: 100 })
+    const anchorBefore = await seqZeroId(db, project.id, 'chain-1')
+
+    const longer = await replay.saveReplay(project.id, 'chain-1', {
+      events: chain(base, 4),
+      bytes: 200
+    })
+    const anchorAfter = await seqZeroId(db, project.id, 'chain-1')
+
+    // 第 0 行的自增 id 没变 ⇒ 旧流没被删掉重建（那是 O(n²) 的来源）
+    expect(anchorAfter).toBe(anchorBefore)
+    expect(longer.events).toBe(6)
+    expect(await replay.getReplay(project.id, 'chain-1')).toHaveLength(6)
+  })
+
+  it('客户端重新取快照 → 旧链整体作废，不会拼出新快照 + 旧增量的混合流', async () => {
+    const { replay, project } = await setupDb()
+    const base = Date.now() - 60_000
+
+    await replay.saveReplay(project.id, 'chain-2', { events: chain(base, 4), bytes: 100 })
+    // 第二个参数是新的 base ⇒ seq 0 的 timestamp 变了 ⇒ 换了条链
+    await replay.saveReplay(project.id, 'chain-2', { events: chain(base + 30_000, 1), bytes: 60 })
+
+    const stream = await replay.getReplay(project.id, 'chain-2')
+    expect(stream).toHaveLength(3)
+    // 首帧必须是最新那条链的快照
+    expect(stream[0].timestamp).toBe(base + 30_000)
+  })
+
+  it('重复上报同一窗口不产生重复行', async () => {
+    const { replay, project } = await setupDb()
+    const base = Date.now() - 60_000
+    const events = chain(base, 3)
+
+    await replay.saveReplay(project.id, 'chain-3', { events, bytes: 100 })
+    await replay.saveReplay(project.id, 'chain-3', { events, bytes: 100 })
+
+    expect(await replay.getReplay(project.id, 'chain-3')).toHaveLength(5)
+  })
+
+  it('这次送的窗口比已存的短，会话计数不会虚高', async () => {
+    const { replay, project } = await setupDb()
+    const base = Date.now() - 60_000
+
+    await replay.saveReplay(project.id, 'chain-4', { events: chain(base, 5), bytes: 100 })
+    const result = await replay.saveReplay(project.id, 'chain-4', {
+      events: chain(base, 1),
+      bytes: 100
+    })
+
+    // 库里还是 7 条（1 条 meta + 1 快照 + 5 增量），不能被截成 3
+    expect(result.events).toBe(7)
+    expect(await replay.getReplay(project.id, 'chain-4')).toHaveLength(7)
+  })
+})
+
 describe('行为服务', () => {
   it('行为事件入库并能按类型聚合', async () => {
     const { replay, project } = await setupDb()

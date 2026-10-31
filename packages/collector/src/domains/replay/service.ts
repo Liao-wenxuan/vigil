@@ -88,7 +88,20 @@ export class ReplayService {
   /**
    * 写入回放事件流。
    *
-   * 全量替换该会话已有的流 —— 客户端送来的永远是**更新更全**的窗口。
+   * ## 增量写，不是全删全插
+   *
+   * 旧实现每次上报都「先 DELETE 整会话，再逐条 INSERT」。
+   * 一个 3000 事件的会话，第 5 次上报要删 3000 条 + 插 3000 条单条 SQL ——
+   * 上报次数越多越慢，是 O(n²)。
+   *
+   * 现在的判据是**增量链的身份**：rrweb 的流是一条「全量快照 + 一串增量」，
+   * 链的身份就是第 0 条（全量快照）的时间戳。
+   *
+   *   - 时间戳相同 → 客户端送的是**同一条链的更长窗口**，只补尾部新事件
+   *   - 时间戳不同 → 客户端重新取了快照，旧链整体作废
+   *
+   * ⚠️ 这条判断不能省。凭「seq 已存在就跳过」会静默拼出
+   *    「新快照 + 旧增量」的混合流 —— 播放器不报错，只是画面全乱。
    */
   async saveReplay(
     projectId: number,
@@ -100,39 +113,38 @@ export class ReplayService {
     if (events.length === 0) return { events: 0, bytes: 0 }
 
     const now = Date.now()
+    const bytes = payload.bytes ?? 0
 
     return await this.db.transaction(async () => {
-      // 该会话的旧流作废（客户端送的是更新更全的窗口）
-      await this.db.run('DELETE FROM replay_events WHERE project_id = ? AND session_id = ?', [
-        projectId,
-        sessionId
-      ])
+      const anchor = await this.db.get<{ timestamp: number }>(
+        'SELECT timestamp FROM replay_events WHERE project_id = ? AND session_id = ? AND seq = 0',
+        [projectId, sessionId]
+      )
 
-      for (const [seq, event] of events.entries()) {
-        // `ON CONFLICT DO UPDATE` —— SQLite 3.24+ 与 PG 都支持。
-        // ⚠️ 别用 `INSERT OR REPLACE` —— 那是 SQLite 独有的语法，PG 上直接报错。
-        await this.db.run(
-          `INSERT INTO replay_events
-             (project_id, session_id, seq, timestamp, event_type, data_json, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT (project_id, session_id, seq) DO UPDATE SET
-             timestamp = excluded.timestamp,
-             event_type = excluded.event_type,
-             data_json = excluded.data_json,
-             created_at = excluded.created_at`,
-          [
-            projectId,
-            sessionId,
-            seq,
-            event.timestamp,
-            event.type,
-            writeJson(event.data ?? null),
-            now
-          ]
+      // PG 的 BIGINT 会以字符串回传，比较前必须收敛
+      const sameChain = anchor !== undefined && Number(anchor.timestamp) === events[0].timestamp
+
+      let start = 0
+      if (sameChain) {
+        const head = await this.db.get<{ max_seq: number | null }>(
+          'SELECT MAX(seq) AS max_seq FROM replay_events WHERE project_id = ? AND session_id = ?',
+          [projectId, sessionId]
         )
+        start = Number(head?.max_seq ?? -1) + 1
+      } else {
+        // 链换了：旧流对不上新快照，留着只会让回放拼错
+        await this.db.run('DELETE FROM replay_events WHERE project_id = ? AND session_id = ?', [
+          projectId,
+          sessionId
+        ])
       }
 
-      const bytes = payload.bytes ?? 0
+      if (start < events.length) {
+        await this.appendReplayEvents(projectId, sessionId, events, start, now)
+      }
+
+      // 库里真实的条数：客户端这次送的窗口可能比已存的还短
+      const stored = Math.max(start, events.length)
 
       // 会话行可能还不存在 —— **回放比行为汇总先到是常态**：
       // 错误是立即上报的，行为汇总要等攒批或页面卸载。
@@ -144,11 +156,62 @@ export class ReplayService {
         `UPDATE replay_sessions
          SET replay_events = ?, replay_bytes = ?, replay_updated_at = ?, user_id = COALESCE(user_id, ?)
          WHERE project_id = ? AND session_id = ?`,
-        [events.length, bytes, now, context.userId ?? null, projectId, sessionId]
+        [stored, bytes, now, context.userId ?? null, projectId, sessionId]
       )
 
-      return { events: events.length, bytes }
+      return { events: stored, bytes }
     })
+  }
+
+  /**
+   * 批量追加回放事件。
+   *
+   * 多行 `VALUES` 一次写入 —— 逐条 `INSERT` 在「一条会话几百上千个事件」
+   * 的场景下，光是语句解析就吃掉大部分时间。
+   *
+   * 批大小 200 × 7 列 = 1400 个占位符，远低于 SQLite（32766）
+   * 与 PG（65535）的上限。
+   */
+  private async appendReplayEvents(
+    projectId: number,
+    sessionId: string,
+    events: ReplayEvent[],
+    start: number,
+    now: number
+  ): Promise<void> {
+    const CHUNK = 200
+
+    for (let from = start; from < events.length; from += CHUNK) {
+      const slice = events.slice(from, from + CHUNK)
+      const placeholders = slice.map(() => '(?, ?, ?, ?, ?, ?, ?)').join(', ')
+      const params: unknown[] = []
+
+      for (const [offset, event] of slice.entries()) {
+        params.push(
+          projectId,
+          sessionId,
+          from + offset,
+          event.timestamp,
+          event.type,
+          writeJson(event.data ?? null),
+          now
+        )
+      }
+
+      // `ON CONFLICT DO UPDATE` —— SQLite 3.24+ 与 PG 都支持。
+      // ⚠️ 别用 `INSERT OR REPLACE` —— 那是 SQLite 独有的语法，PG 上直接报错。
+      await this.db.run(
+        `INSERT INTO replay_events
+           (project_id, session_id, seq, timestamp, event_type, data_json, created_at)
+         VALUES ${placeholders}
+         ON CONFLICT (project_id, session_id, seq) DO UPDATE SET
+           timestamp = excluded.timestamp,
+           event_type = excluded.event_type,
+           data_json = excluded.data_json,
+           created_at = excluded.created_at`,
+        params
+      )
+    }
   }
 
   /**
