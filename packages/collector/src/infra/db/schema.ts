@@ -395,6 +395,9 @@ CREATE TABLE IF NOT EXISTS alert_incidents (
 
 CREATE INDEX IF NOT EXISTS idx_alert_incidents_dedupe ON alert_incidents(dedupe_key, triggered_at DESC);
 CREATE INDEX IF NOT EXISTS idx_alert_incidents_rule  ON alert_incidents(rule_id, triggered_at DESC);
+-- 告警历史列表按项目查 + 按时间倒序 —— 前两个索引的首列都不是 project_id，
+-- 少了这个就退化成「全表扫描 + 临时排序」（2 万行时就能看出来）。
+CREATE INDEX IF NOT EXISTS idx_alert_incidents_project ON alert_incidents(project_id, triggered_at DESC);
 
 -- ============================================================
 -- 会话回放与用户行为
