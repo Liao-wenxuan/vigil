@@ -26,6 +26,7 @@
     "verify": "npm run build --workspace @vigil/sdk && tsx scripts/verify-pipeline.ts",
     "verify:dashboard": "node packages/dashboard/tests/verify-dashboard.mjs --url http://localhost:5174",
     "audit:ui": "node scripts/audit-ui.mjs --url http://localhost:5174",
+    "audit:plans": "tsx scripts/audit-query-plans.ts",
     "prepare": "husky"
   },
   "devDependencies": {
