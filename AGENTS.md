@@ -36,10 +36,11 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，157 条
+npm run test                # vitest，216 条
 npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
-npm run verify:dashboard    # 面板渲染验证，45 条断言（需要面板已启动）
+npm run verify:dashboard    # 面板渲染验证，50 条断言（需要面板已启动）
 npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
+npm run audit:plans         # 查询计划闸门，1 条（检查所有热查询走索引）
 npm run build               # 构建 SDK / Collector / Dashboard
 
 # 管理 CLI（组织 / 项目 / 环境 / 版本）
@@ -343,6 +344,32 @@ schema 里所有时间列都要用 `ts(dialect)`（SQLite→INTEGER，PG→BIGIN
    "This statement is busy executing a query"。命中缓存时先看 `busy`，
    忙就临时准备一条新的（不进缓存）。
 
+### 26. 去重 ID 必须覆盖**全部**载荷，不能只挑几个字段
+
+服务端给「没带 eventId 的客户端」兜底生成去重 ID
+（`domains/issues/event-identity.ts`）。
+
+**哈希必须覆盖所有能区分事件的内容**，而且序列化要**排序键**。
+
+⚠️ 踩过：哈希只取了「指纹 + 时间 + 用户 + 会话 + URL」，漏了 `release`。
+   后果不是「偶尔多去重一条」，而是**回归检测被绕过** ——
+   同一毫秒内、同会话、同 URL 的同一条错误但来自不同版本，
+   两条算出同一个 ID，第二条被当成网络重试丢掉，
+   于是「1.4.3 修好的问题在 1.4.4 又出现」进不了状态机，
+   Issue 永远停在 `resolved`，不会变成 `regressed`。
+
+**这个 bug 极难发现**：只在「两次上报落在同一毫秒」时触发，
+表现为**偶发**的测试失败，而失败信息指向状态机，跟去重毫无关系。
+（当时 15 轮压力跑挂了 3 轮。）
+
+排序键的原因：客户端的 JSON 序列化方式不统一。
+不排序的话，同一条事件的两次重传可能因为键顺序不同算出两个 ID，
+去重失效 → count 虚高。
+
+**推广**：去重键 = 事件的完整身份。少一个字段就多一类误杀。
+任何「挑几个字段当唯一键」的地方都要问一句：
+**还有哪个字段能让两条不同的事件算出同一个键？**
+
 ---
 
 ## 数据层
@@ -387,10 +414,11 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 177 条
+npm run test              # 216 条
 npm run verify            # 33 条端到端断言
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
+npm run audit:plans       # 1 条查询计划闸门
 ```
 
 `npm run verify` 跑的是**真实链路**：真 Chromium → 真 SDK 产物 → 真 HTTP →
@@ -415,6 +443,32 @@ npm run audit:ui          # 15 条界面设计闸门
    **最早那条**，撤回了个不相干的，断言还照样通过。
 5. **别把「某个状态出现了」当断言** —— 断言要带**能区分身份的信息**
    （内容 / id / 会话 ID），否则测的是「恰好也成立」的巧合。
+
+### 缺索引在演示数据上**看不出来**
+
+演示库只有几十行，任何查询都是亚毫秒 —— **缺索引的查询在演示数据上完全正常**。
+但线上 `issue_events` / `transactions` / `alert_incidents` 这些表会随流量线性增长，
+缺索引的查询到 10 万行时是全表扫描。
+
+`npm run audit:plans` 就是为此存在的闸门：
+
+1. `app.inject()` 打一遍管理端所有 GET 接口，**插桩记录实际执行的 SQL**
+   （不靠猜，直接从运行时拿）
+2. 把库复制一份，灌合成数据把增长表放大到 2 万行
+3. 对每条 SQL 跑 `EXPLAIN QUERY PLAN`，扫描增长表上的 `SCAN`
+
+⚠️ 计划必须在**放大后的库**上看 —— SQLite 的计划选择依赖表规模，
+小表上「扫表更便宜」的判断到了线上会翻车。
+⚠️ `EXPLAIN` 要求绑定参数，但绑 `NULL` 会让优化器以为条件恒假、把约束整个优化掉 ——
+所以脚本把 `?` 换成字面量 `0`。
+
+已用它抓到一次真问题：`alert_incidents` 的两个旧索引首列是
+`dedupe_key` / `rule_id`，不是 `project_id`，
+于是告警历史列表退化成「全表扫描 + 临时排序」。
+修法是迁移 v4 补 `idx_alert_incidents_project`。
+
+**断言要有鉴别力**：加索引前先确认「去掉索引时这条断言会挂」，
+否则它可能是一条永远通过的假断言。
 
 ### 禁用的控件不计入焦点环覆盖率
 
