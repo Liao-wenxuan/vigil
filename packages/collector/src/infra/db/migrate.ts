@@ -375,6 +375,21 @@ export const MIGRATIONS: Migration[] = [
         [now]
       )
     }
+  },
+  {
+    version: 4,
+    name: 'alert-incidents-project-index',
+    async up(db) {
+      // 告警历史列表是「按项目 + 时间倒序」：
+      //   SELECT * FROM alert_incidents WHERE project_id = ? ORDER BY triggered_at DESC LIMIT ?
+      //
+      // ⚠️ 原有的两个索引首列是 dedupe_key / rule_id，都不是 project_id，
+      //    于是这条查询退化成**全表扫描 + 临时 B 树排序** ——
+      //    演示数据只有几十行看不出来，表涨到 2 万行就是实打实的慢。
+      await db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_alert_incidents_project ON alert_incidents(project_id, triggered_at DESC)'
+      )
+    }
   }
 ]
 
