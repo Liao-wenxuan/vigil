@@ -254,3 +254,65 @@ describe('迁移 v3：用量计数器', () => {
     expect(Number(row?.events_total)).toBe(0)
   })
 })
+
+/**
+ * v4：告警历史按项目查的索引。
+ *
+ * 少了 `idx_alert_incidents_project`，告警历史列表会退化成
+ * 「全表扫描 + 临时 B 树排序」。
+ *
+ * ⚠️ 这个错在演示数据上**看不出来** —— 只有几十行时扫表比走索引还快。
+ *    所以这里先造够行数，再看 `EXPLAIN QUERY PLAN` 怎么说。
+ */
+describe('迁移 v4：告警历史项目索引', () => {
+  /** 把 `?` 换成字面量 0 —— EXPLAIN 要求绑定参数，绑 NULL 会让优化器把约束优化掉 */
+  function inlineParams(sql: string): string {
+    return sql.replace(/\?/g, '0')
+  }
+
+  it('索引建好了', async () => {
+    const { db } = await setupDb()
+    const row = await db.get<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM sqlite_master WHERE type='index' AND name = 'idx_alert_incidents_project'"
+    )
+    expect(Number(row?.n)).toBe(1)
+    await db.close()
+  })
+
+  it('告警历史列表走索引，不是全表扫描', async () => {
+    const { db, project } = await setupDb()
+
+    await db.run(
+      `INSERT INTO alert_rules
+         (project_id, name, type, threshold, window_seconds, enabled, created_at, updated_at)
+       VALUES (?, '规则', 'error_count', 1, 300, 1, 1, 1)`,
+      [project.id]
+    )
+    const rule = await db.get<{ id: number }>('SELECT id FROM alert_rules LIMIT 1')
+
+    // 造到 3000 行 —— 行数够多时「扫表 vs 走索引」才有分歧
+    const insert = async (i: number) =>
+      db.run(
+        `INSERT INTO alert_incidents
+           (rule_id, project_id, status, triggered_at, dedupe_key, payload_json)
+         VALUES (?, ?, 'triggered', ?, ?, '{}')`,
+        [rule?.id ?? 1, project.id, 1000 + i, `dedupe-${i}`]
+      )
+    for (let i = 0; i < 3000; i++) await insert(i)
+
+    const rows = await db.all<{ detail: string }>(
+      `EXPLAIN QUERY PLAN ${inlineParams(
+        'SELECT * FROM alert_incidents WHERE project_id = ? ORDER BY triggered_at DESC LIMIT ?'
+      )}`
+    )
+    const plan = rows.map((r) => r.detail).join(' | ')
+
+    expect(plan).toContain('idx_alert_incidents_project')
+    // ⚠️ 双向断言：只断言「用了索引」不够 ——
+    //    万一哪天有人把索引列写错，SQLite 可能仍报「用了索引」但其实先扫了表。
+    expect(plan).not.toMatch(/SCAN alert_incidents/)
+    // ORDER BY 也不能再靠临时排序
+    expect(plan).not.toContain('TEMP B-TREE')
+    await db.close()
+  })
+})
