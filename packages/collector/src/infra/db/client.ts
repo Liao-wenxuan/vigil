@@ -28,14 +28,44 @@ class SqliteDb implements Db {
   /** 事务嵌套深度 —— 内层不重新 BEGIN，靠外层兜住 */
   private depth = 0
 
+  /**
+   * 预编译语句缓存。
+   *
+   * `db.prepare(sql)` **每次都会重新编译 SQL** ——
+   * 摄入热路径上同一批 SQL 要跑成千上万次，重复编译是纯浪费。
+   *
+   * ⚠️ 但语句**不能重入**：better-sqlite3 在语句执行中再执行同一条
+   *    会报 "This statement is busy executing a query"。
+   *    所以命中缓存时先看 `busy`，忙就临时准备一条新的（不进缓存）。
+   */
+  private readonly statements = new Map<string, Database.Statement>()
+
   constructor(private readonly db: Database.Database) {}
 
+  /** 取预编译语句（带缓存） */
+  private prepare(sql: string): Database.Statement {
+    const cached = this.statements.get(sql)
+    if (cached) {
+      // 正在执行中（重入）—— 临时准备一条，不进缓存
+      if (cached.busy) return this.db.prepare(sql)
+      return cached
+    }
+    const statement = this.db.prepare(sql)
+    this.statements.set(sql, statement)
+    return statement
+  }
+
   async exec(sql: string): Promise<void> {
+    // DDL 会让**已缓存的语句失效**（表结构变了，语句的编译结果不再对）——
+    // 所以执行 DDL 前清空缓存。
+    //
+    // ⚠️ 迁移就是走 exec 的：先清空再执行，顺序不能反。
+    this.statements.clear()
     this.db.exec(sql)
   }
 
   async all<T = unknown>(sql: string, params?: unknown[] | Record<string, unknown>): Promise<T[]> {
-    const statement = this.db.prepare(sql)
+    const statement = this.prepare(sql)
     if (params === undefined) return statement.all() as T[]
     return statement.all(params as never) as T[]
   }
@@ -44,7 +74,7 @@ class SqliteDb implements Db {
     sql: string,
     params?: unknown[] | Record<string, unknown>
   ): Promise<T | undefined> {
-    const statement = this.db.prepare(sql)
+    const statement = this.prepare(sql)
     if (params === undefined) return statement.get() as T | undefined
     return statement.get(params as never) as T | undefined
   }
@@ -53,14 +83,14 @@ class SqliteDb implements Db {
     sql: string,
     params?: unknown[] | Record<string, unknown>
   ): Promise<{ changes: number }> {
-    const statement = this.db.prepare(sql)
+    const statement = this.prepare(sql)
     if (params === undefined) return statement.run()
     return statement.run(params as never)
   }
 
   async insert(sql: string, params?: unknown[] | Record<string, unknown>): Promise<number> {
     // `RETURNING id` —— SQLite 3.35+ 与 PG 都支持
-    const statement = this.db.prepare(`${sql} RETURNING id`)
+    const statement = this.prepare(`${sql} RETURNING id`)
     const row = params === undefined ? statement.get() : statement.get(params as never)
     return Number((row as { id?: number } | undefined)?.id ?? 0)
   }
