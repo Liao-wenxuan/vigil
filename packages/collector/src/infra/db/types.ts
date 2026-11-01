@@ -52,5 +52,19 @@ export interface Db {
   insert(sql: string, params?: unknown[] | Record<string, unknown>): Promise<number>
   /** 在事务里执行 */
   transaction<T>(fn: () => Promise<T>): Promise<T>
+  /**
+   * 在事务里跑一段**可能失败**的逻辑。
+   *
+   * 失败时**只回滚这一段**，外层事务继续跑。
+   *
+   * ## 为什么需要
+   *
+   * 一批事件里，一条坏的不该把另外 19 条全带走。
+   * PG 里一条语句失败会**中止整个事务**，所以必须用 SAVEPOINT
+   * 把每条事件圈起来 —— 失败时只回滚那一条。
+   *
+   * ⚠️ 必须**在事务里**调用 —— 事务外没有 SAVEPOINT 可用。
+   */
+  savepoint<T>(name: string, fn: () => Promise<T>): Promise<T>
   close(): Promise<void>
 }
