@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { runMigrations, MIGRATIONS } from './migrate.js'
 import type { Db } from './client.js'
 import type { Dialect } from './dialect.js'
@@ -124,14 +125,38 @@ function findClosing(sql: string, start: number, quote: string): number {
 export class PostgresDb implements Db {
   readonly dialect: Dialect = 'postgres'
 
+  /**
+   * 当前事务占用的连接。
+   *
+   * ⚠️ **必须用 AsyncLocalStorage，不能用普通字段**。
+   *
+   *    适配器是**所有请求共享**的：一个普通字段存「当前事务的连接」，
+   *    并发的两个事务会互相覆盖 —— 事务 A 的语句跑到事务 B 的连接上，
+   *    两个事务互相看到对方的数据（隔离级别直接失效）。
+   *
+   *    AsyncLocalStorage 按**异步调用链**隔离：每个事务的上下文
+   *    只在自己那条 await 链里可见，互不干扰。
+   */
+  private readonly txContext = new AsyncLocalStorage<PgClient>()
+
   constructor(private readonly pool: PgPool) {}
 
+  /**
+   * 语句该走哪条连接。
+   *
+   * 事务里 → 走事务自己的连接（否则就不在同一个事务里了）；
+   * 事务外 → 走连接池。
+   */
+  private get runner(): PgQueryable {
+    return this.txContext.getStore() ?? this.pool
+  }
+
   async exec(sql: string): Promise<void> {
-    await this.pool.query(sql)
+    await this.runner.query(sql)
   }
 
   async all<T = unknown>(sql: string, params?: unknown[] | Record<string, unknown>): Promise<T[]> {
-    const result = await this.pool.query(toDollarPlaceholders(sql), toArray(params))
+    const result = await this.runner.query(toDollarPlaceholders(sql), toArray(params))
     return result.rows as T[]
   }
 
@@ -139,7 +164,7 @@ export class PostgresDb implements Db {
     sql: string,
     params?: unknown[] | Record<string, unknown>
   ): Promise<T | undefined> {
-    const result = await this.pool.query(toDollarPlaceholders(sql), toArray(params))
+    const result = await this.runner.query(toDollarPlaceholders(sql), toArray(params))
     return (result.rows[0] as T | undefined) ?? undefined
   }
 
@@ -147,13 +172,13 @@ export class PostgresDb implements Db {
     sql: string,
     params?: unknown[] | Record<string, unknown>
   ): Promise<{ changes: number }> {
-    const result = await this.pool.query(toDollarPlaceholders(sql), toArray(params))
+    const result = await this.runner.query(toDollarPlaceholders(sql), toArray(params))
     return { changes: result.rowCount ?? 0 }
   }
 
   async insert(sql: string, params?: unknown[] | Record<string, unknown>): Promise<number> {
     // `RETURNING id` —— 与 SQLite 实现同一套语义
-    const result = await this.pool.query(
+    const result = await this.runner.query(
       toDollarPlaceholders(`${sql} RETURNING id`),
       toArray(params)
     )
@@ -166,7 +191,9 @@ export class PostgresDb implements Db {
     const client = await this.pool.connect()
     try {
       await client.query('BEGIN')
-      const result = await fn()
+      // ⚠️ `fn` 必须在 `run()` **里面**调用 —— 这样它内部所有的 await
+      //    才继承得到这个事务的连接。
+      const result = await this.txContext.run(client, () => fn())
       await client.query('COMMIT')
       return result
     } catch (error) {
