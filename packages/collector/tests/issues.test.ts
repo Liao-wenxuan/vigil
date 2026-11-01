@@ -79,6 +79,19 @@ describe('Issue 服务', () => {
       expect(reads).toBe(0)
     })
 
+    it('同一个 eventId 换了指纹 → 不留下 count=0 的空壳 Issue', async () => {
+      // 明细写不进去（冲突了），但指纹变了会先建出一个新 Issue ——
+      // 不删掉的话，面板上会多一个「一次都没发生过」的问题。
+      const { issues, project } = await setupDb()
+
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('x'), eventId: 'shared' }))
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('y'), eventId: 'shared' }))
+
+      const result = await issues.listIssues({ projectId: project.id })
+      expect(result.total).toBe(1)
+      expect(result.issues[0].count).toBe(1)
+    })
+
     it('受影响用户数按人去重', async () => {
       const { issues, project } = await setupDb()
       const base = Date.now()
