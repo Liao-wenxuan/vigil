@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { computePriority } from '../src/domains/issues/service.js'
+import { computePriority, IssueService } from '../src/domains/issues/service.js'
+import type { Db } from '../src/infra/db/types.js'
 import { fp, makeEvent, setupDb } from './helpers.js'
 
 describe('Issue 服务', () => {
@@ -42,6 +43,40 @@ describe('Issue 服务', () => {
 
       const result = await issues.listIssues({ projectId: project.id })
       expect(result.issues[0].count).toBe(1)
+    })
+
+    it('去重靠写入时的冲突判定，不会多发一次查询', async () => {
+      // ⚠️ 明细是「写入兼作查重」（ON CONFLICT DO NOTHING）——
+      //    所以去重**不能再单独查一次库**，否则每次摄入就多一次往返。
+      const { db, artifacts, project } = await setupDb()
+      const event = makeEvent({ fingerprint: fp('once'), eventId: 'event-002' })
+
+      // 只数「查 issue_events 表」的读 —— 别的读（找 Issue）两条路径一样
+      let reads = 0
+      const spy: Db = {
+        dialect: db.dialect,
+        exec: (sql) => db.exec(sql),
+        all: async (sql, params) => {
+          if (sql.includes('FROM issue_events')) reads++
+          return db.all(sql, params)
+        },
+        get: async (sql, params) => {
+          if (sql.includes('FROM issue_events')) reads++
+          return db.get(sql, params)
+        },
+        run: (sql, params) => db.run(sql, params),
+        insert: (sql, params) => db.insert(sql, params),
+        transaction: (fn) => db.transaction(fn),
+        close: () => db.close()
+      }
+      const spyIssues = new IssueService(spy, artifacts.sourcemapResolver)
+
+      await spyIssues.ingestEvent(project.id, event)
+      const afterFirst = reads
+      await spyIssues.ingestEvent(project.id, event)
+
+      expect(afterFirst).toBe(0)
+      expect(reads).toBe(0)
     })
 
     it('受影响用户数按人去重', async () => {
