@@ -79,6 +79,9 @@ export function countingDb(inner: Db, counter: ReadCounter): Db {
     async transaction(fn) {
       return inner.transaction(fn)
     },
+    async savepoint(name, fn) {
+      return inner.savepoint(name, fn)
+    },
     async close() {
       return inner.close()
     }
