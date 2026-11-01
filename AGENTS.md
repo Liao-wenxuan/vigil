@@ -36,12 +36,12 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，221 条
+npm run test                # vitest，223 条
 npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
 npm run verify:dashboard    # 面板渲染验证，50 条断言（需要面板已启动）
 npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
 npm run audit:plans         # 查询计划闸门，1 条（检查所有热查询走索引）
-npm run audit:ingest        # 摄入往返预算闸门，1 条（每条事件最多 4 次 DB 往返）
+npm run audit:ingest        # 摄入往返预算闸门，1 条（每条事件最多 3 次 DB 往返）
 npm run build               # 构建 SDK / Collector / Dashboard
 
 # 管理 CLI（组织 / 项目 / 环境 / 版本）
@@ -415,7 +415,7 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 221 条
+npm run test              # 223 条
 npm run verify            # 33 条端到端断言
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
@@ -474,19 +474,24 @@ npm run audit:ingest      # 1 条摄入往返预算闸门
 
 ### 摄入路径的 DB 往返是有预算的
 
-`npm run audit:ingest` 量「稳态下每条错误事件跑几次 DB」，预算 **4 次**：
+`npm run audit:ingest` 量「稳态下每条错误事件跑几次 DB」，预算 **3 次**：
 
 ```
 1. 找 Issue            SELECT issues WHERE fingerprint
-2. 查重                SELECT issue_events WHERE event_id
-3. 写明细              INSERT issue_events
-4. 更新聚合计数与状态   UPDATE issues
+2. 写明细（兼作查重）   INSERT issue_events ON CONFLICT DO NOTHING
+3. 更新聚合计数与状态   UPDATE issues
 ```
 
 ⚠️ **每条 SQL 在 PostgreSQL 部署下都是一次网络往返** ——
-5 次往返就是 5 倍延迟。
+3 次往返就是 3 倍延迟。
 ⚠️ 而「多了一条查询」是**静默**的：没有任何测试会挂，也没有报错，
 只有线上摄入变慢了才看得出来。所以必须给它一个**有上限的数字**。
+
+第 2 步以前是**两条**：先 `SELECT id FROM issue_events WHERE event_id` 查重，
+再 `INSERT issue_events`。现在写入用 `ON CONFLICT DO NOTHING`，
+**写入本身兼作查重** —— 冲突时 `changes = 0`，那就是网络重试的同一条事件。
+（唯一索引 `idx_issue_events_uid UNIQUE (project_id, event_id)` 的作用域
+与原来那条 SELECT 完全一致，所以语义没变。）
 
 曾多出来的一次是**查 sourcemap** ——
 `SourcemapResolver` 只缓存命中、不缓存未命中，
