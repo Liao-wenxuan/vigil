@@ -542,6 +542,16 @@ PG 里**一条语句失败会中止整个事务**，
 闸门 `npm run audit:ingest` 现在量**两个**数：
 每条事件的 DB 往返数（预算 3）和每批的提交次数（预算 1）。
 
+⚠️ SAVEPOINT 的价值**只有在真 PG 上才证明得了**：
+PG 里一条语句失败会**中止整个事务**，
+后续语句全部报 `current transaction is aborted`。
+假连接池只知道「发了什么 SQL」，不知道「那条 SQL 之后事务还活着吗」。
+
+所以 `tests/postgres-savepoint.test.ts` 专门在 PGlite（真 PG 引擎）上验：
+拿一个**主键冲突**（真的 PG 错误）在保存点里触发，
+然后断言外层事务**还能继续写** ——
+去掉 `ROLLBACK TO SAVEPOINT` 就会报 `current transaction is aborted`。
+
 曾多出来的一次是**查 sourcemap** ——
 `SourcemapResolver` 只缓存命中、不缓存未命中，
 没上传 map 的项目（很常见）**每条事件都要白跑一次库**。
