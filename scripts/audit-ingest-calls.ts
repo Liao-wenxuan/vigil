@@ -18,13 +18,16 @@
  *
  * ## 预算怎么来的
  *
- * 稳态 4 次：
+ * 稳态 3 次：
  *   1. 找 Issue            SELECT issues WHERE fingerprint
- *   2. 查重                SELECT issue_events WHERE event_id
- *   3. 写明细              INSERT issue_events
- *   4. 更新聚合计数与状态   UPDATE issues
+ *   2. 写明细（兼作查重）   INSERT issue_events ON CONFLICT DO NOTHING
+ *   3. 更新聚合计数与状态   UPDATE issues
  *
- * 曾多出来的一次是**查 sourcemap** —— 未命中没被缓存，
+ * 第 2 步以前是两条：先 `SELECT id FROM issue_events WHERE event_id` 查重，
+ * 再 `INSERT issue_events`。现在写入用 `ON CONFLICT DO NOTHING`，
+ * **写入本身兼作查重** —— 冲突时 `changes = 0`，就是网络重试的同一条事件。
+ *
+ * 更早还多出来一次是**查 sourcemap** —— 未命中没被缓存，
  * 没上传 map 的项目每条事件都要白跑一次库（现已被负缓存消掉）。
  */
 import { createHash } from 'node:crypto'
@@ -41,7 +44,7 @@ import type { ErrorEvent } from '@vigil/protocol'
  * 可以用环境变量临时调（`VIGIL_INGEST_BUDGET=3 npx tsx scripts/audit-ingest-calls.ts`）——
  * 调预算的时候要能看到闸门真的会挂。
  */
-const BUDGET = Number(process.env.VIGIL_INGEST_BUDGET ?? 4)
+const BUDGET = Number(process.env.VIGIL_INGEST_BUDGET ?? 3)
 /** 用来测量的事件条数 */
 const SAMPLE = 20
 
