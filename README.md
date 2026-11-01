@@ -204,12 +204,12 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 221 条单元测试（Collector 146 + SDK 75）
+npm run test              # 223 条单元测试（Collector 148 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
 npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走索引）
-npm run audit:ingest      # 1 条摄入往返预算闸门（每条事件最多 4 次 DB 往返）
+npm run audit:ingest      # 1 条摄入往返预算闸门（每条事件最多 3 次 DB 往返）
 npm run typecheck
 npm run lint
 ```
@@ -256,16 +256,18 @@ npm run lint
 5 次往返就是 5 倍延迟。而「多了一条查询」是**静默**的：
 没有测试会挂，也没有报错，只有线上摄入变慢了才看得出来。
 
-`npm run audit:ingest` 把它变成一个**有上限的数字**（稳态 4 次/条）：
+`npm run audit:ingest` 把它变成一个**有上限的数字**（稳态 3 次/条）：
 
 ```
 1. 找 Issue            SELECT issues WHERE fingerprint
-2. 查重                SELECT issue_events WHERE event_id
-3. 写明细              INSERT issue_events
-4. 更新聚合计数与状态   UPDATE issues
+2. 写明细（兼作查重）   INSERT issue_events ON CONFLICT DO NOTHING
+3. 更新聚合计数与状态   UPDATE issues
 ```
 
-它抓到过一次真问题：`SourcemapResolver` 只缓存命中、不缓存未命中，
+第 2 步以前是两条：先查重、再写入。现在写入用 `ON CONFLICT DO NOTHING`，
+**写入本身兼作查重** —— 冲突时 `changes = 0`，那就是网络重试的同一条事件。
+
+它还抓到过一次真问题：`SourcemapResolver` 只缓存命中、不缓存未命中，
 没上传 map 的项目**每条事件都要白跑一次库**。
 修法是命中与未命中分开缓存，各自封顶。
 
@@ -640,7 +642,7 @@ docker compose up --build
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 221 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 2 条性能闸门
+- [x] 223 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 2 条性能闸门
 
 待做：
 
