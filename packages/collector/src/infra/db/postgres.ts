@@ -187,6 +187,13 @@ export class PostgresDb implements Db {
   }
 
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
+    // 嵌套事务：已经在事务里就直接跑，靠**外层**提交。
+    //
+    // ⚠️ 绝不能在这里再借一个连接 ——
+    //    外层事务已经持有行锁，内层在另一个连接上 BEGIN 就会**死锁**：
+    //    外层等内层提交，内层等外层放锁。
+    if (this.txContext.getStore()) return await fn()
+
     // PG 的事务必须独占一个连接 —— BEGIN 之后的语句都得走同一个连接
     const client = await this.pool.connect()
     try {
@@ -205,6 +212,28 @@ export class PostgresDb implements Db {
       throw error
     } finally {
       client.release()
+    }
+  }
+
+  /**
+   * SAVEPOINT：失败时只回滚这一段，外层事务继续。
+   *
+   * ⚠️ PG 里一条语句失败会**中止整个事务**（后续语句全部报
+   *    "current transaction is aborted"）——
+   *    所以要隔离单条失败，只能靠 SAVEPOINT。
+   */
+  async savepoint<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    const runner = this.runner
+    await runner.query(`SAVEPOINT ${name}`)
+    try {
+      const result = await fn()
+      await runner.query(`RELEASE ${name}`)
+      return result
+    } catch (error) {
+      // `ROLLBACK TO` 不释放保存点，回滚后还要 RELEASE 一次
+      await runner.query(`ROLLBACK TO SAVEPOINT ${name}`)
+      await runner.query(`RELEASE ${name}`)
+      throw error
     }
   }
 
