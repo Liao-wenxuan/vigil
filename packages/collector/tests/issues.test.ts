@@ -67,6 +67,7 @@ describe('Issue 服务', () => {
         run: (sql, params) => db.run(sql, params),
         insert: (sql, params) => db.insert(sql, params),
         transaction: (fn) => db.transaction(fn),
+        savepoint: (name, fn) => db.savepoint(name, fn),
         close: () => db.close()
       }
       const spyIssues = new IssueService(spy, artifacts.sourcemapResolver)
