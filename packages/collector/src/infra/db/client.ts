@@ -113,6 +113,25 @@ class SqliteDb implements Db {
     }
   }
 
+  /**
+   * SAVEPOINT：失败时只回滚这一段，外层事务继续。
+   *
+   * SQLite 的 `ROLLBACK TO` **不会**释放保存点，
+   * 所以回滚之后还要 `RELEASE` 一次（否则保存点会一直挂着）。
+   */
+  async savepoint<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    this.db.exec(`SAVEPOINT ${name}`)
+    try {
+      const result = await fn()
+      this.db.exec(`RELEASE ${name}`)
+      return result
+    } catch (error) {
+      this.db.exec(`ROLLBACK TO ${name}`)
+      this.db.exec(`RELEASE ${name}`)
+      throw error
+    }
+  }
+
   async close(): Promise<void> {
     this.db.close()
   }
