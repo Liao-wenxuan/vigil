@@ -146,12 +146,40 @@ export class IssueService {
         created = true
       }
 
-      // 同一事件重复上报（网络重试）→ 直接忽略，不重复计数
-      const duplicate = await this.db.get<{ id: number }>(
-        'SELECT id FROM issue_events WHERE project_id = ? AND event_id = ?',
-        [projectId, eventId]
+      // 写明细。
+      //
+      // ⚠️ 写入用 `ON CONFLICT DO NOTHING` —— **写入本身兼作查重**，
+      //    不再单独发一条 `SELECT id FROM issue_events WHERE event_id = ?`。
+      //    理由：每条 SQL 在 PG 部署下都是一次网络往返，
+      //    少一次往返就是少 25% 的摄入延迟。
+      //
+      //    冲突时 `changes = 0` —— 那就是网络重试的同一条事件，直接忽略。
+      //    （唯一索引是 `idx_issue_events_uid UNIQUE (project_id, event_id)`，
+      //      作用域与原来那条 SELECT 完全一致。）
+      const inserted = await this.db.run(
+        `INSERT INTO issue_events
+           (issue_id, project_id, event_id, occurred_at, received_at,
+            user_id, session_id, url, release, environment, vitals_json, payload_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (project_id, event_id) DO NOTHING`,
+        [
+          issue.id,
+          projectId,
+          eventId,
+          occurredAt,
+          Date.now(),
+          event.userId ?? null,
+          event.sessionId ?? null,
+          event.url ?? null,
+          event.release ?? null,
+          event.environment ?? null,
+          writeJson(event.vitals ?? null),
+          writeJson(event)
+        ]
       )
-      if (duplicate) {
+
+      // 同一事件重复上报（网络重试）→ 直接忽略，不重复计数
+      if (inserted.changes === 0) {
         return {
           issueId: issue.id,
           shortId: issue.short_id,
@@ -196,27 +224,7 @@ export class IssueService {
         activities = activities.concat(result.activities)
       }
 
-      // 写明细
-      await this.db.run(
-        `INSERT INTO issue_events
-           (issue_id, project_id, event_id, occurred_at, received_at,
-            user_id, session_id, url, release, environment, vitals_json, payload_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          issue.id,
-          projectId,
-          eventId,
-          occurredAt,
-          Date.now(),
-          userId ?? null,
-          event.sessionId ?? null,
-          event.url ?? null,
-          event.release ?? null,
-          event.environment ?? null,
-          writeJson(event.vitals ?? null),
-          writeJson(event)
-        ]
-      )
+      // 写明细（已在上面写入 —— 兼作查重）
 
       // 记录受影响用户
       if (userId) {
