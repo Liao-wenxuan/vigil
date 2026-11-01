@@ -140,4 +140,45 @@ describe('PG 事务的连接归属', () => {
 
     expect(pool.log.some((e) => e.sql === 'ROLLBACK')).toBe(true)
   })
+
+  it('嵌套事务不再借连接（否则会死锁）', async () => {
+    const pool = new FakePool()
+    const db = new PostgresDb(pool)
+
+    await db.transaction(async () => {
+      // 内层事务：必须复用外层那个连接
+      await db.transaction(async () => {
+        await db.run('SELECT inner')
+      })
+    })
+
+    // 只借了一个连接、只发了一次 BEGIN
+    const clients = new Set(pool.log.map((e) => e.clientId))
+    expect(clients.size).toBe(1)
+    expect(pool.log.filter((e) => e.sql === 'BEGIN')).toHaveLength(1)
+    expect(pool.log.filter((e) => e.sql === 'COMMIT')).toHaveLength(1)
+  })
+
+  it('savepoint 失败只回滚自己', async () => {
+    const pool = new FakePool()
+    const db = new PostgresDb(pool)
+
+    await db.transaction(async () => {
+      await db.run('SELECT before')
+      await expect(
+        db.savepoint('sp_1', async () => {
+          await db.run('SELECT inside')
+          throw new Error('boom')
+        })
+      ).rejects.toThrow('boom')
+      await db.run('SELECT after')
+    })
+
+    const sqls = pool.log.map((e) => e.sql)
+    expect(sqls).toContain('SAVEPOINT sp_1')
+    expect(sqls).toContain('ROLLBACK TO SAVEPOINT sp_1')
+    expect(sqls).toContain('RELEASE sp_1')
+    // 外层事务仍然提交了
+    expect(sqls).toContain('COMMIT')
+  })
 })
