@@ -36,7 +36,7 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，223 条
+npm run test                # vitest，227 条
 npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
 npm run verify:dashboard    # 面板渲染验证，50 条断言（需要面板已启动）
 npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
@@ -371,6 +371,30 @@ schema 里所有时间列都要用 `ts(dialect)`（SQLite→INTEGER，PG→BIGIN
 任何「挑几个字段当唯一键」的地方都要问一句：
 **还有哪个字段能让两条不同的事件算出同一个键？**
 
+### 27. PG 事务里的语句必须走**事务自己的连接**
+
+PG 的事务必须独占一个连接：`BEGIN` 之后的所有语句都得走同一个连接，
+否则就不在同一个事务里了。
+
+⚠️ 踩过：`transaction()` 从池里借出一个 client 发 `BEGIN`，
+但所有语句走的是 `pool.query` —— 而 `pool.query` 会挑一个**空闲连接**，
+那是另一个连接。结果：事务在 PG 上**形同虚设**，
+`BEGIN`/`COMMIT` 落在一个连接上，语句全在事务之外跑。
+后果是摄入链路失去原子性 —— 中途失败会留下半截数据。
+
+修法：用 `AsyncLocalStorage` 记住「当前事务的连接」。
+
+⚠️ **不能用普通字段存**：适配器是所有请求共享的，
+并发的两个事务会互相覆盖 —— 事务 A 的语句跑到事务 B 的连接上，
+两个事务互相看到对方的数据（隔离级别直接失效）。
+`AsyncLocalStorage` 按**异步调用链**隔离，互不干扰。
+
+**这个 bug 为什么没被 PGlite 测出来**：PGlite 是**单连接**的，
+天然不会出现「语句跑到别的连接上」。
+所以另写了一个**假连接池**测试（`tests/postgres-transaction.test.ts`）：
+池和借出的连接是不同身份，一眼就能看出语句跑去了哪。
+⚠️ **单连接的实现证明不了多连接的行为** —— 这类差异要专门造。
+
 ---
 
 ## 数据层
@@ -415,7 +439,7 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 223 条
+npm run test              # 227 条
 npm run verify            # 33 条端到端断言
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
