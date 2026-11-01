@@ -204,7 +204,7 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 233 条单元测试（Collector 158 + SDK 75）
+npm run test              # 237 条单元测试（Collector 162 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
@@ -652,7 +652,7 @@ docker compose up --build
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 233 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 2 条性能闸门
+- [x] 237 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 2 条性能闸门
 
 待做：
 
