@@ -28,6 +28,7 @@ describe('sourcemap 解析缓存', () => {
       run: (sql, params) => inner.run(sql, params),
       insert: (sql, params) => inner.insert(sql, params),
       transaction: (fn) => inner.transaction(fn),
+      savepoint: (name, fn) => inner.savepoint(name, fn),
       close: () => inner.close()
     }
     return { db, reads: () => reads }
