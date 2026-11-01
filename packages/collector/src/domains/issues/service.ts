@@ -180,6 +180,13 @@ export class IssueService {
 
       // 同一事件重复上报（网络重试）→ 直接忽略，不重复计数
       if (inserted.changes === 0) {
+        // ⚠️ 罕见分支：同一个 eventId 换了指纹 —— 明细写不进去，
+        //    但刚才为它建出来的 Issue 行会留成 **count=0 的空壳**，
+        //    在面板上看起来像「有个问题但一次都没发生过」。
+        //    删掉它 —— 反正这次事件没被接收，不该有 Issue。
+        if (created) {
+          await this.db.run('DELETE FROM issues WHERE id = ?', [issue.id])
+        }
         return {
           issueId: issue.id,
           shortId: issue.short_id,
