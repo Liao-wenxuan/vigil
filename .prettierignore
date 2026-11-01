@@ -3,3 +3,5 @@ dist/
 coverage/
 package-lock.json
 *.md
+# 自动生成的类型声明 —— 内容由 unplugin-auto-import 决定，格式不由我们控制
+packages/dashboard/src/auto-imports.d.ts
