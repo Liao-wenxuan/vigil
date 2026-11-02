@@ -1,4 +1,4 @@
-import { bigInt, bool, json, longText, pk, text, ts, type Dialect } from './dialect.js'
+import { bigInt, bool, json, longText, pk, real, text, ts, type Dialect } from './dialect.js'
 
 /**
  * 项目用量计数表。
@@ -24,6 +24,30 @@ export function projectUsageDdl(dialect: Dialect): string {
   events_total ${bigInt(dialect)} NOT NULL DEFAULT 0,
   updated_at ${ts(dialect)} NOT NULL
 );`
+}
+
+/**
+ * SLO 定义表。
+ *
+ * 单独抽成函数是因为**迁移也要用同一份 DDL**：
+ * 两边各写一份，迟早漂移成一新一旧，而那种 bug 只在老库上出现。
+ */
+export function sloDdl(dialect: Dialect): string {
+  return `CREATE TABLE IF NOT EXISTS slos (
+  id ${pk(dialect)},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name ${text(dialect)} NOT NULL,
+  metric ${text(dialect)} NOT NULL DEFAULT 'error_rate',
+  -- 目标值是**比例**（0.999 = 99.9%），窗口与步长的单位是**秒**
+  target ${real(dialect)} NOT NULL,
+  window_seconds INTEGER NOT NULL,
+  step_seconds INTEGER NOT NULL,
+  enabled ${bool(dialect)} NOT NULL DEFAULT 1,
+  created_at ${ts(dialect)} NOT NULL,
+  updated_at ${ts(dialect)} NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_slos_project ON slos(project_id, enabled);`
 }
 
 /**
@@ -523,5 +547,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_org_time ON audit_log(organization_id, created_at DESC);
+
+-- ============================================================
+-- SLO 与错误预算
+-- ============================================================
+${sloDdl(dialect)}
 `
 }
