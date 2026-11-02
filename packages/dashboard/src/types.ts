@@ -338,6 +338,7 @@ export type AlertRuleType =
   | 'metric.error_count'
   | 'metric.error_rate'
   | 'metric.lcp_p95'
+  | 'slo.burn_rate'
 
 export type ChannelType = 'webhook' | 'feishu' | 'dingtalk' | 'email' | 'slack'
 
@@ -348,6 +349,8 @@ export interface AlertConditions {
   level?: string[]
   tags?: Array<{ key: string; value: string }>
   assigneeIds?: number[]
+  /** 只盯这个 SLO（`slo.burn_rate` 规则用）；缺省 = 所有启用的 SLO */
+  sloId?: number
 }
 
 export interface AlertRule {
@@ -676,6 +679,12 @@ export const ALERT_RULE_TYPE_LABELS: Record<AlertRuleType, { label: string; hint
   'metric.lcp_p95': {
     label: 'LCP P95 超阈值',
     hint: '页面最大内容绘制的 P95 超过阈值时通知。阈值单位是「毫秒」。'
+  },
+  'slo.burn_rate': {
+    label: 'SLO 燃烧率超阈值',
+    hint:
+      '错误预算烧得比预期快时通知。长窗口与短窗口**同时**超阈值才触发 —— ' +
+      '短窗口负责快速感知，长窗口负责确认持续消耗。阈值单位是「倍」。'
   }
 }
 
