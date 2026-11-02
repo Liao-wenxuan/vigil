@@ -29,7 +29,9 @@
     "audit:plans": "tsx scripts/audit-query-plans.ts",
     "audit:ingest": "tsx scripts/audit-ingest-calls.ts",
     "audit:scope": "tsx scripts/audit-tenant-scope.ts",
-    "prepare": "husky"
+    "audit:publish": "tsx scripts/audit-publish.ts",
+    "prepare": "husky",
+    "smoke:deploy": "node scripts/smoke-deploy.mjs"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.6.0",
