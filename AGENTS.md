@@ -36,12 +36,13 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，237 条
+npm run test                # vitest，240 条
 npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
 npm run verify:dashboard    # 面板渲染验证，50 条断言（需要面板已启动）
 npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
 npm run audit:plans         # 查询计划闸门，1 条（检查所有热查询走索引）
 npm run audit:ingest        # 摄入预算闸门，2 条（每条事件 ≤ 3 次往返，每批 ≤ 1 次提交）
+npm run audit:scope         # 租户隔离闸门，1 条（每条语句都带租户范围）
 npm run build               # 构建 SDK / Collector / Dashboard
 
 # 管理 CLI（组织 / 项目 / 环境 / 版本）
@@ -371,7 +372,41 @@ schema 里所有时间列都要用 `ts(dialect)`（SQLite→INTEGER，PG→BIGIN
 任何「挑几个字段当唯一键」的地方都要问一句：
 **还有哪个字段能让两条不同的事件算出同一个键？**
 
-### 27. PG 事务里的语句必须走**事务自己的连接**
+### 27. 管理端每条语句都要自带租户范围
+
+多租户系统最致命的 bug 不是崩溃，是**串数据**：
+在项目 B 的页面上看到项目 A 的 issue，或者改掉 A 的告警规则。
+
+⚠️ 而「漏一个条件」在代码上几乎看不出来 ——
+`WHERE id = ?` 和 `WHERE id = ? AND project_id = ?` 长得一样。
+
+**闸门** `npm run audit:scope`：
+
+1. 从**库结构**读出每张表有哪些租户列（`project_id` / `organization_id`）
+   —— ⚠️ 不硬编码表清单，新表上线自动纳入检查
+2. `app.inject()` 打一遍管理端**所有接口**（读 + 写）
+3. SELECT / UPDATE / DELETE → 必须有 `租户列 = ?`（或 `= (SELECT ...)`）
+   INSERT → 插入列里必须带租户列
+
+它抓到过六处真问题：
+
+- `issue_events` 的详情查询只按 `issue_id`（靠父查询兜着）
+- `UPDATE issues ... WHERE id = ?`（resolve / bookmark / assign）
+- `UPDATE issue_users ... WHERE issue_id = ?`
+- 告警规则的修改与删除**只按 id**，URL 里连项目都没有
+- `SELECT name FROM members WHERE id = ?` —— 成员归属的是**组织**不是项目
+
+**原则**：隔离不能依赖调用方记得检查过。
+自己带上范围，隔离就不依赖调用链了 —— 纵深防御。
+
+⚠️ **纯子表没有租户列**（`issue_activity` / `issue_comments` /
+`issue_tags` / `issue_users`）—— 它们靠 FK 挂父行，归属继承自父行。
+那种表的隔离由父查询保证，闸门不检查，但会在输出里列出来提醒你。
+
+⚠️ 闸门在**库副本**上跑 —— 它要真的调写接口才能检查写语句的范围，
+但那些调用不能污染演示数据。
+
+### 28. PG 事务里的语句必须走**事务自己的连接**
 
 PG 的事务必须独占一个连接：`BEGIN` 之后的所有语句都得走同一个连接，
 否则就不在同一个事务里了。
@@ -439,12 +474,13 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 237 条
+npm run test              # 240 条
 npm run verify            # 33 条端到端断言
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
 npm run audit:plans       # 1 条查询计划闸门
 npm run audit:ingest      # 2 条摄入预算闸门
+npm run audit:scope       # 1 条租户隔离闸门
 ```
 
 `npm run verify` 跑的是**真实链路**：真 Chromium → 真 SDK 产物 → 真 HTTP →
@@ -517,7 +553,7 @@ npm run audit:ingest      # 2 条摄入预算闸门
 （唯一索引 `idx_issue_events_uid UNIQUE (project_id, event_id)` 的作用域
 与原来那条 SELECT 完全一致，所以语义没变。）
 
-### 28. 一批事件 = 一个事务 + 每条一个 SAVEPOINT
+### 29. 一批事件 = 一个事务 + 每条一个 SAVEPOINT
 
 SDK 一批最多 20 条。逐条开事务意味着 **20 次提交** ——
 SQLite 上是 20 次 WAL 追加，PG 上是 20 次网络往返。
