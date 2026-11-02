@@ -20,7 +20,8 @@ import {
   Setting,
   TrendCharts,
   VideoCamera,
-  Warning
+  Warning,
+  Aim
 } from '@element-plus/icons-vue'
 import { listOrganizations, listProjects } from '../api/client'
 import {
@@ -47,6 +48,7 @@ const navItems = [
   { to: '/sessions', label: '会话回放', icon: VideoCamera, section: '' },
   { to: '/behavior', label: '用户行为', icon: Pointer, section: '' },
   { to: '/alerts', label: '告警', icon: Bell, section: '' },
+  { to: '/slo', label: 'SLO 与预算', icon: Aim, section: '' },
   {
     to: '/settings?section=environments',
     label: '环境与版本',
