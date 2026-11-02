@@ -65,6 +65,20 @@ export function text(_dialect: Dialect): string {
   return 'TEXT'
 }
 
+/**
+ * 浮点数（比例、目标值）。
+ *
+ * SQLite 的 `REAL` 与 PG 的 `DOUBLE PRECISION` 都是 IEEE 754 双精度，
+ * 行为一致 —— 所以 SLO 目标值（0.999 这种）两边都能存。
+ *
+ * ⚠️ 别用 PG 的 `NUMERIC`：它是**定点十进制**，
+ *    `0.1 + 0.2` 在那里是 `0.3`（精确），在这里是 `0.30000000000000004` ——
+ *    两边算出来的比例会对不上。
+ */
+export function real(dialect: Dialect): string {
+  return dialect === 'postgres' ? 'DOUBLE PRECISION' : 'REAL'
+}
+
 /** 长字符串（消息、栈） */
 export function longText(_dialect: Dialect): string {
   return 'TEXT'
