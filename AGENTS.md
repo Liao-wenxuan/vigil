@@ -36,7 +36,7 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，258 条
+npm run test                # vitest，264 条
 npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
 npm run verify:dashboard    # 面板渲染验证，50 条断言（需要面板已启动）
 npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
@@ -474,7 +474,7 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 258 条
+npm run test              # 264 条
 npm run verify            # 33 条端到端断言
 npm run verify:dashboard  # 55 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
@@ -577,6 +577,9 @@ PG 里**一条语句失败会中止整个事务**，
 闸门 `npm run audit:ingest` 现在量**两个**数：
 每条事件的 DB 往返数（预算 3）和每批的提交次数（预算 1）。
 
+调预算用 `VIGIL_INGEST_BUDGET=3 npx tsx scripts/audit-ingest-calls.ts`，
+看闸门真的会挂（改完记得调回来）。
+
 ⚠️ SAVEPOINT 的价值**只有在真 PG 上才证明得了**：
 PG 里一条语句失败会**中止整个事务**，
 后续语句全部报 `current transaction is aborted`。
@@ -626,6 +629,29 @@ SLO 域（`domains/slo/`）最容易错的是**口径**，三条硬规则：
 长窗口（1h/6h/1d/3d）配短窗口（5m/30m/2h/6h），
 **两个窗口同时超阈值才告警** —— 短窗口负责快速感知，长窗口负责确认持续消耗。
 只看一个窗口要么抖（短）、要么太慢（长）。
+
+### 31. SLO 燃烧率告警：长短窗口同时超 + 去重键要区分主体
+
+**规则类型** `slo.burn_rate`，字段映射：
+
+| 规则字段 | 含义 |
+|---|---|
+| `windowSeconds` | **短窗口**（必须是标准配对里的一个：300/1800/7200/21600） |
+| `threshold` | 燃烧率阈值（倍数） |
+| `conditions.sloId` | 盯哪个 SLO；缺省 = 项目内所有启用的 SLO |
+
+长窗口由配对表决定（与短窗口一一对应），不单独配。
+
+⚠️ **两个窗口必须同时超阈值才触发**：
+只看短窗口 → 一阵尖峰就炸，过十分钟又好，告警来回响，人就麻木了；
+只看长窗口 → 真出事要等一天才响。
+
+⚠️ **去重键必须区分 SLO**：
+去重键原本是 `规则id:主体id:窗口编号`，SLO 规则没有 issue 主体，
+两个 SLO 会共用同一个键 —— 第一个触发后第二个被当成重复丢掉。
+所以 `fire()` 加了 `dedupeScope` 参数，SLO 规则传 `slo_<id>`。
+
+⚠️ **停用的 SLO 不参与评估** —— 评估器要过滤 `enabled`。
 
 
 调预算用 `VIGIL_INGEST_BUDGET=3 npx tsx scripts/audit-ingest-calls.ts`，
