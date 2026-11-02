@@ -8,6 +8,7 @@ import { PerformanceService } from '../src/domains/performance/service.js'
 import { AlertingService } from '../src/domains/alerting/service.js'
 import { AlertEvaluator } from '../src/domains/alerting/evaluator.js'
 import { ReplayService } from '../src/domains/replay/service.js'
+import { SloService } from '../src/domains/slo/service.js'
 import type { ErrorEvent, PerformanceEvent } from '@vigil/protocol'
 
 /**
@@ -24,7 +25,9 @@ export async function setupDb(options: { transformDb?: (db: Db) => Db } = {}) {
   const issues = new IssueService(db, artifacts.sourcemapResolver)
   const performance = new PerformanceService(db)
   const alerting = new AlertingService(db)
-  const evaluator = new AlertEvaluator(db, alerting)
+  // ⚠️ SLO 服务要传给评估器 —— 「SLO 燃烧率」规则靠它算燃烧率
+  const slo = new SloService(db)
+  const evaluator = new AlertEvaluator(db, alerting, slo)
   const replay = new ReplayService(db)
 
   const organization = await tenancy.createOrganization('测试组织')
@@ -39,6 +42,7 @@ export async function setupDb(options: { transformDb?: (db: Db) => Db } = {}) {
     alerting,
     evaluator,
     replay,
+    slo,
     organization,
     project: created.project,
     runtimeKey: created.runtimeKey,
