@@ -555,6 +555,73 @@ export interface ErrorTrend {
 }
 
 /* ============================================================
+ * SLO 与错误预算
+ * ============================================================ */
+
+export type SloStatus = 'healthy' | 'at_risk' | 'exhausted'
+
+export interface Slo {
+  id: number
+  projectId: number
+  name: string
+  metric: string
+  /** 目标值（0~1）。0.999 = 99.9% */
+  target: number
+  windowSeconds: number
+  stepSeconds: number
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface SloEvaluation {
+  sloId: number
+  status: SloStatus
+  windowStart: number
+  windowEnd: number
+  /** 参与判定的步数（跳过无流量的步） */
+  evaluatedSteps: number
+  skippedSteps: number
+  goodSteps: number
+  total: number
+  bad: number
+  /** 达标步数 / 参与判定的步数（时间口径）。没有可判定的步时是 null */
+  sli: number | null
+  /** 整体错误率（事件口径）。没有请求时是 null */
+  errorRatio: number | null
+  budgetTotal: number
+  budgetRemaining: number
+  budgetConsumedRatio: number | null
+  burnRate: number | null
+}
+
+/** 一对长短窗口的燃烧率 */
+export interface SloBurnRateWindow {
+  longSeconds: number
+  shortSeconds: number
+  threshold: number
+  longBurnRate: number | null
+  shortBurnRate: number | null
+  /** 两个窗口同时超阈值 */
+  alerting: boolean
+}
+
+export interface SloBudgetPoint {
+  timestamp: number
+  total: number
+  bad: number
+  errorRate: number | null
+  compliant: boolean
+  consumedRatio: number | null
+}
+
+/** 列表接口的一项：定义 + 当前状态 */
+export interface SloWithEvaluation {
+  slo: Slo
+  evaluation: SloEvaluation
+}
+
+/* ============================================================
  * 领域词汇表 —— 中文标签
  * ============================================================ */
 
@@ -650,6 +717,16 @@ export const INCIDENT_STATUS_LABELS: Record<AlertIncident['status'], string> = {
   triggered: '已触发',
   resolved: '已恢复',
   muted: '已静默'
+}
+
+export const SLO_STATUS_LABELS: Record<SloStatus, { label: string; hint: string }> = {
+  healthy: { label: '达标', hint: '预算充足，SLI 达标' },
+  at_risk: { label: '有风险', hint: 'SLI 没达标或预算烧得比预期快' },
+  exhausted: { label: '预算已耗尽', hint: '允许的错误已经用完，该停发布了' }
+}
+
+export const SLO_METRIC_LABELS: Record<string, string> = {
+  error_rate: '错误率'
 }
 
 export const BEHAVIOR_TYPE_LABELS: Record<BehaviorEventType, string> = {
