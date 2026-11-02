@@ -41,6 +41,11 @@ jobs:
       - name: 发布准备检查
         run: npm run audit:publish
 
+      # SLO 发布闸门：CI 里没有真实项目，跑到「没有 SLO → 跳过」即可 ——
+      # 这一步是为了保证脚本不会烂掉
+      - name: slo 闸门冒烟
+        run: npm run slo:gate -- --all
+
       - name: 安装浏览器
         run: npx playwright install --with-deps chromium
 
