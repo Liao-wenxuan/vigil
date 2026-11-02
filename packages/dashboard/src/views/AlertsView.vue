@@ -117,8 +117,10 @@ async function load(): Promise<void> {
 }
 
 async function toggleRule(rule: AlertRule, enabled: boolean): Promise<void> {
+  const projectId = ctx.projectId
+  if (projectId === null) return
   try {
-    const updated = await updateAlertRule(rule.id, { enabled })
+    const updated = await updateAlertRule(projectId, rule.id, { enabled })
     rules.value = rules.value.map((item) => (item.id === updated.id ? updated : item))
     ElMessage.success(enabled ? '规则已启用' : '规则已停用')
   } catch (error) {
@@ -128,6 +130,8 @@ async function toggleRule(rule: AlertRule, enabled: boolean): Promise<void> {
 }
 
 async function removeRule(rule: AlertRule): Promise<void> {
+  const projectId = ctx.projectId
+  if (projectId === null) return
   try {
     await ElMessageBox.confirm(`确认删除规则「${rule.name}」？`, '删除规则', {
       type: 'warning',
@@ -139,7 +143,7 @@ async function removeRule(rule: AlertRule): Promise<void> {
   }
 
   try {
-    await deleteAlertRule(rule.id)
+    await deleteAlertRule(projectId, rule.id)
     ElMessage.success('规则已删除')
     await load()
   } catch (error) {
