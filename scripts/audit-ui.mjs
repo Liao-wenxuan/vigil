@@ -46,6 +46,7 @@ const PAGES = [
   { path: '/sessions', name: '会话回放' },
   { path: '/behavior', name: '用户行为' },
   { path: '/alerts', name: '告警' },
+  { path: '/slo', name: 'SLO' },
   { path: '/settings', name: '设置' }
 ]
 
