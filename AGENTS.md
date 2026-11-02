@@ -36,12 +36,13 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，264 条
+npm run test                # vitest，273 条
 npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
 npm run verify:dashboard    # 面板渲染验证，50 条断言（需要面板已启动）
 npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
 npm run audit:plans         # 查询计划闸门，1 条（检查所有热查询走索引）
 npm run audit:ingest        # 摄入预算闸门，2 条（每条事件 ≤ 3 次往返，每批 ≤ 1 次提交）
+npm run slo:gate -- --project 1   # SLO 发布闸门（预算耗尽 → 退出码 1）
 npm run audit:scope         # 租户隔离闸门，1 条（每条语句都带租户范围）
 npm run build               # 构建 SDK / Collector / Dashboard
 
@@ -474,7 +475,7 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 264 条
+npm run test              # 273 条
 npm run verify            # 33 条端到端断言
 npm run verify:dashboard  # 55 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
@@ -676,6 +677,32 @@ SDK 与协议包是**对外交付物**，发出去之前必须过发布准备闸
 CI 跑的是 `npm ci`，lockfile 不同步会直接失败。
 
 ⚠️ `prepublishOnly` 挂上构建 —— 否则会发出一个陈旧的 `dist`。
+
+### 33. 发布闸门的策略要放在领域层
+
+「什么情况阻断发布」是**业务规则**，不是命令行细节。
+放在 `scripts/slo-gate.ts` 里就没法测 —— 每次改都要手工跑命令看退出码。
+
+所以拆成两半：
+- `domains/slo/gate.ts` —— **纯函数** `decideSloGate()`，规则一目了然，有单元测试盯着
+- `scripts/slo-gate.ts` —— 只负责读库、调用策略、翻译成退出码
+
+默认规则：
+
+| 状态 | 阻断？ | 理由 |
+|---|---|---|
+| `exhausted` | **阻断** | 预算烧光就该停发布 |
+| `at_risk` | 提示 | 预算还在，值得知道，不值得拦人（`--strict` 可改） |
+| `healthy` | 通过 | |
+| 无数据 | 提示 | 没流量就判不了（`--require-data` 可改） |
+| 没有 SLO | 跳过 | 没配目标等于没闸门（`--require-slo` 可改） |
+
+⚠️ **「闸门跑不起来」和「没有东西可判」是两回事**：
+- 没有数据库 → 什么都没得判 → 跳过（退出码 0）
+- 数据库连不上 → 跑不了就不能放行 → 退出码 2（CI 一样会挂）
+
+⚠️ **退出码要分清**：0 放行 / 1 被阻断 / 2 闸门自身故障。
+流水线只看「非零」，所以 1 和 2 都会拦住发版，但日志里的含义完全不同。
 
 
 调预算用 `VIGIL_INGEST_BUDGET=3 npx tsx scripts/audit-ingest-calls.ts`，
