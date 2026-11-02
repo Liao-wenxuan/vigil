@@ -33,6 +33,14 @@ jobs:
       - name: 单元测试
         run: npm run test
 
+      # 发布准备：SDK 能不能真的被装上（类型引用、依赖位置、tarball 内容）
+      # ⚠️ 这一步要**先构建** —— 闸门查的是 dist 里的产物
+      - name: 构建可发布的包
+        run: npm run build --workspace @vigil/sdk
+
+      - name: 发布准备检查
+        run: npm run audit:publish
+
       - name: 安装浏览器
         run: npx playwright install --with-deps chromium
 
