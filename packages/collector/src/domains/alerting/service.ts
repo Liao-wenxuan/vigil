@@ -48,10 +48,16 @@ export class AlertingService {
       ]
     )
 
-    return await this.getRule(insertedId)
+    return await this.getRule(input.projectId, insertedId)
   }
 
-  async getRule(id: number): Promise<AlertRule> {
+  /**
+   * 取一条告警规则。
+   *
+   * ⚠️ **必须带 projectId** —— 规则和通道都是「按 id 就能定位到别的项目」的资源，
+   *    只按 id 查等于把租户范围交给调用方保证。
+   */
+  async getRule(projectId: number, id: number): Promise<AlertRule> {
     const row = await this.db.get<{
       id: number
       project_id: number
@@ -65,7 +71,7 @@ export class AlertingService {
       created_by: number | null
       created_at: number
       updated_at: number
-    }>('SELECT * FROM alert_rules WHERE id = ?', [id])
+    }>('SELECT * FROM alert_rules WHERE id = ? AND project_id = ?', [id, projectId])
 
     if (!row) throw AppError.notFound('告警规则')
     return toRule(row)
@@ -81,6 +87,7 @@ export class AlertingService {
   }
 
   async updateRule(
+    projectId: number,
     id: number,
     patch: Partial<{
       name: string
@@ -92,14 +99,14 @@ export class AlertingService {
       enabled: boolean
     }>
   ): Promise<AlertRule> {
-    const current = await this.getRule(id)
+    const current = await this.getRule(projectId, id)
     const now = Date.now()
 
     await this.db.run(
       `UPDATE alert_rules SET
          name = ?, type = ?, conditions_json = ?, threshold = ?, window_seconds = ?,
          channel_ids_json = ?, enabled = ?, updated_at = ?
-       WHERE id = ?`,
+       WHERE id = ? AND project_id = ?`,
       [
         patch.name ?? current.name,
         patch.type ?? current.type,
@@ -109,15 +116,16 @@ export class AlertingService {
         writeJson(patch.channelIds ?? current.channelIds),
         (patch.enabled ?? current.enabled) ? 1 : 0,
         now,
-        id
+        id,
+        projectId
       ]
     )
 
-    return await this.getRule(id)
+    return await this.getRule(projectId, id)
   }
 
-  async deleteRule(id: number): Promise<void> {
-    await this.db.run('DELETE FROM alert_rules WHERE id = ?', [id])
+  async deleteRule(projectId: number, id: number): Promise<void> {
+    await this.db.run('DELETE FROM alert_rules WHERE id = ? AND project_id = ?', [id, projectId])
   }
 
   // ---- 通道 ----
@@ -132,10 +140,11 @@ export class AlertingService {
       'INSERT INTO notification_channels (project_id, name, type, config_json, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)',
       [input.projectId, input.name, input.type, writeJson(input.config), Date.now()]
     )
-    return await this.getChannel(insertedId)
+    return await this.getChannel(input.projectId, insertedId)
   }
 
-  async getChannel(id: number): Promise<NotificationChannel> {
+  /** 取一个通知通道 —— 和规则一样，必须带 projectId */
+  async getChannel(projectId: number, id: number): Promise<NotificationChannel> {
     const row = await this.db.get<{
       id: number
       project_id: number
@@ -144,7 +153,7 @@ export class AlertingService {
       config_json: string | null
       enabled: number
       created_at: number
-    }>('SELECT * FROM notification_channels WHERE id = ?', [id])
+    }>('SELECT * FROM notification_channels WHERE id = ? AND project_id = ?', [id, projectId])
 
     if (!row) throw AppError.notFound('通知通道')
     return toChannel(row)
@@ -160,6 +169,7 @@ export class AlertingService {
   }
 
   async updateChannel(
+    projectId: number,
     id: number,
     patch: Partial<{
       name: string
@@ -168,24 +178,30 @@ export class AlertingService {
       enabled: boolean
     }>
   ): Promise<NotificationChannel> {
-    const current = await this.getChannel(id)
+    const current = await this.getChannel(projectId, id)
 
     await this.db.run(
-      'UPDATE notification_channels SET name = ?, type = ?, config_json = ?, enabled = ? WHERE id = ?',
+      `UPDATE notification_channels
+       SET name = ?, type = ?, config_json = ?, enabled = ?
+       WHERE id = ? AND project_id = ?`,
       [
         patch.name ?? current.name,
         patch.type ?? current.type,
         writeJson(patch.config ?? current.config),
         (patch.enabled ?? current.enabled) ? 1 : 0,
-        id
+        id,
+        projectId
       ]
     )
 
-    return await this.getChannel(id)
+    return await this.getChannel(projectId, id)
   }
 
-  async deleteChannel(id: number): Promise<void> {
-    await this.db.run('DELETE FROM notification_channels WHERE id = ?', [id])
+  async deleteChannel(projectId: number, id: number): Promise<void> {
+    await this.db.run('DELETE FROM notification_channels WHERE id = ? AND project_id = ?', [
+      id,
+      projectId
+    ])
   }
 
   // ---- 触发记录 ----
