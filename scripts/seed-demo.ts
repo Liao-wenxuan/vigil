@@ -42,7 +42,10 @@ if (shouldReset) {
   console.log(`[seed] 已清空 ${dbPath}`)
 }
 
-const db = openDb(dbPath)
+// ⚠️ 必须 await —— `openDb` 是异步的（要跑迁移）。
+//    漏了 await 的话 db 是个 Promise，领域服务拿到它就会报
+//    "this.db.get is not a function"。
+const db = await openDb(dbPath)
 const tenancy = new TenancyService(db)
 const artifacts = new ArtifactService(db)
 const issues = new IssueService(db, artifacts.sourcemapResolver)
@@ -236,10 +239,13 @@ const now = Date.now()
 // ============================================================
 // 租户
 // ============================================================
-const organization = tenancy.createOrganization('示例科技', 'example')
-const team = tenancy.createTeam(organization.id, '前端组', 'frontend')
+// ⚠️ 这些都必须 await —— 租户域是异步的（Db 接口异步化之后）。
+//    漏了 await 的话 organization.id 是 undefined，
+//    后面建出来的项目全都没有归属，脚本却一路跑到底。
+const organization = await tenancy.createOrganization('示例科技', 'example')
+const team = await tenancy.createTeam(organization.id, '前端组', 'frontend')
 
-const shop = tenancy.createProject({
+const shop = await tenancy.createProject({
   organizationId: organization.id,
   teamId: team.id,
   name: '购物小程序',
@@ -247,7 +253,7 @@ const shop = tenancy.createProject({
   platform: 'vue'
 })
 
-const blog = tenancy.createProject({
+const blog = await tenancy.createProject({
   organizationId: organization.id,
   teamId: team.id,
   name: '内容平台',
@@ -257,14 +263,14 @@ const blog = tenancy.createProject({
 
 // 环境与版本
 for (const project of [shop, blog]) {
-  tenancy.createEnvironment(project.project.id, 'production', '生产环境', true)
-  tenancy.createEnvironment(project.project.id, 'staging', '预发环境', false)
-  tenancy.createEnvironment(project.project.id, 'development', '开发环境', false)
+  await tenancy.createEnvironment(project.project.id, 'production', '生产环境', true)
+  await tenancy.createEnvironment(project.project.id, 'staging', '预发环境', false)
+  await tenancy.createEnvironment(project.project.id, 'development', '开发环境', false)
 }
-tenancy.createRelease(shop.project.id, '1.4.2', 'a1b2c3d')
-tenancy.createRelease(shop.project.id, '1.4.3', 'e4f5g6h')
-tenancy.createRelease(shop.project.id, '1.4.1', 'x9y8z7w')
-tenancy.createRelease(blog.project.id, '0.9.0-beta.3')
+await tenancy.createRelease(shop.project.id, '1.4.2', 'a1b2c3d')
+await tenancy.createRelease(shop.project.id, '1.4.3', 'e4f5g6h')
+await tenancy.createRelease(shop.project.id, '1.4.1', 'x9y8z7w')
+await tenancy.createRelease(blog.project.id, '0.9.0-beta.3')
 
 // ============================================================
 // 问题
@@ -443,7 +449,7 @@ const archivedOutcome = await issues.ingestEvent(
     })
   )
 )
-issues.archive(shop.project.id, archivedOutcome.issueId, {
+await issues.archive(shop.project.id, archivedOutcome.issueId, {
   strategy: 'until_escalating',
   reason: '推荐服务偶尔抖动，先归档'
 })
@@ -705,7 +711,7 @@ await alerting.createRule({
 // ============================================================
 // 汇总
 // ============================================================
-const stats = issues.stats(shop.project.id)
+const stats = await issues.stats(shop.project.id)
 const perf = await performance.summary({ projectId: shop.project.id })
 
 console.log('')
