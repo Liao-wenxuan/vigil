@@ -204,12 +204,13 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 237 条单元测试（Collector 162 + SDK 75）
+npm run test              # 240 条单元测试（Collector 165 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
 npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走索引）
 npm run audit:ingest      # 2 条摄入预算闸门（每条事件 ≤ 3 次往返，每批 ≤ 1 次提交）
+npm run audit:scope       # 1 条租户隔离闸门（每条语句都带租户范围）
 npm run typecheck
 npm run lint
 ```
@@ -280,6 +281,27 @@ npm run lint
 2. 逐条提交 —— 一批 20 条就是 20 次提交。
    修法是整批一个事务，每条事件再套一层 SAVEPOINT
    （PG 里一条语句失败会中止整个事务，不隔离的话一条坏事件会带走整批）。
+
+### 租户隔离闸门
+
+多租户系统最致命的 bug 不是崩溃，是**串数据**：
+在项目 B 的页面上看到项目 A 的 issue，或者改掉 A 的告警规则。
+
+而「漏一个条件」在代码上几乎看不出来 ——
+`WHERE id = ?` 和 `WHERE id = ? AND project_id = ?` 长得一样。
+
+`npm run audit:scope` 把它变成可自动测的：
+
+1. 从**库结构**读出每张表有哪些租户列（新表上线自动纳入检查）
+2. `app.inject()` 打一遍管理端**所有接口**（读 + 写）
+3. SELECT / UPDATE / DELETE 必须带范围条件，INSERT 必须带租户列
+
+它抓到过六处真问题，包括**告警规则的修改与删除只按 id**
+（URL 里连项目都没有），以及 `SELECT name FROM members WHERE id = ?`
+—— 成员归属的是**组织**不是项目。
+
+原则：**隔离不能依赖调用方记得检查过**。
+自己带上范围，隔离就不依赖调用链了 —— 纵深防御。
 
 <details>
 <summary>总览页静帧</summary>
@@ -652,7 +674,7 @@ docker compose up --build
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 237 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 2 条性能闸门
+- [x] 240 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 3 条性能/隔离闸门
 
 待做：
 
