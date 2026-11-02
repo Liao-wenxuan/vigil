@@ -653,6 +653,30 @@ SLO 域（`domains/slo/`）最容易错的是**口径**，三条硬规则：
 
 ⚠️ **停用的 SLO 不参与评估** —— 评估器要过滤 `enabled`。
 
+### 32. 可发布的包：`files` / `dependencies` / `publishConfig` 三件事
+
+SDK 与协议包是**对外交付物**，发出去之前必须过发布准备闸门
+（`npm run audit:publish`）。它查的是「本地看不出来、发出去就出事」的几类错：
+
+1. **类型声明引用了不可发布的包** ——
+   SDK 的 `.d.ts` 里 `import type { ... } from '@vigil/protocol'`，
+   而那个包标了 `private: true` → 消费者装不到 → TS 直接报「找不到模块」。
+   ⚠️ **本地是 workspace 链接，永远看不出来** —— 只有闸门能抓到。
+2. **依赖挂错位置** —— 已经在产物里的库（rrweb 被打进了 replay chunk）
+   还挂在 `dependencies` → 每个消费者白白装几百 KB。
+   已经在产物里的，就该是 `devDependencies`。
+3. **tarball 混进 source map** —— `files` 里用 `!dist/**/*.map` 排除。
+4. **作用域包没写 `publishConfig.access: "public"`** —— 默认是私有的，发不出去。
+5. **产物缺文件 / 体积失控** —— 闸门看 `npm pack --dry-run --json` 的真实清单。
+
+⚠️ **子路径导出不是外部包**：`@vigil/sdk/replay` 是这个包自己的入口，
+闸门判断「引用了不可发布的包」时要排除 `包名` 与 `包名/` 开头的前缀。
+
+⚠️ 改了 `package.json` 的依赖结构，**必须同步 lockfile**（`npm install --package-lock-only`）——
+CI 跑的是 `npm ci`，lockfile 不同步会直接失败。
+
+⚠️ `prepublishOnly` 挂上构建 —— 否则会发出一个陈旧的 `dist`。
+
 
 调预算用 `VIGIL_INGEST_BUDGET=3 npx tsx scripts/audit-ingest-calls.ts`，
 看闸门真的会挂（改完记得调回来）。
