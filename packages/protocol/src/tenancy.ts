@@ -40,6 +40,8 @@ export type AlertRuleType =
   | 'metric.error_count'
   /** LCP P95 超阈值 */
   | 'metric.lcp_p95'
+  /** SLO 燃烧率超阈值（长短窗口同时超才触发） */
+  | 'slo.burn_rate'
 
 /** 告警规则的条件（全部为 AND 关系） */
 export interface AlertConditions {
@@ -51,6 +53,12 @@ export interface AlertConditions {
   tags?: Array<{ key: string; value: string }>
   /** 只看这些负责人 */
   assigneeIds?: number[]
+  /**
+   * 只看这个 SLO（`slo.burn_rate` 规则用）。
+   *
+   * 缺省 = 项目内**所有启用的** SLO。
+   */
+  sloId?: number
 }
 
 export interface AlertRule {
