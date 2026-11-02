@@ -15,6 +15,7 @@ import OverviewView from '../views/OverviewView.vue'
 import PerformanceView from '../views/PerformanceView.vue'
 import SessionsView from '../views/SessionsView.vue'
 import SettingsView from '../views/SettingsView.vue'
+import SloView from '../views/SloView.vue'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -50,6 +51,12 @@ const routes: RouteRecordRaw[] = [
         name: 'alerts',
         component: AlertsView,
         meta: { title: '告警', desc: '规则、通知通道与触发历史' }
+      },
+      {
+        path: 'slo',
+        name: 'slo',
+        component: SloView,
+        meta: { title: 'SLO 与预算', desc: '目标、达标率、错误预算与燃烧率' }
       },
       {
         path: 'sessions',
