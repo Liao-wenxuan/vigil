@@ -720,7 +720,7 @@ await alerting.createRule({
 // 两条故意配出不同的状态，让面板上一眼能看出区别：
 //   严格目标 → 预算早就烧完了（exhausted）
 //   宽松目标 → 还扛得住（healthy）
-await sloService.create({
+const strictSlo = await sloService.create({
   projectId: shop.project.id,
   name: '可用性 99.9%',
   target: 0.999,
@@ -735,6 +735,19 @@ await sloService.create({
   windowSeconds: 30 * 86400,
   stepSeconds: 3600
 })
+
+// SLO 接进告警引擎：燃烧率超阈值就通知。
+// 30 分钟短窗口配 6 小时长窗口，阈值 6 倍（SRE 那组的标准值）。
+await alerting.createRule({
+  projectId: shop.project.id,
+  name: 'SLO 燃烧率超阈值',
+  type: 'slo.burn_rate',
+  threshold: 6,
+  windowSeconds: 1800,
+  conditions: { sloId: strictSlo.id },
+  channelIds: [feishu.id]
+})
+
 // ============================================================
 // 汇总
 // ============================================================
@@ -756,7 +769,7 @@ console.log(
 console.log(`    已解决      ${stats.resolved}   已归档 ${stats.archived}`)
 console.log(`  性能事务      ${totalTransactions} 条（LCP P95 ${perf.vitals.lcp.p95}ms）`)
 console.log(`  行为事件      ${behaviorCount} 条`)
-console.log(`  告警规则      3 条 · 通知通道 2 个`)
+console.log(`  告警规则      4 条 · 通知通道 2 个`)
 console.log(`  SLO           2 条 · 1 条已烧完预算`)
 console.log('')
 console.log('  ⚠️  密钥只显示这一次，数据库里只存哈希：')
