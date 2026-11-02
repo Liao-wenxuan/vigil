@@ -39,6 +39,11 @@ import type {
   ReleaseRow,
   ReplayStreamEvent,
   SessionRow,
+  Slo,
+  SloBurnRateWindow,
+  SloBudgetPoint,
+  SloEvaluation,
+  SloWithEvaluation,
   TransactionRow
 } from '../types'
 
@@ -460,6 +465,68 @@ export async function evaluateAlerts(projectId: number): Promise<AlertEvaluation
     `/projects/${projectId}/alerts/evaluate`
   )
   return body.result
+}
+
+/* ============================================================
+ * SLO 与错误预算
+ * ============================================================ */
+
+/** 列表 —— 定义和当前状态**一起**返回，省得面板发两次请求再自己拼 */
+export async function listSlos(projectId: number): Promise<SloWithEvaluation[]> {
+  const body = await get<{ slos: SloWithEvaluation[] }>(`/projects/${projectId}/slos`)
+  return body.slos ?? []
+}
+
+/** 详情 —— 带燃烧率窗口 */
+export async function getSlo(
+  projectId: number,
+  sloId: number
+): Promise<{ slo: Slo; evaluation: SloEvaluation; burnRates: SloBurnRateWindow[] }> {
+  return await get<{
+    slo: Slo
+    evaluation: SloEvaluation
+    burnRates: SloBurnRateWindow[]
+  }>(`/projects/${projectId}/slos/${sloId}`)
+}
+
+export async function getSloBudget(
+  projectId: number,
+  sloId: number
+): Promise<{ sloId: number; points: SloBudgetPoint[] }> {
+  return await get<{ sloId: number; points: SloBudgetPoint[] }>(
+    `/projects/${projectId}/slos/${sloId}/budget`
+  )
+}
+
+export function createSlo(
+  projectId: number,
+  input: {
+    name: string
+    target: number
+    windowSeconds: number
+    stepSeconds?: number
+    enabled?: boolean
+  }
+): Promise<Slo> {
+  return post<{ slo: Slo }>(`/projects/${projectId}/slos`, input).then((body) => body.slo)
+}
+
+export function updateSlo(
+  projectId: number,
+  sloId: number,
+  input: {
+    name?: string
+    target?: number
+    windowSeconds?: number
+    stepSeconds?: number
+    enabled?: boolean
+  }
+): Promise<Slo> {
+  return patch<{ slo: Slo }>(`/projects/${projectId}/slos/${sloId}`, input).then((body) => body.slo)
+}
+
+export function deleteSlo(projectId: number, sloId: number): Promise<void> {
+  return del<{ ok: boolean }>(`/projects/${projectId}/slos/${sloId}`).then(() => undefined)
 }
 
 /* ============================================================
