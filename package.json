@@ -30,6 +30,7 @@
     "audit:ingest": "tsx scripts/audit-ingest-calls.ts",
     "audit:scope": "tsx scripts/audit-tenant-scope.ts",
     "audit:publish": "tsx scripts/audit-publish.ts",
+    "slo:gate": "tsx scripts/slo-gate.ts",
     "prepare": "husky",
     "smoke:deploy": "node scripts/smoke-deploy.mjs"
   },
