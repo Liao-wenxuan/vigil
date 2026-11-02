@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { buildSchema, projectUsageDdl } from './schema.js'
+import { buildSchema, projectUsageDdl, sloDdl } from './schema.js'
 import type { Db } from './types.js'
 import { ts as tsType, type Dialect } from './dialect.js'
 
@@ -389,6 +389,14 @@ export const MIGRATIONS: Migration[] = [
       await db.exec(
         'CREATE INDEX IF NOT EXISTS idx_alert_incidents_project ON alert_incidents(project_id, triggered_at DESC)'
       )
+    }
+  },
+  {
+    version: 5,
+    name: 'slo-definitions',
+    async up(db, dialect) {
+      // SLO 定义表（错误预算与燃烧率都基于它）
+      await db.exec(sloDdl(dialect))
     }
   }
 ]
