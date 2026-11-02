@@ -16,6 +16,7 @@ import { IssueService } from '../packages/collector/src/domains/issues/service.j
 import { PerformanceService } from '../packages/collector/src/domains/performance/service.js'
 import { ArtifactService } from '../packages/collector/src/domains/artifacts/service.js'
 import { AlertingService } from '../packages/collector/src/domains/alerting/service.js'
+import { SloService } from '../packages/collector/src/domains/slo/service.js'
 import { ReplayService } from '../packages/collector/src/domains/replay/service.js'
 import { computeFingerprint } from '../packages/sdk/src/fingerprint.js'
 import type {
@@ -51,6 +52,7 @@ const artifacts = new ArtifactService(db)
 const issues = new IssueService(db, artifacts.sourcemapResolver)
 const performance = new PerformanceService(db)
 const alerting = new AlertingService(db)
+const sloService = new SloService(db)
 const replayService = new ReplayService(db)
 
 const HOUR = 3600 * 1000
@@ -639,7 +641,11 @@ replayService.incrementSessionError(shop.project.id, replaySessionId)
 const pages = ['/', '/cart', '/checkout', '/product/1024', '/order/list']
 let totalTransactions = 0
 
-for (let i = 0; i < 160; i++) {
+// ⚠️ 访问数要够 —— 错误率的分母是页面访问数。
+//    160 次访问配 110 次错误 = 69% 错误率，那是「每页都在崩」的坏应用，
+//    SLO 页面就只剩一种状态可看。400 次访问把错误率落到 ~28%，
+//    一条 SLO 烧完预算、另一条还扛得住 —— 两种状态都能演示。
+for (let i = 0; i < 400; i++) {
   const name = pages[i % pages.length]
   const slow = name === '/checkout'
   await performance.ingestTransaction(
@@ -709,6 +715,27 @@ await alerting.createRule({
 })
 
 // ============================================================
+// SLO 与错误预算
+// ============================================================
+// 两条故意配出不同的状态，让面板上一眼能看出区别：
+//   严格目标 → 预算早就烧完了（exhausted）
+//   宽松目标 → 还扛得住（healthy）
+await sloService.create({
+  projectId: shop.project.id,
+  name: '可用性 99.9%',
+  target: 0.999,
+  windowSeconds: 30 * 86400,
+  stepSeconds: 3600
+})
+
+await sloService.create({
+  projectId: shop.project.id,
+  name: '错误率低于 60%',
+  target: 0.4,
+  windowSeconds: 30 * 86400,
+  stepSeconds: 3600
+})
+// ============================================================
 // 汇总
 // ============================================================
 const stats = await issues.stats(shop.project.id)
@@ -730,6 +757,7 @@ console.log(`    已解决      ${stats.resolved}   已归档 ${stats.archived}`
 console.log(`  性能事务      ${totalTransactions} 条（LCP P95 ${perf.vitals.lcp.p95}ms）`)
 console.log(`  行为事件      ${behaviorCount} 条`)
 console.log(`  告警规则      3 条 · 通知通道 2 个`)
+console.log(`  SLO           2 条 · 1 条已烧完预算`)
 console.log('')
 console.log('  ⚠️  密钥只显示这一次，数据库里只存哈希：')
 console.log(`     运行时（上报用）  ${shop.runtimeKey}`)
