@@ -18,6 +18,7 @@ import {
   listAlertIncidents,
   listAlertRules,
   listChannels,
+  listSlos,
   updateAlertRule
 } from '../api/client'
 import {
@@ -30,7 +31,8 @@ import {
   type AlertRuleType,
   type ChannelType,
   type EnvironmentRow,
-  type NotificationChannel
+  type NotificationChannel,
+  type Slo
 } from '../types'
 import PanelSection from '../components/PanelSection.vue'
 import { categoryLabel } from '../format'
@@ -59,7 +61,24 @@ const rules = ref<AlertRule[]>([])
 const channels = ref<NotificationChannel[]>([])
 const incidents = ref<AlertIncident[]>([])
 const environments = ref<EnvironmentRow[]>([])
+/** SLO 列表 —— 「SLO 燃烧率」规则要选一个盯 */
+const slos = ref<Slo[]>([])
 const loading = ref(false)
+
+/**
+ * SLO 燃烧率规则的标准**短窗口**。
+ *
+ * 短窗口决定响应速度，长窗口由配对表决定（SRE 手册那四组）。
+ */
+const SLO_SHORT_WINDOWS = [
+  { value: 300, label: '5 分钟（配 3 天长窗口）' },
+  { value: 1800, label: '30 分钟（配 1 天长窗口）' },
+  { value: 7200, label: '2 小时（配 6 小时长窗口）' },
+  { value: 21600, label: '6 小时（配 1 小时长窗口）' }
+]
+
+/** 当前是不是 SLO 规则 —— 决定表单里显示哪些字段 */
+const isSloRule = computed(() => ruleForm.value.type === 'slo.burn_rate')
 
 const ruleVisible = ref(false)
 const channelVisible = ref(false)
@@ -71,7 +90,9 @@ const ruleForm = ref({
   windowSeconds: 300,
   environments: [] as string[],
   categories: [] as string[],
-  channelIds: [] as number[]
+  channelIds: [] as number[],
+  /** 只盯某一个 SLO；null = 所有启用的 SLO */
+  sloId: null as number | null
 })
 
 const channelForm = ref({
@@ -94,21 +115,24 @@ async function load(): Promise<void> {
     rules.value = []
     channels.value = []
     incidents.value = []
+    slos.value = []
     return
   }
 
   loading.value = true
   try {
-    const [ruleList, channelList, incidentList, detail] = await Promise.all([
+    const [ruleList, channelList, incidentList, detail, sloList] = await Promise.all([
       listAlertRules(projectId),
       listChannels(projectId),
       listAlertIncidents(projectId),
-      getProject(projectId)
+      getProject(projectId),
+      listSlos(projectId)
     ])
     rules.value = ruleList
     channels.value = channelList
     incidents.value = incidentList
     environments.value = detail.environments
+    slos.value = sloList.map((item) => item.slo)
   } catch (error) {
     ElMessage.error(`加载告警数据失败：${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -163,7 +187,9 @@ async function submitRule(): Promise<void> {
 
   const conditions = {
     ...(ruleForm.value.environments.length > 0 ? { environment: ruleForm.value.environments } : {}),
-    ...(ruleForm.value.categories.length > 0 ? { category: ruleForm.value.categories } : {})
+    ...(ruleForm.value.categories.length > 0 ? { category: ruleForm.value.categories } : {}),
+    // ⚠️ SLO 规则要指明盯哪个 SLO —— 不指就是「所有启用的 SLO」
+    ...(ruleForm.value.sloId !== null ? { sloId: ruleForm.value.sloId } : {})
   }
 
   try {
@@ -184,7 +210,8 @@ async function submitRule(): Promise<void> {
       windowSeconds: 300,
       environments: [],
       categories: [],
-      channelIds: []
+      channelIds: [],
+      sloId: null
     }
     await load()
   } catch (error) {
@@ -265,6 +292,22 @@ watch(
 watch(
   () => ctx.refreshToken,
   () => void load()
+)
+
+// 切换规则类型时把阈值/窗口调成该类型的合理默认值 ——
+// 燃烧率阈值是「倍」（6 倍之类），不是「次」
+watch(
+  () => ruleForm.value.type,
+  (type) => {
+    if (type === 'slo.burn_rate') {
+      ruleForm.value.threshold = 6
+      ruleForm.value.windowSeconds = 1800
+      ruleForm.value.sloId = null
+    } else {
+      ruleForm.value.threshold = 1
+      ruleForm.value.windowSeconds = 300
+    }
+  }
 )
 onMounted(() => void load())
 </script>
@@ -424,11 +467,31 @@ onMounted(() => void load())
 
         <el-form-item label="阈值">
           <el-input-number v-model="ruleForm.threshold" :min="1" :controls="false" />
+          <span v-if="isSloRule" class="unit-hint">倍燃烧率</span>
         </el-form-item>
 
         <el-form-item label="评估窗口">
-          <el-input-number v-model="ruleForm.windowSeconds" :min="10" :step="60" />
-          <span class="unit-hint">秒</span>
+          <el-select v-if="isSloRule" v-model="ruleForm.windowSeconds" class="full-width">
+            <el-option
+              v-for="option in SLO_SHORT_WINDOWS"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+          <template v-else>
+            <el-input-number v-model="ruleForm.windowSeconds" :min="10" :step="60" />
+            <span class="unit-hint">秒</span>
+          </template>
+        </el-form-item>
+
+        <el-form-item v-if="isSloRule" label="目标 SLO">
+          <el-select v-model="ruleForm.sloId" class="full-width" placeholder="所有启用的 SLO">
+            <el-option v-for="slo in slos" :key="slo.id" :label="slo.name" :value="slo.id" />
+          </el-select>
+          <p class="type-hint">
+            长窗口由短窗口自动配对（SRE 手册那四组）。两个窗口**同时**超阈值才告警。
+          </p>
         </el-form-item>
 
         <el-form-item label="环境">
