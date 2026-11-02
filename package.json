@@ -28,6 +28,7 @@
     "audit:ui": "node scripts/audit-ui.mjs --url http://localhost:5174",
     "audit:plans": "tsx scripts/audit-query-plans.ts",
     "audit:ingest": "tsx scripts/audit-ingest-calls.ts",
+    "audit:scope": "tsx scripts/audit-tenant-scope.ts",
     "prepare": "husky"
   },
   "devDependencies": {
