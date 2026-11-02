@@ -159,6 +159,117 @@ describe('HTTP 接口', () => {
     })
   })
 
+  describe('租户隔离', () => {
+    /**
+     * 跨租户访问必须被挡住。
+     *
+     * ⚠️ 这些断言盯的是**范围条件**，不是「有没有报错」——
+     *    漏一个 `AND project_id = ?` 往往不报错，只是把别的项目的数据返回了。
+     */
+    it('不能用别的项目的路径读自己的 issue', async () => {
+      const { app, project, runtimeKey, tenancy, organization } = await setup()
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/collect',
+        headers: { 'x-vigil-token': runtimeKey },
+        payload: { appId: project.slug, events: [makeEvent({ fingerprint: fp('tenant') })] }
+      })
+
+      const list = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${project.id}/issues`,
+        headers: adminHeader
+      })
+      const issueId = list.json().issues[0].id
+
+      // 另一个项目
+      const other = await tenancy.createProject({
+        organizationId: organization.id,
+        name: '别的项目'
+      })
+
+      const cross = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${other.project.id}/issues/${issueId}`,
+        headers: adminHeader
+      })
+      expect(cross.statusCode).toBe(404)
+    })
+
+    it('不能用别的项目的路径改自己的 issue', async () => {
+      const { app, project, runtimeKey, tenancy, organization } = await setup()
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/v1/collect',
+        headers: { 'x-vigil-token': runtimeKey },
+        payload: { appId: project.slug, events: [makeEvent({ fingerprint: fp('tenant2') })] }
+      })
+
+      const list = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${project.id}/issues`,
+        headers: adminHeader
+      })
+      const issueId = list.json().issues[0].id
+
+      const other = await tenancy.createProject({
+        organizationId: organization.id,
+        name: '别的项目2'
+      })
+
+      const cross = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${other.project.id}/issues/${issueId}/resolve`,
+        headers: adminHeader,
+        payload: { release: '1.0.0' }
+      })
+      expect(cross.statusCode).toBe(404)
+
+      // 原项目里的 issue 不该被改掉
+      const after = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${project.id}/issues/${issueId}`,
+        headers: adminHeader
+      })
+      expect(after.json().issue.status).toBe('unresolved')
+    })
+
+    it('不能用别的项目的路径改别人的告警规则', async () => {
+      const { app, project, tenancy, organization } = await setup()
+
+      const created = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${project.id}/alert-rules`,
+        headers: adminHeader,
+        payload: { name: '规则', type: 'issue.new', threshold: 1, windowSeconds: 300 }
+      })
+      const ruleId = created.json().rule.id
+
+      const other = await tenancy.createProject({
+        organizationId: organization.id,
+        name: '别的项目3'
+      })
+
+      const cross = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/projects/${other.project.id}/alert-rules/${ruleId}`,
+        headers: adminHeader,
+        payload: { enabled: false }
+      })
+      expect(cross.statusCode).toBe(404)
+
+      // 原项目的规则不该被改掉
+      const rules = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${project.id}/alert-rules`,
+        headers: adminHeader
+      })
+      expect(rules.json().rules[0].enabled).toBe(true)
+    })
+  })
+
   describe('管理接口', () => {
     it('缺 admin token → 401', async () => {
       const { app, project } = await setup()
