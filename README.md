@@ -204,7 +204,7 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 240 条单元测试（Collector 165 + SDK 75）
+npm run test              # 258 条单元测试（Collector 183 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
@@ -302,6 +302,41 @@ npm run lint
 
 原则：**隔离不能依赖调用方记得检查过**。
 自己带上范围，隔离就不依赖调用链了 —— 纵深防御。
+
+### SLO 与错误预算
+
+「错误率涨了」是**症状**；「这个月还能不能发布」是**决策**。
+SLO 域把后者变成可计算的：
+
+| 概念 | 含义 |
+|---|---|
+| **SLO** | 一段时间内这个指标要达到什么水平（如 99.9%） |
+| **SLI** | 实际达到了多少 —— 窗口内**多大比例的时间**是达标的 |
+| **错误预算** | 还允许出多少错 = (1 − 目标) × 请求数 |
+| **燃烧率** | 预算烧得比预期快多少倍（> 1 就是超额消耗） |
+
+**SLI 分步判定**，不看整体平均：
+窗口切成小步，每步单独判达标，整体 SLI = 达标步数 / 参与判定的步数。
+否则「99.99% 的时间正常、最后 1 分钟全崩」会被平均成 99.99%，
+而用户那 1 分钟全在挨骂。步长决定突发敏感度，所以它是定义的一部分。
+
+**无流量的步直接跳过** —— 没流量的时候「错误率是 0」和「没访问过」是两回事。
+
+**多窗口多燃烧率**（SRE 手册）：
+长窗口（1h / 6h / 1d / 3d）配短窗口（5m / 30m / 2h / 6h），
+**两个窗口同时超阈值才告警** —— 短窗口负责快速感知，长窗口负责确认持续消耗。
+只看一个窗口要么抖（短）、要么太慢（长）。
+
+接口：
+
+```
+GET    /api/v1/projects/:projectId/slos            # 列表 + 当前状态
+POST   /api/v1/projects/:projectId/slos            # 建 SLO
+GET    /api/v1/projects/:projectId/slos/:sloId     # 详情 + 状态 + 燃烧率窗口
+PATCH  /api/v1/projects/:projectId/slos/:sloId
+DELETE /api/v1/projects/:projectId/slos/:sloId
+GET    /api/v1/projects/:projectId/slos/:sloId/budget   # 预算消耗趋势
+```
 
 <details>
 <summary>总览页静帧</summary>
@@ -618,7 +653,7 @@ packages/
     src/
       app.ts        Fastify 路由
       domains/      tenancy / issues / performance / alerting / artifacts / replay /
-                    ingestion / trend / usage（配额计数）/ retention（保留策略）
+                    ingestion / trend / slo / usage（配额计数）/ retention（保留策略）
       infra/        db（client·schema·migrate·dialect）/ ratelimit
   dashboard/   管理面板
     src/
@@ -671,10 +706,11 @@ docker compose up --build
 - [x] 采集端脱敏
 - [x] 管理面板（总览/问题/详情/性能/**回放**/**行为**/告警/设置，8 路由）
 - [x] **PostgreSQL 支持**（同一套领域代码，SQLite / PG 双库，PG 上有真库测试）
+- [x] **SLO 与错误预算**（分步 SLI / 预算消耗 / 燃烧率 / 多窗口多燃烧率）
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 240 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 3 条性能/隔离闸门
+- [x] 258 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 3 条性能/隔离闸门
 
 待做：
 
