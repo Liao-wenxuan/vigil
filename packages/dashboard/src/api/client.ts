@@ -415,6 +415,7 @@ export function createAlertRule(
 }
 
 export function updateAlertRule(
+  projectId: number,
   ruleId: number,
   input: {
     name?: string
@@ -426,11 +427,13 @@ export function updateAlertRule(
     enabled?: boolean
   }
 ): Promise<AlertRule> {
-  return patch<{ rule: AlertRule }>(`/alert-rules/${ruleId}`, input).then((body) => body.rule)
+  return patch<{ rule: AlertRule }>(`/projects/${projectId}/alert-rules/${ruleId}`, input).then(
+    (body) => body.rule
+  )
 }
 
-export function deleteAlertRule(ruleId: number): Promise<void> {
-  return del<{ ok: boolean }>(`/alert-rules/${ruleId}`).then(() => undefined)
+export function deleteAlertRule(projectId: number, ruleId: number): Promise<void> {
+  return del<{ ok: boolean }>(`/projects/${projectId}/alert-rules/${ruleId}`).then(() => undefined)
 }
 
 export async function listChannels(projectId: number): Promise<NotificationChannel[]> {
