@@ -2,6 +2,7 @@ import type { Db } from '../../infra/db/client.js'
 import type { AlertConditions, AlertRule } from '@vigil/protocol'
 import { getSender, type ChannelConfig, type AlertMessage } from './channels.js'
 import type { AlertingService } from './service.js'
+import type { SloService } from '../slo/service.js'
 import { percentiles } from '../performance/service.js'
 
 /**
@@ -50,7 +51,8 @@ export interface IssueSubject {
 export class AlertEvaluator {
   constructor(
     private readonly db: Db,
-    private readonly alerting: AlertingService
+    private readonly alerting: AlertingService,
+    private readonly slo?: SloService
   ) {}
 
   /**
@@ -150,6 +152,8 @@ export class AlertEvaluator {
         return await this.evaluateErrorRate(rule, windowStart, now)
       case 'metric.lcp_p95':
         return await this.evaluateLcpP95(rule, windowStart, now)
+      case 'slo.burn_rate':
+        return await this.evaluateSloBurnRate(rule, now)
       default:
         return 0
     }
@@ -328,6 +332,79 @@ export class AlertEvaluator {
   }
 
   // ==========================================================
+  // slo.burn_rate —— SLO 燃烧率超阈值
+  // ==========================================================
+  /**
+   * SLO 燃烧率告警。
+   *
+   * ## 为什么要「长短窗口同时超」
+   *
+   * 只看一个窗口两头不讨好：
+   * - 只看短窗口 → 一阵尖峰就炸，过十分钟又好了，告警来回响，人就麻木了
+   * - 只看长窗口 → 真出事了要等一天才响
+   *
+   * 所以**长窗口配短窗口，两个都超阈值才告警**：
+   * 短窗口负责快速感知，长窗口负责确认这是持续消耗而不是偶发。
+   *
+   * ## 规则字段怎么映射
+   *
+   * - `rule.windowSeconds` = **短窗口**（必须是标准配对里的一个）
+   * - `rule.threshold` = 燃烧率阈值
+   * - `rule.conditions.sloId` = 指定 SLO（缺省 = 项目内所有启用的 SLO）
+   */
+  private async evaluateSloBurnRate(rule: AlertRule, now: number): Promise<number> {
+    // 没装 SLO 服务就评不了（老部署结构）—— 不报错，跳过
+    if (!this.slo) return 0
+
+    const targets = rule.conditions.sloId
+      ? [{ id: rule.conditions.sloId }]
+      : (await this.slo.list(rule.projectId)).filter((s) => s.enabled).map((s) => ({ id: s.id }))
+    if (targets.length === 0) return 0
+
+    let triggered = 0
+    for (const target of targets) {
+      let slo
+      try {
+        slo = await this.slo.get(rule.projectId, target.id)
+      } catch {
+        continue // SLO 被删了 —— 跳过，不算失败
+      }
+      if (!slo.enabled) continue
+
+      const windows = await this.slo.burnRateWindows(rule.projectId, slo, now)
+      const pair = windows.find((w) => w.shortSeconds === rule.windowSeconds)
+      // 短窗口不在标准配对里 —— 规则配错了，不该报
+      if (!pair) continue
+
+      const longBurn = pair.longBurnRate
+      const shortBurn = pair.shortBurnRate
+      if (longBurn === null || shortBurn === null) continue
+
+      // 两个窗口**同时**超阈值才触发
+      if (longBurn <= rule.threshold || shortBurn <= rule.threshold) continue
+
+      const ok = await this.fire(
+        rule,
+        undefined,
+        now,
+        {
+          title: `SLO 燃烧率超阈值：${slo.name}`,
+          body:
+            `长窗口（${pair.longSeconds / 3600} 小时）燃烧率 ${longBurn.toFixed(2)}×、` +
+            `短窗口（${pair.shortSeconds / 60} 分钟）燃烧率 ${shortBurn.toFixed(2)}×，` +
+            `都超过阈值 ${rule.threshold}× —— 错误预算正在以超过预期的速度消耗。`,
+          metric: { name: '燃烧率', value: shortBurn, threshold: rule.threshold }
+        },
+        // ⚠️ 去重键必须区分 SLO —— 否则两个 SLO 会共用一个键，
+        //    第一个触发后第二个就被当成重复丢掉了
+        `slo_${slo.id}`
+      )
+      if (ok) triggered++
+    }
+    return triggered
+  }
+
+  // ==========================================================
   // 内部
   // ==========================================================
 
@@ -436,11 +513,14 @@ export class AlertEvaluator {
     rule: AlertRule,
     issue: IssueSubject | undefined,
     now: number,
-    message: AlertMessage
+    message: AlertMessage,
+    dedupeScope?: string
   ): Promise<boolean> {
     // 去重键带**窗口编号**：同一窗口内只发一次，窗口一过允许重发
     const windowIndex = Math.floor(now / (rule.windowSeconds * 1000))
-    const dedupeKey = `${rule.id}:${issue?.id ?? 'project'}:${windowIndex}`
+    // ⚠️ `dedupeScope` 用来区分「同一条规则下的不同主体」——
+    //    比如同一个 SLO 规则盯了三个 SLO，它们不能共用一个去重键
+    const dedupeKey = `${rule.id}:${dedupeScope ?? issue?.id ?? 'project'}:${windowIndex}`
 
     if (!(await this.alerting.shouldTrigger(dedupeKey))) {
       return false
