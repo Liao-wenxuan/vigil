@@ -913,15 +913,18 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     }
   )
 
-  app.patch('/api/v1/alert-rules/:ruleId', admin, async (request) => {
-    const { ruleId } = request.params as { ruleId: string }
+  app.patch('/api/v1/projects/:projectId/alert-rules/:ruleId', admin, async (request) => {
+    const { projectId, ruleId } = request.params as { projectId: string; ruleId: string }
     const body = request.body as Record<string, never>
-    return { ok: true, rule: await alerting.updateRule(Number(ruleId), body) }
+    return {
+      ok: true,
+      rule: await alerting.updateRule(Number(projectId), Number(ruleId), body)
+    }
   })
 
-  app.delete('/api/v1/alert-rules/:ruleId', admin, async (request) => {
-    const { ruleId } = request.params as { ruleId: string }
-    await alerting.deleteRule(Number(ruleId))
+  app.delete('/api/v1/projects/:projectId/alert-rules/:ruleId', admin, async (request) => {
+    const { projectId, ruleId } = request.params as { projectId: string; ruleId: string }
+    await alerting.deleteRule(Number(projectId), Number(ruleId))
     return { ok: true }
   })
 
