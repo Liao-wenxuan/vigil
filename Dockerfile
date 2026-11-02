@@ -74,7 +74,37 @@ CMD ["node", "packages/collector/dist/index.js"]
 # ============================================================
 FROM nginx:1.27-alpine AS dashboard
 
+# openssl 只用于生成 Basic Auth 凭据（见 40-vigil-auth.sh）。
+# nginx:alpine 默认不带 CLI。
+RUN apk add --no-cache openssl
+
 COPY --from=build /app/packages/dashboard/dist /usr/share/nginx/html
-COPY deploy/nginx/default.conf /etc/nginx/conf.d/default.conf
+
+# SDK 的浏览器产物（IIFE）由面板同源托管。
+#
+# 不托管的话「接入 SDK」这一步在部署文档里根本没有可用的地址 ——
+# 文档让用户引 https://cdn/vigil.iife.js，而产物其实叫 index.iife.js，
+# 也没有任何地方在提供它。
+COPY --from=build /app/packages/sdk/dist /usr/share/nginx/html/sdk
+
+# 配置走「模板 + 启动时渲染」：管理 token 在容器启动时注入，不烘进镜像。
+# 官方镜像的 entrypoint 会把 /etc/nginx/templates/*.template 渲染到
+# /etc/nginx/conf.d/ —— 所以这里只放模板，不放现成的 conf。
+COPY deploy/nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY deploy/nginx/vigil-proxy.conf /etc/nginx/vigil-proxy.conf
+COPY deploy/nginx/40-vigil-auth.sh /docker-entrypoint.d/40-vigil-auth.sh
+
+# 1) 占位文件先建好：即使有人绕过 entrypoint（自己覆盖 CMD），
+#    `include` 也不会因为文件不存在让 nginx 起不来。
+# 2) 删掉镜像自带的 default.conf —— 不删的话它和我们的 server 抢 80 端口。
+# 3) Windows 上 checkout 会带 CRLF，`#!/bin/sh\r` 会让脚本直接跑不起来；
+#    nginx 配置里混进 \r 也会在值末尾多出一个字符。统一清掉。
+RUN touch /etc/nginx/vigil-auth.conf \
+ && rm -f /etc/nginx/conf.d/default.conf \
+ && sed -i 's/\r$//' \
+      /etc/nginx/templates/default.conf.template \
+      /etc/nginx/vigil-proxy.conf \
+      /docker-entrypoint.d/40-vigil-auth.sh \
+ && chmod +x /docker-entrypoint.d/40-vigil-auth.sh
 
 EXPOSE 80

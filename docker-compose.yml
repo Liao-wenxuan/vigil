@@ -1,8 +1,12 @@
 # 本地 / 私有化部署
 #
 #   docker compose up --build
-#   → 面板  http://localhost:8080
-#   → 接口  http://localhost:4318
+#   → 面板与接口统一入口  http://localhost:8080
+#
+# 只有一个对外入口（dashboard 的 nginx）：
+# 它同时负责静态资源、SPA 回退、/api 反代、管理 token 注入和面板登录。
+# 采集服务留在容器网络里，不占宿主机端口 —— SDK 的上报地址就是
+# https://<域名>/api/v1/collect。
 #
 # ## 为什么默认带 PostgreSQL
 #
@@ -48,9 +52,23 @@ services:
       VIGIL_ADMIN_TOKEN: ${VIGIL_ADMIN_TOKEN:?请在 .env 里设置 VIGIL_ADMIN_TOKEN}
       # 告警评估间隔（秒），0 关闭
       VIGIL_ALERT_INTERVAL: '60'
+      # 保留策略间隔（秒），0 关闭 —— 关掉之后表只增不减
+      VIGIL_RETENTION_INTERVAL: ${VIGIL_RETENTION_INTERVAL:-3600}
       LOG_LEVEL: info
-    ports:
-      - '4318:4318'
+    # ⚠️ 采集服务**不对外暴露端口**。
+    #
+    # 所有流量走 dashboard 的 nginx：一个入口、一处 TLS、一份鉴权。
+    # SDK 的上报地址就是 https://<你的域名>/api/v1/collect
+    # （nginx 已经把这四条上报路径反代过来）。
+    #
+    # 采集服务自己暴露 4318 的话，管理接口也一并在公网上了 ——
+    # 那时只剩一个 token 挡着，而面板的 token 是 nginx 注入的，
+    # 两套入口等于两份攻击面。
+    #
+    # 想在宿主机直接调接口排查，临时加回来：
+    #   ports: ['127.0.0.1:4318:4318']
+    expose:
+      - '4318'
     healthcheck:
       # 用 /api/ready —— 它会真的连一下数据库
       test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:4318/api/ready']
@@ -68,6 +86,21 @@ services:
     depends_on:
       collector:
         condition: service_healthy
+    environment:
+      # 面板的 nginx 在**容器启动时**把它注入到 /api 请求头里（见 deploy/nginx/）。
+      # 不注入的话，面板每个请求都是 401 —— 页面能打开，但全站空白。
+      VIGIL_ADMIN_TOKEN: ${VIGIL_ADMIN_TOKEN:?请在 .env 里设置 VIGIL_ADMIN_TOKEN}
+      # 只渲染这一个占位符。
+      #
+      # ⚠️ 不加过滤会把 `$host` / `$uri` 这些 nginx 变量一起抽成空串 ——
+      #    envsubst 连**不带花括号**的 $VAR 也会替换。
+      # ⚠️ 结尾的 $$ 是 compose 的转义（否则它会把 $' 当成插值），
+      #    传给容器的是 ^VIGIL_ADMIN_TOKEN$
+      NGINX_ENVSUBST_FILTER: '^VIGIL_ADMIN_TOKEN$$'
+      # 面板登录（Basic Auth）。公网部署**必须**设，否则面板等于无密码后台：
+      # 任何知道域名的人都能读走全部错误数据、会话回放和用户行为。
+      VIGIL_PANEL_USER: ${VIGIL_PANEL_USER:-admin}
+      VIGIL_PANEL_PASSWORD: ${VIGIL_PANEL_PASSWORD:-}
     ports:
       - '8080:80'
 

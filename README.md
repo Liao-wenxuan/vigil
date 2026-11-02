@@ -105,10 +105,11 @@ npm --prefix packages/collector run cli -- release add 1 1.4.2
 <head>
   <!-- ⚠️ 放 <head> 同步加载：ESM 的 module script 是 defer 的，
        初始化会晚于首屏静态资源的加载失败（那样一条都收不到） -->
-  <script src="https://cdn.example.com/vigil.iife.js"></script>
+  <!-- 自托管时就是 /sdk/index.iife.js（容器已经在提供它） -->
+  <script src="https://vigil.example.com/sdk/index.iife.js"></script>
   <script>
     Vigil.init({
-      endpoint: 'https://collector.example.com/api/v1/collect',
+      endpoint: 'https://vigil.example.com/api/v1/collect',
       appId: 'shop-miniapp',
       token: 'vsk_xxx',
       release: '1.4.2',
@@ -708,13 +709,18 @@ docs/
 ## 部署
 
 ```bash
+cp .env.example .env     # 填 VIGIL_ADMIN_TOKEN / VIGIL_PANEL_PASSWORD / PG 密码
 docker compose up --build
-# → 面板  http://localhost:8080
+# → 统一入口  http://localhost:8080（面板 + API + SDK 全在这一个口）
 ```
 
 - `Dockerfile` 多阶段，两个 target（collector / dashboard）
+- 只有一个对外入口：面板的 nginx 负责静态资源、SPA 回退、`/api` 反代、
+  **管理 token 注入**和面板登录（Basic Auth）。采集服务不占宿主机端口
 - `deploy/k8s/` 含 namespace / deployment / service / ingress / HPA / PDB
+  （⚠️ 这条路径未实跑，已知两处问题见 `docs/deploy.md`）
 - ⚠️ **容器实跑未验证**（本机 Docker 因缺 WSL2 起不来）
+  容器拓扑（同源 + token 注入 + SPA 回退）已用等价代理跑过 50 条面板断言
 - ⚠️ **多副本前必须换 PostgreSQL** —— SQLite 是单文件，多进程写会锁竞争
 
 ---
