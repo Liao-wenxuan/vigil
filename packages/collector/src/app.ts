@@ -13,6 +13,7 @@ import { ReplayService } from './domains/replay/service.js'
 import { RetentionService } from './domains/retention/service.js'
 import { UsageService } from './domains/usage/service.js'
 import { TrendService } from './domains/trend/service.js'
+import { SloService } from './domains/slo/service.js'
 import { IngestionPipeline } from './domains/ingestion/pipeline.js'
 import { AppError } from './shared/errors.js'
 import type { BehaviorEnvelope, CollectEnvelope, PerformanceEnvelope } from '@vigil/protocol'
@@ -79,6 +80,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const retention = new RetentionService(db)
   const ingestion = new IngestionPipeline(db, issues, performance, artifacts, replay, usage)
   const trendService = new TrendService(db)
+  const sloService = new SloService(db)
 
   const limiter = new TokenBucketLimiter(
     options.rateLimit ?? { capacity: 240, refillPerSecond: 40 }
@@ -109,6 +111,24 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     if (error instanceof AppError) {
       return reply.code(error.status).send({ ok: false, error: error.message, code: error.code })
     }
+
+    // ⚠️ Fastify 的 **schema 校验错误**不是 AppError —— 它带 `validation` 和
+    //    statusCode 400。不接住的话，客户端传个错参数就会收到 500，
+    //    而且会被当成内部错误刷进日志：告警被噪声淹没，真故障反而看不见。
+    const detail = error as {
+      statusCode?: number
+      validation?: unknown
+      message?: string
+    }
+    const status = typeof detail.statusCode === 'number' ? detail.statusCode : 500
+    if (detail.validation || (status >= 400 && status < 500)) {
+      return reply.code(status).send({
+        ok: false,
+        error: detail.validation ? '请求参数不合法' : (detail.message ?? '请求参数不合法'),
+        code: 'bad_request'
+      })
+    }
+
     app.log.error(error)
     return reply.code(500).send({ ok: false, error: '内部错误' })
   })
@@ -547,6 +567,106 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   app.get('/api/v1/projects/:projectId/issues/:issueId', admin, async (request) => {
     const { projectId, issueId } = request.params as { projectId: string; issueId: string }
     return { ok: true, issue: await issues.getIssue(Number(projectId), Number(issueId)) }
+  })
+
+  // ==========================================================
+  // SLO 与错误预算
+  // ==========================================================
+
+  /**
+   * SLO 列表 + 当前状态。
+   *
+   * 状态和定义**一起返回** —— 面板要一眼看到「哪个 SLO 快烧完了」，
+   * 分成两个接口就得发两次请求再自己拼。
+   */
+  app.get('/api/v1/projects/:projectId/slos', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const list = await sloService.list(Number(projectId))
+    const evaluations = await Promise.all(
+      list.map(async (slo) => await sloService.evaluate(Number(projectId), slo))
+    )
+    return {
+      ok: true,
+      slos: list.map((slo, index) => ({ slo, evaluation: evaluations[index] }))
+    }
+  })
+
+  app.post(
+    '/api/v1/projects/:projectId/slos',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['name', 'target', 'windowSeconds'],
+          properties: {
+            name: { type: 'string', maxLength: 120 },
+            metric: { type: 'string', enum: ['error_rate'] },
+            target: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
+            windowSeconds: { type: 'integer', minimum: 300, maximum: 7776000 },
+            stepSeconds: { type: 'integer', minimum: 60 },
+            enabled: { type: 'boolean' }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { projectId } = request.params as { projectId: string }
+      const body = request.body as {
+        name: string
+        metric?: 'error_rate'
+        target: number
+        windowSeconds: number
+        stepSeconds?: number
+        enabled?: boolean
+      }
+      const slo = await sloService.create({
+        projectId: Number(projectId),
+        name: body.name,
+        metric: body.metric,
+        target: body.target,
+        windowSeconds: body.windowSeconds,
+        stepSeconds: body.stepSeconds,
+        enabled: body.enabled
+      })
+      return reply.code(201).send({ ok: true, slo })
+    }
+  )
+
+  app.get('/api/v1/projects/:projectId/slos/:sloId', admin, async (request) => {
+    const { projectId, sloId } = request.params as { projectId: string; sloId: string }
+    const slo = await sloService.get(Number(projectId), Number(sloId))
+    const evaluation = await sloService.evaluate(Number(projectId), slo)
+    const burnRates = await sloService.burnRateWindows(Number(projectId), slo)
+    return { ok: true, slo, evaluation, burnRates }
+  })
+
+  app.patch('/api/v1/projects/:projectId/slos/:sloId', admin, async (request) => {
+    const { projectId, sloId } = request.params as { projectId: string; sloId: string }
+    const body = request.body as {
+      name?: string
+      target?: number
+      windowSeconds?: number
+      stepSeconds?: number
+      enabled?: boolean
+    }
+    return {
+      ok: true,
+      slo: await sloService.update(Number(projectId), Number(sloId), body)
+    }
+  })
+
+  app.delete('/api/v1/projects/:projectId/slos/:sloId', admin, async (request) => {
+    const { projectId, sloId } = request.params as { projectId: string; sloId: string }
+    await sloService.delete(Number(projectId), Number(sloId))
+    return { ok: true }
+  })
+
+  /** 预算消耗趋势（按分步粒度） */
+  app.get('/api/v1/projects/:projectId/slos/:sloId/budget', admin, async (request) => {
+    const { projectId, sloId } = request.params as { projectId: string; sloId: string }
+    const slo = await sloService.get(Number(projectId), Number(sloId))
+    return { ok: true, budget: await sloService.budgetSeries(Number(projectId), slo) }
   })
 
   const issueAction = (_action: string) => ({
