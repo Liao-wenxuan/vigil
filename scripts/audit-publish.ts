@@ -24,9 +24,16 @@
  */
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const ROOT = 'D:/my/vigil'
+/**
+ * 仓库根目录。
+ *
+ * ⚠️ **不能写死绝对路径** —— CI 是 Linux，写死 `D:/...` 会直接 ENOENT。
+ * 从脚本自身位置推导（脚本在 `<根>/scripts/` 下，所以上一级就是根）。
+ */
+const ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /** 要发布的包 */
 const PACKAGES = [
