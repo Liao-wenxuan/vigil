@@ -68,8 +68,8 @@ npm --prefix packages/collector run cli -- release add 1 1.4.2
 
 ```
 packages/dashboard/src/
-  router/index.ts        8 条路由
-  layouts/AppLayout.vue  固定侧栏（项目选择器 + 8 导航项 + 底部 slug）+ 顶栏
+  router/index.ts        9 条路由
+  layouts/AppLayout.vue  固定侧栏（项目选择器 + 9 导航项 + 底部 slug）+ 顶栏
   api/client.ts          类型化 API 客户端（ApiError 统一错误）
   views/                 Overview / Issues / IssueDetail / Performance /
                          Sessions（回放）/ Behavior（行为）/ Alerts / Settings
@@ -476,7 +476,7 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ```bash
 npm run test              # 258 条
 npm run verify            # 33 条端到端断言
-npm run verify:dashboard  # 50 条面板渲染断言
+npm run verify:dashboard  # 55 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
 npm run audit:plans       # 1 条查询计划闸门
 npm run audit:ingest      # 2 条摄入预算闸门
