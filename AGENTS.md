@@ -36,7 +36,7 @@ npm run dev:dashboard       # 管理面板
 npm run seed:demo -- --reset # 重置演示数据
 npm run typecheck           # tsc --noEmit，所有包
 npm run lint                # eslint（含 .vue）
-npm run test                # vitest，240 条
+npm run test                # vitest，258 条
 npm run verify              # 端到端闭环，33 条断言（会先构建 SDK）
 npm run verify:dashboard    # 面板渲染验证，50 条断言（需要面板已启动）
 npm run audit:ui            # 界面设计闸门，15 条（需要面板已启动）
@@ -474,7 +474,7 @@ v1 和 v2 **都有** `sourcemaps` 表，但列结构不同
 ## 验证
 
 ```bash
-npm run test              # 240 条
+npm run test              # 258 条
 npm run verify            # 33 条端到端断言
 npm run verify:dashboard  # 50 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门
@@ -554,7 +554,6 @@ npm run audit:scope       # 1 条租户隔离闸门
 与原来那条 SELECT 完全一致，所以语义没变。）
 
 ### 29. 一批事件 = 一个事务 + 每条一个 SAVEPOINT
-
 SDK 一批最多 20 条。逐条开事务意味着 **20 次提交** ——
 SQLite 上是 20 次 WAL 追加，PG 上是 20 次网络往返。
 实测（文件库，20 条一批）：逐条 4.3 ms，整批 1.1 ms。
@@ -598,6 +597,36 @@ PG 里一条语句失败会**中止整个事务**，
 `ArtifactService.uploadSourcemap()` 调的 `invalidate` 打在它自己的 resolver 上，
 所以 `IssueService` 必须和它共用同一个 resolver 实例。
 写测试时也要注意——**另建一个 resolver 测失效，测的是另一个缓存**。
+
+### 30. SLO 的口径：分步判定 + 无流量步跳过
+
+SLO 域（`domains/slo/`）最容易错的是**口径**，三条硬规则：
+
+1. **SLI 分步判定，不看整体平均**。
+   窗口切成小步，每步单独判达标，整体 SLI = 达标步数 / 参与判定的步数。
+   否则「99.99% 的时间正常、最后 1 分钟全崩」会被平均成 99.99%，
+   而用户那 1 分钟全在挨骂。
+   ⚠️ **步长决定突发敏感度**：30 天窗口配 1 小时步（720 步）时偶发一次错只掉 0.14%；
+      配 1 天步（30 步）同样的错掉 3.3%。步长是定义的一部分，不是实现细节。
+2. **无流量的步直接跳过** —— 既不算达标也不算不达标。
+   「没流量所以错误率是 0」和「真的没错」是两回事
+   （与趋势域 `errorRate: null` 同一个原则）。
+3. **错误率口径必须和趋势域完全一致** —— 分子是 `issue_events` 条数，
+   分母是 `transactions` 条数。同一个东西在两个页面显示不同的数，最伤信任。
+
+⚠️ **步长必须整除窗口** —— 定义时就拦住（`normalizeStep`），
+别留到评估时才发现窗口尾部剩半步。
+
+⚠️ **预算与 SLI 是两个视角**：
+预算用**事件口径**（`坏数 / (允许率 × 总数)`），SLI 用**时间口径**。
+所以「小流量步里的错误突发」可以让 SLI 掉下来但预算还很充裕 ——
+这不是矛盾，是同一份数据的两个视角。状态判定同时看两者。
+
+**多窗口多燃烧率**（SRE 手册）：
+长窗口（1h/6h/1d/3d）配短窗口（5m/30m/2h/6h），
+**两个窗口同时超阈值才告警** —— 短窗口负责快速感知，长窗口负责确认持续消耗。
+只看一个窗口要么抖（短）、要么太慢（长）。
+
 
 调预算用 `VIGIL_INGEST_BUDGET=3 npx tsx scripts/audit-ingest-calls.ts`，
 看闸门真的会挂（改完记得调回来）。
