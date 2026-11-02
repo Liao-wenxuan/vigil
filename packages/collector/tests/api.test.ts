@@ -270,6 +270,92 @@ describe('HTTP 接口', () => {
     })
   })
 
+  describe('SLO 与错误预算', () => {
+    it('能创建 SLO 并读到当前状态', async () => {
+      const { app, project } = await setup()
+
+      const created = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${project.id}/slos`,
+        headers: adminHeader,
+        payload: { name: '可用性', target: 0.999, windowSeconds: 3600, stepSeconds: 600 }
+      })
+      expect(created.statusCode).toBe(201)
+      const sloId = created.json().slo.id
+      expect(created.json().slo.target).toBe(0.999)
+
+      const detail = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${project.id}/slos/${sloId}`,
+        headers: adminHeader
+      })
+      expect(detail.statusCode).toBe(200)
+      // 没有流量 → SLI 是 null，不是 1
+      expect(detail.json().evaluation.sli).toBeNull()
+      expect(detail.json().evaluation.status).toBe('healthy')
+      // 多窗口燃烧率也在同一份响应里
+      expect(detail.json().burnRates).toHaveLength(4)
+
+      const list = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${project.id}/slos`,
+        headers: adminHeader
+      })
+      expect(list.statusCode).toBe(200)
+      expect(list.json().slos).toHaveLength(1)
+      expect(list.json().slos[0].evaluation).toBeDefined()
+    })
+
+    it('目标值非法 → 400', async () => {
+      const { app, project } = await setup()
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${project.id}/slos`,
+        headers: adminHeader,
+        payload: { name: 'x', target: 2, windowSeconds: 3600 }
+      })
+      expect(res.statusCode).toBe(400)
+    })
+
+    it('参数不合法返回 400 而不是 500', async () => {
+      // ⚠️ 回归测试：Fastify 的 schema 校验错误不是 AppError，
+      //    不接住的话客户端传错参数会收到 500，
+      //    而且会被当成内部错误刷进日志 —— 告警被噪声淹没。
+      const { app, project } = await setup()
+      const res = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${project.id}/slos`,
+        headers: adminHeader,
+        // 缺 name 与 target
+        payload: { windowSeconds: 3600 }
+      })
+      expect(res.statusCode).toBe(400)
+      expect(res.json().ok).toBe(false)
+    })
+
+    it('跨项目读不到 SLO', async () => {
+      const { app, project, tenancy, organization } = await setup()
+      const created = await app.inject({
+        method: 'POST',
+        url: `/api/v1/projects/${project.id}/slos`,
+        headers: adminHeader,
+        payload: { name: 'x', target: 0.99, windowSeconds: 3600 }
+      })
+      const sloId = created.json().slo.id
+
+      const other = await tenancy.createProject({
+        organizationId: organization.id,
+        name: '别的项目'
+      })
+      const cross = await app.inject({
+        method: 'GET',
+        url: `/api/v1/projects/${other.project.id}/slos/${sloId}`,
+        headers: adminHeader
+      })
+      expect(cross.statusCode).toBe(404)
+    })
+  })
+
   describe('管理接口', () => {
     it('缺 admin token → 401', async () => {
       const { app, project } = await setup()
