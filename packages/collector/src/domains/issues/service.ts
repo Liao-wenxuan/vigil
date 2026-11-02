@@ -185,7 +185,10 @@ export class IssueService {
         //    在面板上看起来像「有个问题但一次都没发生过」。
         //    删掉它 —— 反正这次事件没被接收，不该有 Issue。
         if (created) {
-          await this.db.run('DELETE FROM issues WHERE id = ?', [issue.id])
+          await this.db.run('DELETE FROM issues WHERE id = ? AND project_id = ?', [
+            issue.id,
+            projectId
+          ])
         }
         return {
           issueId: issue.id,
@@ -312,7 +315,11 @@ export class IssueService {
 
     const id = insertedId
     const shortId = `VIG-${id.toString(36).toUpperCase().padStart(5, '0')}`
-    await this.db.run('UPDATE issues SET short_id = ? WHERE id = ?', [shortId, id])
+    await this.db.run('UPDATE issues SET short_id = ? WHERE id = ? AND project_id = ?', [
+      shortId,
+      id,
+      projectId
+    ])
 
     return (await this.db.get<IssueRow>('SELECT * FROM issues WHERE id = ?', [id]))!
   }
@@ -385,7 +392,11 @@ export class IssueService {
       push('release', event.release)
     }
 
-    await this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ?`, [...params, issueId])
+    await this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ? AND project_id = ?`, [
+      ...params,
+      issueId,
+      projectId
+    ])
 
     // 归档策略变化时，activity 已经写过了（状态机产出），这里不重复写
     void activities
@@ -658,6 +669,22 @@ export class IssueService {
     return await this.toDetail(row)
   }
 
+  /**
+   * Issue 详情。
+   *
+   * ⚠️ `issue_events` 的查询**也带 project_id**。
+   *
+   *    它靠 `issue_id` 也能定位到正确的行（issue_id 是外键，
+   *    而父 issue 已经验过归属）—— 但那是**依赖调用链**的写法：
+   *    哪天有人绕过父查询直接调它，就是跨租户泄漏。
+   *
+   *    自己带上范围，隔离就不依赖调用方了 —— 纵深防御。
+   *
+   * ⚠️ `issue_activity` / `issue_comments` / `issue_tags` **没有** project_id 列
+   *    （它们是靠 FK 挂到 issue 上的纯子表），所以只能按 issue_id 查。
+   *    它们的隔离来自父 issue 的归属校验 —— 那条校验由
+   *    `requireRow()` / `getIssue()` 负责，不能省。
+   */
   private async toDetail(row: IssueRow): Promise<IssueDetail> {
     const events = await this.db.all<{
       id: number
@@ -674,8 +701,10 @@ export class IssueService {
     }>(
       `SELECT id, occurred_at, received_at, event_id, user_id, session_id, url,
               release, environment, vitals_json, payload_json
-       FROM issue_events WHERE issue_id = ? ORDER BY occurred_at DESC LIMIT 20`,
-      [row.id]
+       FROM issue_events
+       WHERE issue_id = ? AND project_id = ?
+       ORDER BY occurred_at DESC LIMIT 20`,
+      [row.id, row.project_id]
     )
 
     const activity = await this.db.all<{
@@ -715,9 +744,15 @@ export class IssueService {
       : undefined
 
     const assignee = row.assignee_id
-      ? await this.db.get<{ name: string }>('SELECT name FROM members WHERE id = ?', [
-          row.assignee_id
-        ])
+      ? await this.db.get<{ name: string }>(
+          // ⚠️ 成员归属的是**组织**，不是项目 ——
+          //    所以范围条件是「和项目同一个组织的成员」。
+          `SELECT name FROM members
+           WHERE id = ? AND organization_id = (
+             SELECT organization_id FROM projects WHERE id = ?
+           )`,
+          [row.assignee_id, row.project_id]
+        )
       : undefined
 
     return {
@@ -859,13 +894,26 @@ export class IssueService {
     options: { reason?: string; actorId?: number } = {}
   ): Promise<IssueDetail> {
     await this.requireRow(projectId, issueId)
+
+    // ⚠️ 不能把**别的组织**的成员指派进来 ——
+    //    否则详情页查名字时查不到（组织不匹配），界面上就是个有 id 没名字的幽灵。
+    if (memberId !== null) {
+      const member = await this.db.get<{ x: number }>(
+        `SELECT 1 AS x FROM members
+         WHERE id = ? AND organization_id = (
+           SELECT organization_id FROM projects WHERE id = ?
+         )`,
+        [memberId, projectId]
+      )
+      if (!member) throw AppError.badRequest('成员不存在或不属于该组织')
+    }
+
     const now = Date.now()
 
-    await this.db.run('UPDATE issues SET assignee_id = ?, updated_at = ? WHERE id = ?', [
-      memberId,
-      now,
-      issueId
-    ])
+    await this.db.run(
+      'UPDATE issues SET assignee_id = ?, updated_at = ? WHERE id = ? AND project_id = ?',
+      [memberId, now, issueId, projectId]
+    )
 
     await this.writeActivity(
       issueId,
@@ -909,11 +957,10 @@ export class IssueService {
     await this.requireRow(projectId, issueId)
     const now = Date.now()
 
-    await this.db.run('UPDATE issues SET is_bookmarked = ?, updated_at = ? WHERE id = ?', [
-      bookmarked ? 1 : 0,
-      now,
-      issueId
-    ])
+    await this.db.run(
+      'UPDATE issues SET is_bookmarked = ?, updated_at = ? WHERE id = ? AND project_id = ?',
+      [bookmarked ? 1 : 0, now, issueId, projectId]
+    )
 
     await this.writeActivity(
       issueId,
@@ -1210,7 +1257,11 @@ export class IssueService {
     sets.push('updated_at = ?')
     params.push(now)
 
-    await this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ?`, [...params, issue.id])
+    await this.db.run(`UPDATE issues SET ${sets.join(', ')} WHERE id = ? AND project_id = ?`, [
+      ...params,
+      issue.id,
+      issue.project_id
+    ])
 
     for (const activity of result.activities) {
       const activityId = await this.writeActivity(
