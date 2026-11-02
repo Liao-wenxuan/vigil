@@ -452,7 +452,7 @@ export class AlertEvaluator {
       await Promise.all(
         rule.channelIds.map(async (id) => {
           try {
-            return await this.alerting.getChannel(id)
+            return await this.alerting.getChannel(rule.projectId, id)
           } catch {
             return undefined
           }
