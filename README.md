@@ -212,6 +212,7 @@ npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走�
 npm run audit:ingest      # 2 条摄入预算闸门（每条事件 ≤ 3 次往返，每批 ≤ 1 次提交）
 npm run audit:scope       # 1 条租户隔离闸门（每条语句都带租户范围）
 npm run audit:publish     # 1 条发布准备闸门（tarball 内容与依赖位置）
+npm run slo:gate -- --project 1   # SLO 发布闸门（预算耗尽 → 退出码 1）
 npm run typecheck
 npm run lint
 ```
@@ -330,6 +331,26 @@ SLO 域把后者变成可计算的：
 
 这条规则已经接进告警引擎（`slo.burn_rate`）：
 燃烧率超阈值时自动走通知通道 —— 面板上看得到的东西，值班的人也收得到。
+
+### 发布闸门
+
+SLO 看得见还得**挡得住**。`npm run slo:gate` 直接读库判定「这个项目现在能不能发版」：
+
+```bash
+npm run slo:gate -- --project 1          # 预算耗尽 → 退出码 1
+npm run slo:gate -- --project 1 --strict # 「有风险」也阻断
+npm run slo:gate -- --all               # 查所有项目
+```
+
+| 退出码 | 含义 |
+|---|---|
+| 0 | 放行 |
+| 1 | 被 SLO 阻断（不要发版） |
+| 2 | 闸门自己跑不起来（数据库连不上） |
+
+接进 CI 就是一条发布门禁：**预算烧光就别发版**。
+判定策略是纯函数（`domains/slo/gate.ts`），有 9 条单元测试盯着 ——
+「什么情况阻断发布」是业务规则，不该只活在命令行里。
 
 接口：
 
@@ -717,7 +738,7 @@ docker compose up --build
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 264 条单元测试 + 33 条数据链路断言 + 55 条面板断言 + 15 条界面闸门 + 5 条闸门（性能/隔离/发布准备）
+- [x] 273 条单元测试 + 33 条数据链路断言 + 55 条面板断言 + 15 条界面闸门 + 5 条闸门（性能/隔离/发布准备）
 
 待做：
 
