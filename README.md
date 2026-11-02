@@ -211,6 +211,7 @@ npm run audit:ui          # 15 条界面设计闸门（见下）
 npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走索引）
 npm run audit:ingest      # 2 条摄入预算闸门（每条事件 ≤ 3 次往返，每批 ≤ 1 次提交）
 npm run audit:scope       # 1 条租户隔离闸门（每条语句都带租户范围）
+npm run audit:publish     # 1 条发布准备闸门（tarball 内容与依赖位置）
 npm run typecheck
 npm run lint
 ```
@@ -716,10 +717,11 @@ docker compose up --build
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 264 条单元测试 + 33 条数据链路断言 + 55 条面板断言 + 15 条界面闸门 + 4 条性能/隔离闸门
+- [x] 264 条单元测试 + 33 条数据链路断言 + 55 条面板断言 + 15 条界面闸门 + 5 条闸门（性能/隔离/发布准备）
 
 待做：
 
-- [ ] npm 发布（`@vigil/sdk` / `@vigil/protocol`）
+- [~] npm 发布：`@vigil/sdk` / `@vigil/protocol` **已就绪**（发布准备闸门全绿），
+      实际发布需要 npm 账号与 token
 - [ ] PostgreSQL 高可用（当前是单副本 StatefulSet；抗单点要上流复制或托管实例）
 - [ ] 告警通道：邮件需要 `nodemailer`（已装，配置 SMTP 后可用）
