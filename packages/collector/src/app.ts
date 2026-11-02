@@ -74,13 +74,14 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   const issues = new IssueService(db, artifacts.sourcemapResolver)
   const performance = new PerformanceService(db)
   const alerting = new AlertingService(db)
-  const evaluator = new AlertEvaluator(db, alerting)
+  // SLO 服务要先建好 —— 告警评估器要读它的燃烧率
+  const sloService = new SloService(db)
+  const evaluator = new AlertEvaluator(db, alerting, sloService)
   const replay = new ReplayService(db)
   const usage = new UsageService(db)
   const retention = new RetentionService(db)
   const ingestion = new IngestionPipeline(db, issues, performance, artifacts, replay, usage)
   const trendService = new TrendService(db)
-  const sloService = new SloService(db)
 
   const limiter = new TokenBucketLimiter(
     options.rateLimit ?? { capacity: 240, refillPerSecond: 40 }
@@ -1007,7 +1008,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
                 'issue.spike',
                 'metric.error_count',
                 'metric.error_rate',
-                'metric.lcp_p95'
+                'metric.lcp_p95',
+                'slo.burn_rate'
               ]
             },
             conditions: { type: 'object', additionalProperties: true },
