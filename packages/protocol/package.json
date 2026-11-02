@@ -1,7 +1,6 @@
 {
   "name": "@vigil/protocol",
   "version": "0.1.0",
-  "private": true,
   "description": "Vigil 上报协议：SDK 与 Collector 共用的类型契约（纯类型，无运行时）",
   "license": "MIT",
   "type": "module",
@@ -12,6 +11,27 @@
     }
   },
   "files": [
-    "src"
+    "src",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Liao-wenxuan/vigil.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/Liao-wenxuan/vigil/tree/main/packages/protocol",
+  "bugs": {
+    "url": "https://github.com/Liao-wenxuan/vigil/issues"
+  },
+  "keywords": [
+    "monitoring",
+    "observability",
+    "error-tracking",
+    "rum",
+    "slo",
+    "typescript"
   ]
 }
