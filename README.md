@@ -206,7 +206,7 @@ init({
 ```bash
 npm run test              # 258 条单元测试（Collector 183 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
-npm run verify:dashboard  # 50 条面板渲染断言
+npm run verify:dashboard  # 55 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
 npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走索引）
 npm run audit:ingest      # 2 条摄入预算闸门（每条事件 ≤ 3 次往返，每批 ≤ 1 次提交）
@@ -338,6 +338,9 @@ DELETE /api/v1/projects/:projectId/slos/:sloId
 GET    /api/v1/projects/:projectId/slos/:sloId/budget   # 预算消耗趋势
 ```
 
+面板上有一页「SLO 与预算」：状态、预算条（还能烧多少）、燃烧率窗口。
+```
+
 <details>
 <summary>总览页静帧</summary>
 
@@ -375,7 +378,7 @@ GET    /api/v1/projects/:projectId/slos/:sloId/budget   # 预算消耗趋势
 断言的是**渲染出来的 DOM 文本**：
 
 ```
-✓ 侧边导航有 8 个导航项
+✓ 侧边导航有 9 个导航项
 ✓ 「去重错误」卡片 = 接口的 stats.total
 ✓ 问题表格渲染 N 行 = 接口返回的行数
 ✓ 点击行后跳到 /issues/<id>，详情页出现活动流
@@ -704,13 +707,13 @@ docker compose up --build
 - [x] **会话回放**（rrweb 录制 / 事件流存储 / 面板播放器）
 - [x] **用户行为**（访问 / 路径 / 点击分布，不记录输入内容）
 - [x] 采集端脱敏
-- [x] 管理面板（总览/问题/详情/性能/**回放**/**行为**/告警/设置，8 路由）
+- [x] 管理面板（总览/问题/详情/性能/**回放**/**行为**/告警/**SLO**/设置，9 路由）
 - [x] **PostgreSQL 支持**（同一套领域代码，SQLite / PG 双库，PG 上有真库测试）
 - [x] **SLO 与错误预算**（分步 SLI / 预算消耗 / 燃烧率 / 多窗口多燃烧率）
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 258 条单元测试 + 33 条数据链路断言 + 50 条面板断言 + 15 条界面闸门 + 3 条性能/隔离闸门
+- [x] 258 条单元测试 + 33 条数据链路断言 + 55 条面板断言 + 15 条界面闸门 + 4 条性能/隔离闸门
 
 待做：
 
