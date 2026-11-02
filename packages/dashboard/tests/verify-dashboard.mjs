@@ -248,6 +248,7 @@ async function ensureDemoData() {
   }
 
   await seedAlerts(project.id)
+  await seedSlos(project.id)
   await seedReplayAndBehavior(project, runtimeKey)
 
   return project
@@ -666,6 +667,29 @@ async function seedAlerts(projectId) {
   )
 }
 
+/**
+ * 播种 SLO。
+ *
+ * 两条目标故意差得远 —— 一条严的（预算会烧完）、一条松的（还扛得住），
+ * 这样面板上两种状态都能看到。
+ */
+async function seedSlos(projectId) {
+  const existing = await api(`/projects/${projectId}/slos`)
+  if ((existing.slos ?? []).length === 0) {
+    await ingest(
+      `/api/v1/projects/${projectId}/slos`,
+      { name: '可用性 99.9%', target: 0.999, windowSeconds: 30 * 86400, stepSeconds: 3600 },
+      { 'x-vigil-admin-token': adminToken }
+    )
+    await ingest(
+      `/api/v1/projects/${projectId}/slos`,
+      { name: '错误率低于 60%', target: 0.4, windowSeconds: 30 * 86400, stepSeconds: 3600 },
+      { 'x-vigil-admin-token': adminToken }
+    )
+    console.log('  · 已创建 2 条 SLO')
+  }
+}
+
 /* ============================================================
  * Playwright
  * ============================================================ */
@@ -742,6 +766,7 @@ const trend = trendBody.trend
 const rulesBody = await api(`/projects/${project.id}/alert-rules`)
 const channelsBody = await api(`/projects/${project.id}/channels`)
 const incidentsBody = await api(`/projects/${project.id}/alert-incidents`)
+const slosBody = await api(`/projects/${project.id}/slos`)
 const orgsBody = await api('/organizations')
 const allProjects = []
 for (const org of orgsBody.organizations ?? []) {
@@ -777,7 +802,7 @@ await page.waitForFunction(() => document.querySelectorAll('.stat-card').length 
 })
 
 const navCount = await page.locator('.nav-item').count()
-check('侧边导航有 8 个导航项', navCount === 8, `${navCount} 个`)
+check('侧边导航有 9 个导航项', navCount === 9, `${navCount} 个`)
 
 const envNavHref = await page
   .locator('.nav-item', { hasText: '环境与版本' })
@@ -1163,6 +1188,54 @@ check(
   '告警规则类型显示中文',
   ruleTypeText.includes('出现新问题') || ruleTypeText.includes('LCP P95'),
   '包含中文类型名'
+)
+
+// ---- SLO 与预算页 ----
+await page.locator('.nav-item', { hasText: 'SLO' }).first().click()
+await page.waitForURL('**/slo', { timeout: 20000 })
+await page.waitForSelector('.el-table__row', { timeout: 20000 })
+
+const sloRows = await page.locator('[data-panel="服务水平目标"]').locator('.el-table__row').count()
+check(
+  'SLO 表渲染了 N 行',
+  sloRows === (slosBody.slos ?? []).length,
+  `页面=${sloRows} 行 · 接口=${(slosBody.slos ?? []).length} 行`
+)
+
+// 状态必须是中文标签，不能是原始枚举值
+const sloPanelText = (await page.locator('[data-panel="服务水平目标"]').textContent()) ?? ''
+check(
+  'SLO 状态显示中文',
+  sloPanelText.includes('达标') ||
+    sloPanelText.includes('有风险') ||
+    sloPanelText.includes('预算已耗尽'),
+  '包含中文状态名'
+)
+
+// 预算条：消耗比例要画出来（宽度大于 0）
+const budgetFills = await page.locator('.budget-fill').count()
+const firstBudgetWidth = await page
+  .locator('.budget-fill')
+  .first()
+  .evaluate((el) => el.style.width)
+check(
+  'SLO 预算条渲染了消耗比例',
+  budgetFills > 0 && firstBudgetWidth !== '0%',
+  `宽度=${firstBudgetWidth}`
+)
+
+// 燃烧率窗口表：长窗口 / 短窗口 / 阈值 三列都要有
+const burnRateRows = await page
+  .locator('[data-panel="燃烧率窗口"]')
+  .locator('.el-table__row')
+  .count()
+check('燃烧率窗口表渲染了 4 行', burnRateRows === 4, `${burnRateRows} 行`)
+
+const burnRateText = (await page.locator('[data-panel="燃烧率窗口"]').textContent()) ?? ''
+check(
+  '燃烧率窗口显示长窗口与短窗口',
+  burnRateText.includes('长窗口') && burnRateText.includes('短窗口'),
+  '包含长短窗口两列'
 )
 
 // ---- 设置页 ----
