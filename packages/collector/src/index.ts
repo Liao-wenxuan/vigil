@@ -1,5 +1,6 @@
 import { createAppFromEnv } from './app.js'
 import { defaultDbPath } from './infra/db/client.js'
+import { DeliveryWorker } from './domains/alerting/delivery.js'
 
 /**
  * 采集服务启动入口。
@@ -17,7 +18,10 @@ const port = Number(process.env.PORT ?? 4318)
 const host = process.env.HOST ?? '0.0.0.0'
 const adminTokenGenerated = !process.env.VIGIL_ADMIN_TOKEN
 
-const { app, db, evaluator, retention, adminToken } = await createAppFromEnv()
+const { app, db, evaluator, retention, adminToken, alerting } = await createAppFromEnv()
+
+// 投递 worker：告警评估只入队，这里负责真正发出去
+const deliveryWorker = new DeliveryWorker(alerting)
 
 try {
   await app.listen({ port, host })
@@ -55,8 +59,29 @@ if (alertIntervalSeconds > 0) {
   timer.unref?.()
 }
 
-// ---- 保留策略循环 ----
-// 数据不裁剪就没有上界。启动先跑一轮（进程重启后立刻对齐），之后每小时一次。
+// ---- 告警投递循环 ----
+//
+// ⚠️ 告警评估**只入队**，发送由这个独立的 worker 做 ——
+//    评估是同步的，等通道会把整个告警引擎拖住。
+const deliveryIntervalSeconds = Number(process.env.VIGIL_DELIVERY_INTERVAL ?? 10)
+
+if (deliveryIntervalSeconds > 0) {
+  const timer = setInterval(() => {
+    void deliveryWorker
+      .runOnce()
+      .then((report) => {
+        if (report.sent > 0 || report.dead > 0) {
+          console.log(
+            `[vigil] 告警投递：送达 ${report.sent} · 待重试 ${report.retrying} · 死信 ${report.dead}`
+          )
+        }
+      })
+      .catch((error) => console.error('[vigil] 告警投递失败:', error))
+  }, deliveryIntervalSeconds * 1000)
+  timer.unref?.()
+}
+
+// ---- 保留策略循环 ----// 数据不裁剪就没有上界。启动先跑一轮（进程重启后立刻对齐），之后每小时一次。
 const retentionIntervalSeconds = Number(process.env.VIGIL_RETENTION_INTERVAL ?? 3600)
 
 if (retentionIntervalSeconds > 0) {
