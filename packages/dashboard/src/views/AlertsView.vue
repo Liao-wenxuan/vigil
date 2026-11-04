@@ -15,10 +15,12 @@ import {
   deleteAlertRule,
   evaluateAlerts,
   getProject,
+  listAlertDeliveries,
   listAlertIncidents,
   listAlertRules,
   listChannels,
   listSlos,
+  retryAlertDelivery,
   updateAlertRule
 } from '../api/client'
 import {
@@ -26,6 +28,7 @@ import {
   CHANNEL_TYPE_LABELS,
   INCIDENT_STATUS_LABELS,
   PANEL_CONTEXT,
+  type AlertDelivery,
   type AlertIncident,
   type AlertRule,
   type AlertRuleType,
@@ -61,6 +64,8 @@ const rules = ref<AlertRule[]>([])
 const channels = ref<NotificationChannel[]>([])
 const incidents = ref<AlertIncident[]>([])
 const environments = ref<EnvironmentRow[]>([])
+/** 投递失败（死信）—— 通道发不出去的通知 */
+const deliveries = ref<AlertDelivery[]>([])
 /** SLO 列表 —— 「SLO 燃烧率」规则要选一个盯 */
 const slos = ref<Slo[]>([])
 const loading = ref(false)
@@ -121,22 +126,41 @@ async function load(): Promise<void> {
 
   loading.value = true
   try {
-    const [ruleList, channelList, incidentList, detail, sloList] = await Promise.all([
+    const [ruleList, channelList, incidentList, detail, sloList, deliveryList] = await Promise.all([
       listAlertRules(projectId),
       listChannels(projectId),
       listAlertIncidents(projectId),
       getProject(projectId),
-      listSlos(projectId)
+      listSlos(projectId),
+      listAlertDeliveries(projectId)
     ])
     rules.value = ruleList
     channels.value = channelList
     incidents.value = incidentList
     environments.value = detail.environments
     slos.value = sloList.map((item) => item.slo)
+    deliveries.value = deliveryList
   } catch (error) {
     ElMessage.error(`加载告警数据失败：${error instanceof Error ? error.message : String(error)}`)
   } finally {
     loading.value = false
+  }
+}
+
+/** 重放一条投递失败的通知 */
+async function replay(delivery: AlertDelivery): Promise<void> {
+  const projectId = ctx.projectId
+  if (projectId === null) return
+  try {
+    const result = await retryAlertDelivery(projectId, delivery.id)
+    if (result.delivered) {
+      ElMessage.success('已重放')
+    } else {
+      ElMessage.error(`重放失败：${result.error ?? '未知原因'}`)
+    }
+    await load()
+  } catch (error) {
+    ElMessage.error(`重放失败：${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
@@ -439,6 +463,45 @@ onMounted(() => void load())
         </el-table-column>
         <template #empty>
           <div class="empty-hint">还没有触发记录</div>
+        </template>
+      </el-table>
+    </PanelSection>
+
+    <!--
+      投递失败：通道发不出去的通知。
+      ⚠️ 没有这一块，失败的通知就是**丢了** —— 没人知道报过，也没法补发。
+    -->
+    <PanelSection title="投递失败" :count="deliveries.length" hint="通道发不出去的通知">
+      <el-table :data="deliveries" size="default">
+        <el-table-column label="时间" width="160">
+          <template #default="{ row }">
+            <span class="tabular">{{ new Date(row.createdAt).toLocaleString('zh-CN') }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="通道" width="120">
+          <template #default="{ row }">
+            <span>{{
+              CHANNEL_TYPE_LABELS[row.channelType as ChannelType] ?? row.channelType
+            }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="尝试" width="80" align="right">
+          <template #default="{ row }">
+            <span class="tabular">{{ row.attempts }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="失败原因" min-width="240">
+          <template #default="{ row }">
+            <span class="mono muted">{{ row.lastError ?? '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="90" align="right">
+          <template #default="{ row }">
+            <el-button link size="small" @click="replay(row as AlertDelivery)">重放</el-button>
+          </template>
+        </el-table-column>
+        <template #empty>
+          <div class="empty-hint">没有投递失败 —— 所有通知都送到了</div>
         </template>
       </el-table>
     </PanelSection>
