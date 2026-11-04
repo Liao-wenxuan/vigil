@@ -46,6 +46,34 @@ async function tableExists(db: Db, dialect: Dialect, name: string): Promise<bool
   return (row?.n ?? 0) > 0
 }
 
+/**
+ * 列是否存在。
+ *
+ * ⚠️ **「加列」的迁移必须先问一句** ——
+ *    新建的库走 `buildSchema`（v1）就已经有这列了，
+ *    再加一次就是 "duplicate column name"，迁移直接失败。
+ *    老库才需要补 —— 所以要按列判断，不能无脑 ADD COLUMN。
+ *
+ * ⚠️ SQLite 没有 `ADD COLUMN IF NOT EXISTS` —— 只能自己查。
+ */
+async function columnExists(
+  db: Db,
+  dialect: Dialect,
+  table: string,
+  column: string
+): Promise<boolean> {
+  if (dialect === 'postgres') {
+    const row = await db.get<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = ? AND column_name = ?`,
+      [table, column]
+    )
+    return (row?.n ?? 0) > 0
+  }
+  const rows = await db.all<{ name: string }>(`PRAGMA table_info(${table})`)
+  return rows.some((row) => row.name === column)
+}
+
 /** 表里有没有某列 */
 async function hasColumn(
   db: Db,
@@ -405,6 +433,23 @@ export const MIGRATIONS: Migration[] = [
     async up(db, dialect) {
       // 告警投递死信表（通道发不出去的消息留档，可人工重放）
       await db.exec(alertDeliveryDdl(dialect))
+    }
+  },
+  {
+    version: 7,
+    name: 'alert-delivery-queue',
+    async up(db, dialect) {
+      // 投递表兼作**队列**：加「下次尝试时间」，
+      // 评估只入队，独立的 worker 按时间取出来发。
+      //
+      // ⚠️ 新建的库走 v1 的 buildSchema 就已经有这列了 ——
+      //    无脑 ADD COLUMN 会报 "duplicate column name"。
+      if (!(await columnExists(db, dialect, 'alert_deliveries', 'next_attempt_at'))) {
+        await db.exec('ALTER TABLE alert_deliveries ADD COLUMN next_attempt_at BIGINT')
+      }
+      await db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_alert_deliveries_pending ON alert_deliveries(status, next_attempt_at)'
+      )
     }
   }
 ]
