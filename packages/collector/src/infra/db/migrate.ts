@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { buildSchema, projectUsageDdl, sloDdl } from './schema.js'
+import { buildSchema, projectUsageDdl, sloDdl, alertDeliveryDdl } from './schema.js'
 import type { Db } from './types.js'
 import { ts as tsType, type Dialect } from './dialect.js'
 
@@ -397,6 +397,14 @@ export const MIGRATIONS: Migration[] = [
     async up(db, dialect) {
       // SLO 定义表（错误预算与燃烧率都基于它）
       await db.exec(sloDdl(dialect))
+    }
+  },
+  {
+    version: 6,
+    name: 'alert-delivery-dead-letters',
+    async up(db, dialect) {
+      // 告警投递死信表（通道发不出去的消息留档，可人工重放）
+      await db.exec(alertDeliveryDdl(dialect))
     }
   }
 ]
