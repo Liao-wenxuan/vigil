@@ -247,7 +247,7 @@ async function ensureDemoData() {
     await seedPerformance(project, runtimeKey)
   }
 
-  await seedAlerts(project.id)
+  await seedAlerts(project.id, runtimeKey, project.slug)
   await seedSlos(project.id)
   await seedReplayAndBehavior(project, runtimeKey)
 
@@ -622,7 +622,7 @@ async function seedPerformance(project, runtimeKey) {
   console.log(`  · 已上报 ${accepted.accepted} 条性能事务`)
 }
 
-async function seedAlerts(projectId) {
+async function seedAlerts(projectId, runtimeKey, projectSlug) {
   const rules = await api(`/projects/${projectId}/alert-rules`)
   if ((rules.rules ?? []).length === 0) {
     await ingest(
@@ -656,6 +656,30 @@ async function seedAlerts(projectId) {
     )
     console.log('  · 已创建 2 条告警规则 + 1 个通知通道')
   }
+
+  // ⚠️ 造一个**刚刚发生**的新问题 ——
+  //    「出现新问题」规则的窗口只有 300 秒，历史问题不在窗口里，
+  //    不造一个的话规则不会触发，也就没有「投递失败」可验。
+  //    通道指向 example.com，发不出去 → 正好留一条死信。
+  //
+  //    ⚠️ 这一步**每次都跑**（不放在建规则的 if 里）——
+  //    否则第二次跑 e2e 时规则已存在，探针不跑，断言就空了。
+  await ingest(
+    '/api/v1/collect',
+    {
+      appId: projectSlug,
+      events: [
+        errorEvent({
+          fingerprint: fingerprint('delivery-probe'),
+          name: 'TypeError',
+          message: '投递探针：确认通道失败会被留档',
+          eventId: `evt-delivery-probe-${Date.now()}`,
+          occurredAt: Date.now()
+        })
+      ]
+    },
+    { 'x-vigil-token': runtimeKey }
+  )
 
   // 评估一次，让触发历史里有东西
   await ingest(
@@ -766,6 +790,7 @@ const trend = trendBody.trend
 const rulesBody = await api(`/projects/${project.id}/alert-rules`)
 const channelsBody = await api(`/projects/${project.id}/channels`)
 const incidentsBody = await api(`/projects/${project.id}/alert-incidents`)
+const deliveriesBody = await api(`/projects/${project.id}/alert-deliveries`)
 const slosBody = await api(`/projects/${project.id}/slos`)
 const orgsBody = await api('/organizations')
 const allProjects = []
@@ -1181,6 +1206,19 @@ check(
   '触发历史表渲染了 N 行',
   incidentRows === (incidentsBody.incidents ?? []).length,
   `页面=${incidentRows} 行 · 接口=${(incidentsBody.incidents ?? []).length} 行`
+)
+
+// 投递失败（死信）：演示通道指向一个发不通的地址，所以这里应该真有留档
+const deliveryRows = await page.locator('[data-panel="投递失败"]').locator('.el-table__row').count()
+check(
+  '投递失败表渲染了 N 行',
+  deliveryRows === (deliveriesBody.deliveries ?? []).length,
+  `页面=${deliveryRows} 行 · 接口=${(deliveriesBody.deliveries ?? []).length} 行`
+)
+check(
+  '投递失败留了档（发不出去的通知没丢）',
+  (deliveriesBody.deliveries ?? []).length > 0,
+  `${(deliveriesBody.deliveries ?? []).length} 条死信`
 )
 
 const ruleTypeText = (await page.locator('[data-panel="告警规则"]').textContent()) ?? ''
