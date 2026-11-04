@@ -16,6 +16,7 @@ import { TrendService } from './domains/trend/service.js'
 import { SloService } from './domains/slo/service.js'
 import { IngestionPipeline } from './domains/ingestion/pipeline.js'
 import { getSender, type ChannelConfig } from './domains/alerting/channels.js'
+import { DeliveryWorker } from './domains/alerting/delivery.js'
 import { AppError } from './shared/errors.js'
 import type { BehaviorEnvelope, CollectEnvelope, PerformanceEnvelope } from '@vigil/protocol'
 
@@ -78,6 +79,8 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // SLO 服务要先建好 —— 告警评估器要读它的燃烧率
   const sloService = new SloService(db)
   const evaluator = new AlertEvaluator(db, alerting, sloService)
+  // 投递 worker：告警评估只入队，这里负责真正发出去
+  const deliveryWorker = new DeliveryWorker(alerting)
   const replay = new ReplayService(db)
   const usage = new UsageService(db)
   const retention = new RetentionService(db)
@@ -1105,6 +1108,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   })
 
   /**
+   * 立即跑一轮投递。
+   *
+   * 正常情况下投递由后台 worker 按间隔跑；这个接口让运维能**立刻**补发，
+   * 也让端到端验证能确定地等到结果（不用等定时器）。
+   */
+  app.post('/api/v1/projects/:projectId/alert-deliveries/dispatch', admin, async () => {
+    const report = await deliveryWorker.runOnce()
+    return { ok: true, report }
+  })
+
+  /**
    * 重放一条死信。
    *
    * ⚠️ 通道配置取的是**当前**配置 —— 通道可能已经被改过或删了。
@@ -1128,7 +1142,7 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
         channel.config as ChannelConfig,
         delivery.message
       )
-      await alerting.markDelivery(delivery.id, result.ok, result.error)
+      await alerting.markDelivery(delivery.id, result.ok ? 'sent' : 'dead', result.error)
 
       if (!result.ok) {
         return { ok: false, delivered: false, error: result.error ?? '重放失败' }
