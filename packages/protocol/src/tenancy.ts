@@ -107,7 +107,7 @@ export interface AlertIncident {
 }
 
 /** 投递留档的状态 */
-export type AlertDeliveryStatus = 'dead' | 'sent'
+export type AlertDeliveryStatus = 'pending' | 'dead' | 'sent'
 
 /**
  * 一次**投递失败**的留档。
@@ -118,14 +118,17 @@ export type AlertDeliveryStatus = 'dead' | 'sent'
  */
 export interface AlertDelivery {
   id: number
+  projectId: number
   ruleId?: number
   incidentId?: number
   /** 通道被删了就是 undefined —— 重放时要如实告诉用户 */
   channelId?: number
   channelType: ChannelType
   status: AlertDeliveryStatus
-  /** 实际尝试了几次 */
+  /** 已经试了几轮 */
   attempts: number
+  /** 下次尝试的时间；没有就是终态 */
+  nextAttemptAt?: number
   /** 最后一次的错误 */
   lastError?: string
   /** 告警消息本身（重放要用） */
