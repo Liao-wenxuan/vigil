@@ -14,6 +14,7 @@
 
 import type {
   AlertConditions,
+  AlertDelivery,
   AlertEvaluationResult,
   AlertIncident,
   AlertRule,
@@ -465,6 +466,28 @@ export async function evaluateAlerts(projectId: number): Promise<AlertEvaluation
     `/projects/${projectId}/alerts/evaluate`
   )
   return body.result
+}
+
+/* ============================================================
+ * 投递死信
+ * ============================================================ */
+
+/** 通道发不出去的通知 —— 留档待重放 */
+export async function listAlertDeliveries(projectId: number): Promise<AlertDelivery[]> {
+  const body = await get<{ deliveries: AlertDelivery[] }>(`/projects/${projectId}/alert-deliveries`)
+  return body.deliveries ?? []
+}
+
+/** 重放一条死信 */
+export async function retryAlertDelivery(
+  projectId: number,
+  deliveryId: number
+): Promise<{ delivered: boolean; error?: string }> {
+  const body = await post<{ delivered: boolean; error?: string }>(
+    `/projects/${projectId}/alert-deliveries/${deliveryId}/retry`,
+    {}
+  )
+  return body
 }
 
 /* ============================================================
