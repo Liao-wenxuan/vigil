@@ -290,10 +290,57 @@ export class AlertingService {
     }))
   }
 
-  // ---- 投递死信 ----
+  // ---- 投递队列 ----
 
   /**
-   * 记一条**投递失败**的留档。
+   * **入队**一条投递。
+   *
+   * ⚠️ 告警评估**只入队，不等通道** ——
+   *    通道可能慢、可能挂，等它就会把整个评估循环拖住。
+   *    真正的发送由独立的投递 worker 异步做。
+   */
+  async enqueueDelivery(input: {
+    projectId: number
+    ruleId: number
+    incidentId?: number
+    channelId: number
+    channelType: ChannelType
+    message: AlertMessage
+  }): Promise<number> {
+    const now = Date.now()
+    return await this.db.insert(
+      `INSERT INTO alert_deliveries
+         (project_id, rule_id, incident_id, channel_id, channel_type, status,
+          attempts, next_attempt_at, payload_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?, ?)`,
+      [
+        input.projectId,
+        input.ruleId,
+        input.incidentId ?? null,
+        input.channelId,
+        input.channelType,
+        now,
+        writeJson(input.message),
+        now,
+        now
+      ]
+    )
+  }
+
+  /** 取待投递的（到点了的） */
+  async listPendingDeliveries(now: number, limit = 20): Promise<AlertDelivery[]> {
+    const rows = await this.db.all<DeliveryRow>(
+      `SELECT * FROM alert_deliveries
+       WHERE status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+       ORDER BY next_attempt_at, id
+       LIMIT ?`,
+      [now, limit]
+    )
+    return rows.map(toDelivery)
+  }
+
+  /**
+   * 记一次**投递失败**的留档。
    *
    * 通道发不出去的消息不能只记一个 `delivered: 0` ——
    * 那等于把通知丢了，事后连「到底为什么没发出去」都查不到。
@@ -313,8 +360,8 @@ export class AlertingService {
     return await this.db.insert(
       `INSERT INTO alert_deliveries
          (project_id, rule_id, incident_id, channel_id, channel_type, status,
-          attempts, last_error, payload_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'dead', ?, ?, ?, ?, ?)`,
+          attempts, next_attempt_at, last_error, payload_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'dead', ?, NULL, ?, ?, ?, ?)`,
       [
         input.projectId,
         input.ruleId,
@@ -332,80 +379,90 @@ export class AlertingService {
 
   /** 列死信（按时间倒序） */
   async listDeadDeliveries(projectId: number, limit = 50): Promise<AlertDelivery[]> {
-    const rows = await this.db.all<{
-      id: number
-      rule_id: number | null
-      incident_id: number | null
-      channel_id: number | null
-      channel_type: string
-      status: string
-      attempts: number
-      last_error: string | null
-      payload_json: string | null
-      created_at: number
-      updated_at: number
-    }>(
+    const rows = await this.db.all<DeliveryRow>(
       `SELECT * FROM alert_deliveries
        WHERE project_id = ? AND status = 'dead'
        ORDER BY updated_at DESC LIMIT ?`,
       [projectId, limit]
     )
-
-    return rows.map((row) => ({
-      id: row.id,
-      ruleId: row.rule_id ?? undefined,
-      incidentId: row.incident_id ?? undefined,
-      channelId: row.channel_id ?? undefined,
-      channelType: row.channel_type as ChannelType,
-      status: row.status as AlertDelivery['status'],
-      attempts: row.attempts,
-      lastError: row.last_error ?? undefined,
-      message: readJson<AlertMessage>(row.payload_json),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    }))
+    return rows.map(toDelivery)
   }
 
-  /** 取一条死信（重放用） */
+  /** 取一条投递（重放用） */
   async getDelivery(projectId: number, id: number): Promise<AlertDelivery | undefined> {
-    const rows = await this.db.all<{
-      id: number
-      rule_id: number | null
-      incident_id: number | null
-      channel_id: number | null
-      channel_type: string
-      status: string
-      attempts: number
-      last_error: string | null
-      payload_json: string | null
-      created_at: number
-      updated_at: number
-    }>('SELECT * FROM alert_deliveries WHERE id = ? AND project_id = ?', [id, projectId])
-    const row = rows[0]
-    if (!row) return undefined
-    return {
-      id: row.id,
-      ruleId: row.rule_id ?? undefined,
-      incidentId: row.incident_id ?? undefined,
-      channelId: row.channel_id ?? undefined,
-      channelType: row.channel_type as ChannelType,
-      status: row.status as AlertDelivery['status'],
-      attempts: row.attempts,
-      lastError: row.last_error ?? undefined,
-      message: readJson<AlertMessage>(row.payload_json),
-      createdAt: row.created_at,
-      updatedAt: row.updated_at
-    }
+    const rows = await this.db.all<DeliveryRow>(
+      'SELECT * FROM alert_deliveries WHERE id = ? AND project_id = ?',
+      [id, projectId]
+    )
+    return rows[0] ? toDelivery(rows[0]) : undefined
   }
 
-  /** 重放结果写回（成功 → sent；仍失败 → 继续 dead，错误更新） */
-  async markDelivery(id: number, ok: boolean, error?: string): Promise<void> {
+  /**
+   * 更新一次投递的结果。
+   *
+   * ⚠️ 状态要**显式**传 —— 用布尔判断的话，
+   *    「终态失败」和「还要重试」分不开：
+   *    终态写成 pending + 无下次时间 = 立即再取 = 永远进不了死信。
+   *
+   * @param nextAttemptAt 下次尝试时间；null/undefined = 终态（不再重试）
+   */
+  async markDelivery(
+    id: number,
+    status: 'sent' | 'pending' | 'dead',
+    error?: string,
+    options: { attempts?: number; nextAttemptAt?: number } = {}
+  ): Promise<void> {
+    const attempts = options.attempts
+    if (attempts === undefined) {
+      await this.db.run(
+        `UPDATE alert_deliveries
+         SET status = ?, attempts = attempts + 1, last_error = ?, next_attempt_at = NULL, updated_at = ?
+         WHERE id = ?`,
+        [status, error ?? null, Date.now(), id]
+      )
+      return
+    }
     await this.db.run(
       `UPDATE alert_deliveries
-       SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = ?
+       SET status = ?, attempts = ?, last_error = ?, next_attempt_at = ?, updated_at = ?
        WHERE id = ?`,
-      [ok ? 'sent' : 'dead', error ?? null, Date.now(), id]
+      [status, attempts, error ?? null, options.nextAttemptAt ?? null, Date.now(), id]
     )
+  }
+}
+
+/** 投递表的一行 */
+interface DeliveryRow {
+  id: number
+  project_id: number
+  rule_id: number | null
+  incident_id: number | null
+  channel_id: number | null
+  channel_type: string
+  status: string
+  attempts: number
+  next_attempt_at: number | null
+  last_error: string | null
+  payload_json: string | null
+  created_at: number
+  updated_at: number
+}
+
+function toDelivery(row: DeliveryRow): AlertDelivery {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    ruleId: row.rule_id ?? undefined,
+    incidentId: row.incident_id ?? undefined,
+    channelId: row.channel_id ?? undefined,
+    channelType: row.channel_type as ChannelType,
+    status: row.status as AlertDelivery['status'],
+    attempts: row.attempts,
+    nextAttemptAt: row.next_attempt_at ?? undefined,
+    lastError: row.last_error ?? undefined,
+    message: readJson<AlertMessage>(row.payload_json),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
   }
 }
 
