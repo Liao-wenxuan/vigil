@@ -738,6 +738,21 @@ export const SLO_METRIC_LABELS: Record<string, string> = {
   error_rate: '错误率'
 }
 
+/** 一次投递失败（死信）的留档 */
+export interface AlertDelivery {
+  id: number
+  ruleId?: number
+  incidentId?: number
+  channelId?: number
+  channelType: ChannelType
+  status: 'dead' | 'sent'
+  attempts: number
+  lastError?: string
+  message?: { title: string; body: string }
+  createdAt: number
+  updatedAt: number
+}
+
 export const BEHAVIOR_TYPE_LABELS: Record<BehaviorEventType, string> = {
   pageview: '页面访问',
   route: '路由切换',
