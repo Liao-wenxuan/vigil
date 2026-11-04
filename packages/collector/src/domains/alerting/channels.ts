@@ -41,6 +41,108 @@ export interface SendResult {
   ok: boolean
   status?: number
   error?: string
+  /** 实际尝试了几次（1 = 没重试） */
+  attempts?: number
+}
+
+/**
+ * 单次尝试的超时。
+ *
+ * ⚠️ 比以前短（10s → 5s）：重试要挤在总预算里，
+ * 单次给太多时间就只剩一次机会了。
+ */
+const ATTEMPT_TIMEOUT_MS = 5_000
+
+/**
+ * 整个发送的**总预算**（含重试与退避等待）。
+ *
+ * ⚠️ 告警评估是**同步等**通道结果的 —— 预算就是评估循环最多被阻塞多久。
+ *    定成 10s = 和以前单次发送的耗时一样，所以加了重试也不会让评估变慢。
+ */
+const TOTAL_BUDGET_MS = 10_000
+
+/** 重试之间的退避（毫秒） */
+const BACKOFF_MS = [300, 1000]
+
+/**
+ * 哪些失败值得重试。
+ *
+ * - **网络错误**（没有 status）→ 值得重试（对方可能只是抖了一下）
+ * - **5xx / 429** → 值得重试（服务端临时扛不住）
+ * - **4xx（除 429）** → **不值得**：请求本身有问题，
+ *   再发一百次还是同样的结果，只是白白拖慢评估。
+ */
+export function isRetryable(result: SendResult): boolean {
+  if (result.ok) return false
+  if (result.status === undefined) return true
+  if (result.status === 429) return true
+  return result.status >= 500
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * 发一个 JSON POST，带超时与**有界重试**。
+ *
+ * ## 为什么重试要有总预算
+ *
+ * 告警评估是同步等通道结果的 —— 如果通道一直挂着，
+ * 评估循环就一直等着，整个告警引擎就卡住了。
+ * 所以重试不是「无限重试」，而是「在总预算内尽可能多试几次」。
+ *
+ * @param url 目标地址
+ * @param payload 请求体
+ * @param budgetMs 总预算（毫秒）
+ */
+export async function postJson(
+  url: string,
+  payload: unknown,
+  budgetMs: number = TOTAL_BUDGET_MS
+): Promise<SendResult> {
+  const deadline = Date.now() + budgetMs
+  let last: SendResult = { ok: false, error: '发送失败' }
+  let attempts = 0
+
+  for (let i = 0; i <= BACKOFF_MS.length; i++) {
+    attempts++
+    last = await postOnce(url, payload)
+    if (last.ok) return { ...last, attempts }
+    if (!isRetryable(last)) return { ...last, attempts }
+
+    const backoff = BACKOFF_MS[i]
+    if (backoff === undefined) break
+    // ⚠️ 再试一次要**塞得进剩余预算**才试 —— 否则就是白等
+    if (Date.now() + backoff + ATTEMPT_TIMEOUT_MS > deadline) break
+    await sleep(backoff)
+  }
+
+  return { ...last, attempts }
+}
+
+/** 单次 POST */
+async function postOnce(url: string, payload: unknown): Promise<SendResult> {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ATTEMPT_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    })
+
+    if (!response.ok) {
+      return { ok: false, status: response.status, error: await response.text() }
+    }
+    return { ok: true, status: response.status }
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 /**
@@ -161,28 +263,4 @@ const SENDERS: Record<ChannelType, ChannelSender> = {
 
 export function getSender(type: ChannelType): ChannelSender {
   return SENDERS[type] ?? SENDERS.webhook
-}
-
-/** 发一个 JSON POST，带超时 */
-async function postJson(url: string, payload: unknown): Promise<SendResult> {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 10_000)
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    })
-
-    if (!response.ok) {
-      return { ok: false, status: response.status, error: await response.text() }
-    }
-    return { ok: true, status: response.status }
-  } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : String(error) }
-  } finally {
-    clearTimeout(timer)
-  }
 }
