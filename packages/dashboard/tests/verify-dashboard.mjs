@@ -790,6 +790,13 @@ const trend = trendBody.trend
 const rulesBody = await api(`/projects/${project.id}/alert-rules`)
 const channelsBody = await api(`/projects/${project.id}/channels`)
 const incidentsBody = await api(`/projects/${project.id}/alert-incidents`)
+// ⚠️ 告警评估只**入队**，真正的发送由投递 worker 做。
+//    这里显式跑一轮，免得等定时器（不确定的等待 = 不稳定的测试）。
+await ingest(
+  `/api/v1/projects/${project.id}/alert-deliveries/dispatch`,
+  {},
+  { 'x-vigil-admin-token': adminToken }
+)
 const deliveriesBody = await api(`/projects/${project.id}/alert-deliveries`)
 const slosBody = await api(`/projects/${project.id}/slos`)
 const orgsBody = await api('/organizations')
