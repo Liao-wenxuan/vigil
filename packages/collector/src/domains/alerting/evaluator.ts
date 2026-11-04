@@ -555,7 +555,7 @@ export class AlertEvaluator {
     )
 
     // 即使通道全失败也要记录 —— 否则下次评估会重复发
-    await this.alerting.recordIncident({
+    const incident = await this.alerting.recordIncident({
       ruleId: rule.id,
       projectId: rule.projectId,
       issueId: issue?.id,
@@ -568,6 +568,26 @@ export class AlertEvaluator {
         delivered: results.filter((r) => r.ok).length
       }
     })
+
+    // ⚠️ 发不出去的消息**要留档** —— 只记一个 `delivered: 0` 等于把通知丢了，
+    //    事后连「为什么没发出去」都查不到。留档之后才能人工重放。
+    await Promise.all(
+      results.map(async (result, index) => {
+        if (result.ok) return
+        const channel = channels[index]
+        if (!channel) return
+        await this.alerting.recordDeadDelivery({
+          projectId: rule.projectId,
+          ruleId: rule.id,
+          incidentId: incident.id,
+          channelId: channel.id,
+          channelType: channel.type,
+          attempts: result.attempts ?? 1,
+          error: result.error,
+          message: fullMessage
+        })
+      })
+    )
 
     return true
   }
