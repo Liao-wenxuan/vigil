@@ -106,6 +106,42 @@ export interface AlertIncident {
   payload: Record<string, unknown>
 }
 
+/** 投递留档的状态 */
+export type AlertDeliveryStatus = 'dead' | 'sent'
+
+/**
+ * 一次**投递失败**的留档。
+ *
+ * 通道发不出去的消息不能只记一个 `delivered: 0` ——
+ * 那等于把通知丢了，事后连「到底为什么没发出去」都查不到。
+ * 留档之后才能人工重放。
+ */
+export interface AlertDelivery {
+  id: number
+  ruleId?: number
+  incidentId?: number
+  /** 通道被删了就是 undefined —— 重放时要如实告诉用户 */
+  channelId?: number
+  channelType: ChannelType
+  status: AlertDeliveryStatus
+  /** 实际尝试了几次 */
+  attempts: number
+  /** 最后一次的错误 */
+  lastError?: string
+  /** 告警消息本身（重放要用） */
+  message?: {
+    title: string
+    body: string
+    issueId?: number
+    shortId?: string
+    url?: string
+    metric?: { name: string; value: number; threshold: number }
+    severity?: 'info' | 'warning' | 'error'
+  }
+  createdAt: number
+  updatedAt: number
+}
+
 export interface Organization {
   id: number
   slug: string
