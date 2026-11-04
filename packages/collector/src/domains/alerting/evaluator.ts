@@ -1,6 +1,6 @@
 import type { Db } from '../../infra/db/client.js'
 import type { AlertConditions, AlertRule } from '@vigil/protocol'
-import { getSender, type ChannelConfig, type AlertMessage } from './channels.js'
+import { type AlertMessage } from './channels.js'
 import type { AlertingService } from './service.js'
 import type { SloService } from '../slo/service.js'
 import { percentiles } from '../performance/service.js'
@@ -527,7 +527,7 @@ export class AlertEvaluator {
     }
 
     // 通道是**逐个取**的（一个通道发失败不影响别的），
-    // 所以先并发取回来，再逐个发。
+    // 所以先并发取回来，再逐个入队。
     const channels = (
       await Promise.all(
         rule.channelIds.map(async (id) => {
@@ -547,13 +547,6 @@ export class AlertEvaluator {
       severity: issue?.level === 'fatal' ? 'error' : 'warning'
     }
 
-    const results = await Promise.all(
-      channels.map(
-        async (channel) =>
-          await getSender(channel.type).send(channel.config as ChannelConfig, fullMessage)
-      )
-    )
-
     // 即使通道全失败也要记录 —— 否则下次评估会重复发
     const incident = await this.alerting.recordIncident({
       ruleId: rule.id,
@@ -564,26 +557,24 @@ export class AlertEvaluator {
         message: fullMessage.title,
         body: fullMessage.body,
         metric: fullMessage.metric,
-        channels: results.length,
-        delivered: results.filter((r) => r.ok).length
+        channels: channels.length,
+        // ⚠️ 这里只能报「已入队几条」——
+        //    真正发出去没有要等，发送结果看「投递失败」区块。
+        queued: channels.length
       }
     })
 
-    // ⚠️ 发不出去的消息**要留档** —— 只记一个 `delivered: 0` 等于把通知丢了，
-    //    事后连「为什么没发出去」都查不到。留档之后才能人工重放。
+    // ⚠️ **只入队，不发送** ——
+    //    评估是同步的，等通道会把整个告警引擎拖住。
+    //    真正的发送由独立的投递 worker 异步做（见 delivery.ts）。
     await Promise.all(
-      results.map(async (result, index) => {
-        if (result.ok) return
-        const channel = channels[index]
-        if (!channel) return
-        await this.alerting.recordDeadDelivery({
+      channels.map(async (channel) => {
+        await this.alerting.enqueueDelivery({
           projectId: rule.projectId,
           ruleId: rule.id,
           incidentId: incident.id,
           channelId: channel.id,
           channelType: channel.type,
-          attempts: result.attempts ?? 1,
-          error: result.error,
           message: fullMessage
         })
       })
