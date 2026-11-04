@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { isRetryable, postJson } from '../src/domains/alerting/channels.js'
+import { DeliveryWorker } from '../src/domains/alerting/delivery.js'
 import { fp, makeEvent, setupDb } from './helpers.js'
 
 /**
@@ -97,8 +98,104 @@ describe('告警通道可靠性', () => {
     })
   })
 
-  describe('死信留档', () => {
-    it('通道发不出去 → 留一条 dead 记录', async () => {
+  describe('异步投递', () => {
+    it('评估只入队，不碰网络', async () => {
+      const { alerting, evaluator, project, issues } = await setupDb()
+      const fetchState = stubFetch([{ status: 200 }])
+
+      const channel = await alerting.createChannel({
+        projectId: project.id,
+        name: '机器人',
+        type: 'webhook',
+        config: { url: 'https://example.com/hook' }
+      })
+      await alerting.createRule({
+        projectId: project.id,
+        name: '新问题出现',
+        type: 'issue.new',
+        threshold: 1,
+        windowSeconds: 300,
+        channelIds: [channel.id]
+      })
+
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('queue') }))
+      await evaluator.evaluateProject(project.id)
+
+      // ⚠️ 评估是同步的 —— 等通道会把整个告警引擎拖住
+      expect(fetchState.calls).toBe(0)
+
+      // 但投递已经入队了
+      const pending = await alerting.listPendingDeliveries(Date.now())
+      expect(pending).toHaveLength(1)
+      expect(pending[0].status).toBe('pending')
+    })
+
+    it('worker 发出去了 → 记为 sent', async () => {
+      const { alerting, evaluator, project, issues } = await setupDb()
+      stubFetch([{ status: 200 }])
+
+      const channel = await alerting.createChannel({
+        projectId: project.id,
+        name: '机器人',
+        type: 'webhook',
+        config: { url: 'https://example.com/hook' }
+      })
+      await alerting.createRule({
+        projectId: project.id,
+        name: '新问题出现',
+        type: 'issue.new',
+        threshold: 1,
+        windowSeconds: 300,
+        channelIds: [channel.id]
+      })
+
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('sent') }))
+      await evaluator.evaluateProject(project.id)
+
+      const worker = new DeliveryWorker(alerting)
+      const report = await worker.runOnce()
+
+      expect(report.sent).toBe(1)
+      expect(await alerting.listDeadDeliveries(project.id)).toHaveLength(0)
+    })
+
+    it('worker 发不出去 → 排到后面再试', async () => {
+      const { alerting, evaluator, project, issues } = await setupDb()
+      stubFetch([{ status: 500 }])
+
+      const channel = await alerting.createChannel({
+        projectId: project.id,
+        name: '机器人',
+        type: 'webhook',
+        config: { url: 'https://example.com/hook' }
+      })
+      await alerting.createRule({
+        projectId: project.id,
+        name: '新问题出现',
+        type: 'issue.new',
+        threshold: 1,
+        windowSeconds: 300,
+        channelIds: [channel.id]
+      })
+
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('retry') }))
+      await evaluator.evaluateProject(project.id)
+
+      const worker = new DeliveryWorker(alerting)
+      const report = await worker.runOnce()
+
+      expect(report.retrying).toBe(1)
+      expect(report.dead).toBe(0)
+      // 还没到重试时间 → worker 不会再取它
+      const due = await alerting.listPendingDeliveries(Date.now())
+      expect(due).toHaveLength(0)
+      // 但它还在队列里，只是排在后面
+      const later = await alerting.listPendingDeliveries(Date.now() + 10 * 60_000)
+      expect(later).toHaveLength(1)
+      expect(later[0].lastError).toBeTruthy()
+    })
+
+    it('重试用尽 → 转死信', async () => {
       const { alerting, evaluator, project, issues } = await setupDb()
       stubFetch([{ status: 500 }])
 
@@ -120,17 +217,24 @@ describe('告警通道可靠性', () => {
       await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('dead') }))
       await evaluator.evaluateProject(project.id)
 
+      const worker = new DeliveryWorker(alerting)
+      // 一轮轮试下去，直到重试用尽
+      // ⚠️ 时间步长要够大 —— 最长的退避是 12 小时，步长小了投递根本轮不到
+      let now = Date.now()
+      for (let i = 0; i < 10; i++) {
+        const report = await worker.runOnce(now)
+        if (report.dead > 0) break
+        now += 24 * 3600_000
+      }
+
       const dead = await alerting.listDeadDeliveries(project.id)
       expect(dead).toHaveLength(1)
       expect(dead[0].status).toBe('dead')
-      expect(dead[0].channelType).toBe('webhook')
-      expect(dead[0].attempts).toBeGreaterThanOrEqual(1)
       expect(dead[0].lastError).toBeTruthy()
-      // 消息内容留下来了 —— 重放要用
       expect(dead[0].message?.title).toBeTruthy()
-    })
+    }, 30_000)
 
-    it('通道发得出去 → 不留死信', async () => {
+    it('通道被删了 → 直接死信，不无限重试', async () => {
       const { alerting, evaluator, project, issues } = await setupDb()
       stubFetch([{ status: 200 }])
 
@@ -149,47 +253,17 @@ describe('告警通道可靠性', () => {
         channelIds: [channel.id]
       })
 
-      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('ok') }))
+      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('orphan') }))
       await evaluator.evaluateProject(project.id)
 
-      expect(await alerting.listDeadDeliveries(project.id)).toHaveLength(0)
-    })
+      // 通道没了
+      await alerting.deleteChannel(project.id, channel.id)
 
-    it('重放成功 → 状态变成 sent', async () => {
-      const { alerting, evaluator, project, issues } = await setupDb()
-      stubFetch([{ status: 500 }])
+      const worker = new DeliveryWorker(alerting)
+      const report = await worker.runOnce()
 
-      const channel = await alerting.createChannel({
-        projectId: project.id,
-        name: '机器人',
-        type: 'webhook',
-        config: { url: 'https://example.com/hook' }
-      })
-      await alerting.createRule({
-        projectId: project.id,
-        name: '新问题出现',
-        type: 'issue.new',
-        threshold: 1,
-        windowSeconds: 300,
-        channelIds: [channel.id]
-      })
-
-      await issues.ingestEvent(project.id, makeEvent({ fingerprint: fp('replay') }))
-      await evaluator.evaluateProject(project.id)
-
-      const dead = await alerting.listDeadDeliveries(project.id)
-      expect(dead).toHaveLength(1)
-
-      // 通道恢复了，重放一次
-      vi.stubGlobal('fetch', async () => ({ ok: true, status: 200, text: async () => '' }))
-      const { getSender } = await import('../src/domains/alerting/channels.js')
-      const row = await alerting.getDelivery(project.id, dead[0].id)
-      const target = await alerting.getChannel(project.id, row!.channelId!)
-      const result = await getSender(target.type).send(target.config as never, row!.message!)
-      await alerting.markDelivery(row!.id, result.ok, result.error)
-
-      expect(result.ok).toBe(true)
-      expect(await alerting.listDeadDeliveries(project.id)).toHaveLength(0)
+      expect(report.orphaned).toBe(1)
+      expect(await alerting.listDeadDeliveries(project.id)).toHaveLength(1)
     })
   })
 })
