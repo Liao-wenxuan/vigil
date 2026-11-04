@@ -15,6 +15,7 @@ import { UsageService } from './domains/usage/service.js'
 import { TrendService } from './domains/trend/service.js'
 import { SloService } from './domains/slo/service.js'
 import { IngestionPipeline } from './domains/ingestion/pipeline.js'
+import { getSender, type ChannelConfig } from './domains/alerting/channels.js'
 import { AppError } from './shared/errors.js'
 import type { BehaviorEnvelope, CollectEnvelope, PerformanceEnvelope } from '@vigil/protocol'
 
@@ -1087,6 +1088,54 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     const { projectId } = request.params as { projectId: string }
     return { ok: true, incidents: await alerting.listIncidents(Number(projectId)) }
   })
+
+  /**
+   * 投递死信 —— 通道发不出去的通知都留在这。
+   *
+   * 没有这个列表，失败的通知就是**丢了**：没人知道报过，也没法补发。
+   */
+  app.get('/api/v1/projects/:projectId/alert-deliveries', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    const query = request.query as Record<string, string | undefined>
+    const limit = query.limit ? Math.min(200, Math.max(1, Number(query.limit))) : 50
+    return {
+      ok: true,
+      deliveries: await alerting.listDeadDeliveries(Number(projectId), limit)
+    }
+  })
+
+  /**
+   * 重放一条死信。
+   *
+   * ⚠️ 通道配置取的是**当前**配置 —— 通道可能已经被改过或删了。
+   *    通道没了就如实报错，不能悄悄当成功。
+   */
+  app.post(
+    '/api/v1/projects/:projectId/alert-deliveries/:deliveryId/retry',
+    admin,
+    async (request) => {
+      const { projectId, deliveryId } = request.params as { projectId: string; deliveryId: string }
+      const project = Number(projectId)
+      const delivery = await alerting.getDelivery(project, Number(deliveryId))
+      if (!delivery) throw AppError.notFound('投递记录')
+      if (!delivery.message) throw AppError.badRequest('这条记录没有消息内容，无法重放')
+      if (delivery.channelId === undefined) {
+        throw AppError.badRequest('通道已被删除，无法重放')
+      }
+
+      const channel = await alerting.getChannel(project, delivery.channelId)
+      const result = await getSender(channel.type).send(
+        channel.config as ChannelConfig,
+        delivery.message
+      )
+      await alerting.markDelivery(delivery.id, result.ok, result.error)
+
+      if (!result.ok) {
+        return { ok: false, delivered: false, error: result.error ?? '重放失败' }
+      }
+      return { ok: true, delivered: true }
+    }
+  )
 
   // ---- 运维 ----
 
