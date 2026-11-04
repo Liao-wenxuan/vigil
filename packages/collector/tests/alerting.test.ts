@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { DeliveryWorker } from '../src/domains/alerting/delivery.js'
 import { countingDb, fp, makeEvent, setupDb, type ReadCounter } from './helpers.js'
 
 describe('告警引擎', () => {
@@ -225,6 +226,9 @@ describe('告警引擎', () => {
 
         await evaluator.evaluateProject(project.id)
 
+        // ⚠️ 评估只入队，真正的发送由投递 worker 做
+        await new DeliveryWorker(alerting).runOnce()
+
         expect(received).toHaveLength(1)
         expect((received[0] as { title: string }).title).toContain('错误次数超阈值')
       } finally {
@@ -271,6 +275,9 @@ describe('告警引擎', () => {
         })
 
         await evaluator.evaluateProject(project.id)
+
+        // ⚠️ 评估只入队，真正的发送由投递 worker 做
+        await new DeliveryWorker(alerting).runOnce()
 
         expect(received).toHaveLength(1)
         const payload = received[0] as { msg_type: string; content: { text: string } }
