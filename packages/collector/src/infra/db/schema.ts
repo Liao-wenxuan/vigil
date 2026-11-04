@@ -27,6 +27,32 @@ export function projectUsageDdl(dialect: Dialect): string {
 }
 
 /**
+ * 告警投递死信表。
+ *
+ * 单独抽成函数是因为**迁移也要用同一份 DDL**：
+ * 两边各写一份，迟早漂移成一新一旧，而那种 bug 只在老库上出现。
+ */
+export function alertDeliveryDdl(dialect: Dialect): string {
+  return `CREATE TABLE IF NOT EXISTS alert_deliveries (
+  id ${pk(dialect)},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  rule_id INTEGER REFERENCES alert_rules(id) ON DELETE SET NULL,
+  incident_id INTEGER REFERENCES alert_incidents(id) ON DELETE SET NULL,
+  channel_id INTEGER REFERENCES notification_channels(id) ON DELETE SET NULL,
+  channel_type ${text(dialect)} NOT NULL,
+  status ${text(dialect)} NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error ${text(dialect)},
+  payload_json ${json(dialect)},
+  created_at ${ts(dialect)} NOT NULL,
+  updated_at ${ts(dialect)} NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_project
+  ON alert_deliveries(project_id, status, updated_at DESC);`
+}
+
+/**
  * SLO 定义表。
  *
  * 单独抽成函数是因为**迁移也要用同一份 DDL**：
@@ -422,6 +448,38 @@ CREATE INDEX IF NOT EXISTS idx_alert_incidents_rule  ON alert_incidents(rule_id,
 -- 告警历史列表按项目查 + 按时间倒序 —— 前两个索引的首列都不是 project_id，
 -- 少了这个就退化成「全表扫描 + 临时排序」（2 万行时就能看出来）。
 CREATE INDEX IF NOT EXISTS idx_alert_incidents_project ON alert_incidents(project_id, triggered_at DESC);
+
+-- ============================================================
+-- 告警投递死信
+-- ============================================================
+--
+-- 通道发不出去的消息**不能只记一个 delivered: 0** ——
+-- 那等于把通知丢了，事后连「到底为什么没发出去」都查不到。
+--
+-- 这里把每次失败的投递**留档**：哪个通道、试了几次、报了什么错、
+-- 消息内容是什么。留档之后才能人工重放（replay）。
+--
+-- ⚠️ 存的是**消息**不是通道配置 —— 配置在 notification_channels 里，
+--    拿最新的就行，不用在这里存第二份（配置里可能有密钥）。
+CREATE TABLE IF NOT EXISTS alert_deliveries (
+  id ${PK},
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  rule_id INTEGER REFERENCES alert_rules(id) ON DELETE SET NULL,
+  incident_id INTEGER REFERENCES alert_incidents(id) ON DELETE SET NULL,
+  channel_id INTEGER REFERENCES notification_channels(id) ON DELETE SET NULL,
+  channel_type ${TEXT} NOT NULL,
+  -- dead = 重试用尽仍失败；sent = 重放成功
+  status ${TEXT} NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error ${TEXT},
+  -- 告警消息本身（重放要用）
+  payload_json ${JSON},
+  created_at ${TS} NOT NULL,
+  updated_at ${TS} NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_deliveries_project
+  ON alert_deliveries(project_id, status, updated_at DESC);
 
 -- ============================================================
 -- 会话回放与用户行为
