@@ -1,8 +1,10 @@
 import type { Db } from '../../infra/db/client.js'
 import { fromBool, readJson, writeJson } from '../../infra/db/dialect.js'
 import { AppError } from '../../shared/errors.js'
+import type { AlertMessage } from './channels.js'
 import type {
   AlertConditions,
+  AlertDelivery,
   AlertIncident,
   AlertRule,
   ChannelType,
@@ -286,6 +288,124 @@ export class AlertingService {
       dedupeKey: row.dedupe_key,
       payload: readJson<Record<string, unknown>>(row.payload_json) ?? {}
     }))
+  }
+
+  // ---- 投递死信 ----
+
+  /**
+   * 记一条**投递失败**的留档。
+   *
+   * 通道发不出去的消息不能只记一个 `delivered: 0` ——
+   * 那等于把通知丢了，事后连「到底为什么没发出去」都查不到。
+   * 留档之后才能人工重放。
+   */
+  async recordDeadDelivery(input: {
+    projectId: number
+    ruleId: number
+    incidentId?: number
+    channelId: number
+    channelType: ChannelType
+    attempts: number
+    error?: string
+    message: AlertMessage
+  }): Promise<number> {
+    const now = Date.now()
+    return await this.db.insert(
+      `INSERT INTO alert_deliveries
+         (project_id, rule_id, incident_id, channel_id, channel_type, status,
+          attempts, last_error, payload_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 'dead', ?, ?, ?, ?, ?)`,
+      [
+        input.projectId,
+        input.ruleId,
+        input.incidentId ?? null,
+        input.channelId,
+        input.channelType,
+        input.attempts,
+        input.error ?? null,
+        writeJson(input.message),
+        now,
+        now
+      ]
+    )
+  }
+
+  /** 列死信（按时间倒序） */
+  async listDeadDeliveries(projectId: number, limit = 50): Promise<AlertDelivery[]> {
+    const rows = await this.db.all<{
+      id: number
+      rule_id: number | null
+      incident_id: number | null
+      channel_id: number | null
+      channel_type: string
+      status: string
+      attempts: number
+      last_error: string | null
+      payload_json: string | null
+      created_at: number
+      updated_at: number
+    }>(
+      `SELECT * FROM alert_deliveries
+       WHERE project_id = ? AND status = 'dead'
+       ORDER BY updated_at DESC LIMIT ?`,
+      [projectId, limit]
+    )
+
+    return rows.map((row) => ({
+      id: row.id,
+      ruleId: row.rule_id ?? undefined,
+      incidentId: row.incident_id ?? undefined,
+      channelId: row.channel_id ?? undefined,
+      channelType: row.channel_type as ChannelType,
+      status: row.status as AlertDelivery['status'],
+      attempts: row.attempts,
+      lastError: row.last_error ?? undefined,
+      message: readJson<AlertMessage>(row.payload_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }))
+  }
+
+  /** 取一条死信（重放用） */
+  async getDelivery(projectId: number, id: number): Promise<AlertDelivery | undefined> {
+    const rows = await this.db.all<{
+      id: number
+      rule_id: number | null
+      incident_id: number | null
+      channel_id: number | null
+      channel_type: string
+      status: string
+      attempts: number
+      last_error: string | null
+      payload_json: string | null
+      created_at: number
+      updated_at: number
+    }>('SELECT * FROM alert_deliveries WHERE id = ? AND project_id = ?', [id, projectId])
+    const row = rows[0]
+    if (!row) return undefined
+    return {
+      id: row.id,
+      ruleId: row.rule_id ?? undefined,
+      incidentId: row.incident_id ?? undefined,
+      channelId: row.channel_id ?? undefined,
+      channelType: row.channel_type as ChannelType,
+      status: row.status as AlertDelivery['status'],
+      attempts: row.attempts,
+      lastError: row.last_error ?? undefined,
+      message: readJson<AlertMessage>(row.payload_json),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }
+  }
+
+  /** 重放结果写回（成功 → sent；仍失败 → 继续 dead，错误更新） */
+  async markDelivery(id: number, ok: boolean, error?: string): Promise<void> {
+    await this.db.run(
+      `UPDATE alert_deliveries
+       SET status = ?, attempts = attempts + 1, last_error = ?, updated_at = ?
+       WHERE id = ?`,
+      [ok ? 'sent' : 'dead', error ?? null, Date.now(), id]
+    )
   }
 }
 
