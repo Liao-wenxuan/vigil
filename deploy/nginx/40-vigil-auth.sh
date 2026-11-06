@@ -27,7 +27,12 @@ if [ -n "${VIGIL_PANEL_PASSWORD:-}" ]; then
 
   # -apr1 是 htpasswd 的 MD5 格式，nginx 认这个
   printf '%s:%s\n' "$USER_NAME" "$(openssl passwd -apr1 "$VIGIL_PANEL_PASSWORD")" > "$HTPASSWD"
-  chmod 600 "$HTPASSWD"
+
+  # ⚠️ worker 进程以 nginx 用户运行，600/root 会让它读不到文件 ——
+  #    症状是「不带凭据 401，带了凭据 500」：
+  #    error.log 里是 open() "/etc/nginx/.htpasswd" failed (13: Permission denied)。
+  chown root:nginx "$HTPASSWD" 2>/dev/null || chown 0:101 "$HTPASSWD"
+  chmod 640 "$HTPASSWD"
 
   printf 'auth_basic "Vigil";\nauth_basic_user_file %s;\n' "$HTPASSWD" > "$AUTH_CONF"
   echo "[vigil] 面板已启用登录保护（用户 $USER_NAME）"
