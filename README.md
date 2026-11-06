@@ -21,6 +21,40 @@
 | **多租户** | 组织 → 团队 → 项目 → 环境 / 版本，三层隔离 |
 | **安全** | 双密钥分离、采集端脱敏、sourcemap 不出服务端 |
 
+**SLO 与错误预算** —— 目标、达标率、预算消耗、燃烧率，支持多窗口多燃烧率告警，
+并可用 `npm run slo:gate` 做成发布门禁。
+
+---
+
+## 面板一览
+
+9 个页面，全部有可自动测的闸门兜着（见「验证」）。下面是其中 8 个
+（问题详情页从列表进去）。
+
+| | |
+|---|---|
+| **总览** 错误与性能全貌、趋势 | **问题** 按指纹聚合的工单列表 |
+| ![总览](docs/screenshots/overview.png) | ![问题](docs/screenshots/issues.png) |
+| **性能** Web Vitals 采样与分位数 | **会话回放** 出错时刻的页面现场 |
+| ![性能](docs/screenshots/performance.png) | ![会话回放](docs/screenshots/sessions.png) |
+| **用户行为** 路径与点击分布 | **SLO 与预算** 目标、达标率、燃烧率 |
+| ![用户行为](docs/screenshots/behavior.png) | ![SLO](docs/screenshots/slo.png) |
+| **告警** 规则、通道、投递失败 | **设置** 项目、环境、版本、密钥 |
+| ![告警](docs/screenshots/alerts.png) | ![设置](docs/screenshots/settings.png) |
+
+---
+
+## 规模
+
+| | |
+|---|---|
+| 单元测试 | **285** 条（Collector 210 + SDK 75） |
+| 端到端断言 | **90** 条（数据链路 33 + 面板渲染 57） |
+| 自动闸门 | **5** 个（界面设计 / 查询计划 / 摄入往返 / 租户隔离 / 发布准备） |
+| 领域 | 11 个（租户 · 问题 · 性能 · 告警 · SLO · 制品 · 回放 · 行为 · 摄入 · 趋势 · 留存） |
+| 数据库表 | **30** 张 + **48** 个索引（一张代码同时适配 SQLite 与 PostgreSQL） |
+| SDK 产物 | 核心 43KB · 回放独立入口 279KB（不进核心） |
+
 ---
 
 ## 架构
@@ -205,7 +239,7 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 264 条单元测试（Collector 189 + SDK 75）
+npm run test              # 285 条单元测试（Collector 210 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 55 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
@@ -693,15 +727,22 @@ packages/
       theme.css      设计 token（字阶 / 间距 / 动效 / 焦点环）
 scripts/
   verify-pipeline.ts    端到端闭环验证
-  verify-dashboard.ts   面板渲染验证
+  verify-dashboard.mjs  面板渲染验证
   audit-ui.mjs          界面设计闸门
+  audit-query-plans.ts  查询计划闸门（热查询必须走索引）
+  audit-ingest-calls.ts 摄入往返预算闸门
+  audit-tenant-scope.ts 租户隔离闸门
+  audit-publish.ts      发布准备闸门
+  slo-gate.ts           SLO 发布闸门（预算耗尽就非零退出）
   seed-demo.ts          演示数据种子
+  smoke-deploy.mjs     部署冒烟（验证容器拓扑）
   upload-sourcemaps.mjs CI 里上传 sourcemap
 deploy/
   nginx/        面板的 nginx 配置
   k8s/          namespace / deployment / service / ingress / hpa / pdb
 docs/
   integration.md   接入文档
+  deploy.md       上线指南
 ```
 
 ---
@@ -720,7 +761,7 @@ docker compose up --build
 - `deploy/k8s/` 含 namespace / deployment / service / ingress / HPA / PDB
   （⚠️ 这条路径未实跑，已知两处问题见 `docs/deploy.md`）
 - ⚠️ **容器实跑未验证**（本机 Docker 因缺 WSL2 起不来）
-  容器拓扑（同源 + token 注入 + SPA 回退）已用等价代理跑过 50 条面板断言
+  容器拓扑（同源 + token 注入 + SPA 回退）已用等价代理跑过 57 条面板断言
 - ⚠️ **多副本前必须换 PostgreSQL** —— SQLite 是单文件，多进程写会锁竞争
 
 ---
