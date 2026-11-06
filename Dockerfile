@@ -16,6 +16,10 @@
 # ============================================================
 FROM node:22-alpine AS build
 
+# better-sqlite3 是原生模块，alpine 镜像里没有编译工具链 ——
+# 没有 python3/make/g++，npm ci 会在 node-gyp 一步直接失败。
+RUN apk add --no-cache python3 make g++
+
 WORKDIR /app
 
 # 先只拷 package.json，让 npm ci 有缓存可复用
