@@ -1,5 +1,9 @@
 # Vigil · 前端可观测性平台
 
+[![CI](https://github.com/Liao-wenxuan/vigil/actions/workflows/ci.yml/badge.svg)](https://github.com/Liao-wenxuan/vigil/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/Node-22-5FA04E?logo=node.js)](https://nodejs.org)
+
 多应用可接入的前端监控：**浏览器 SDK + 采集服务 + 管理面板**。
 
 不只是"错误日志"—— 错误、性能、行为、回放在**同一个会话**上打通，
