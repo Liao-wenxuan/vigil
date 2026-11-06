@@ -93,9 +93,12 @@ COPY --from=build /app/packages/sdk/dist /usr/share/nginx/html/sdk
 
 # 配置走「模板 + 启动时渲染」：管理 token 在容器启动时注入，不烘进镜像。
 # 官方镜像的 entrypoint 会把 /etc/nginx/templates/*.template 渲染到
-# /etc/nginx/conf.d/ —— 所以这里只放模板，不放现成的 conf。
+# /etc/nginx/conf.d/ —— 但**只**渲染到 conf.d/。
+# vigil-proxy.conf 是被 include 进 location 的片段，不能落进 conf.d/
+#（proxy_pass / set 在 http 层是非法指令），所以由 30-vigil-subst.sh 自己渲染。
 COPY deploy/nginx/default.conf.template /etc/nginx/templates/default.conf.template
-COPY deploy/nginx/vigil-proxy.conf /etc/nginx/vigil-proxy.conf
+COPY deploy/nginx/vigil-proxy.conf /etc/nginx/templates/vigil-proxy.conf.template
+COPY deploy/nginx/30-vigil-subst.sh /docker-entrypoint.d/30-vigil-subst.sh
 COPY deploy/nginx/40-vigil-auth.sh /docker-entrypoint.d/40-vigil-auth.sh
 
 # 1) 占位文件先建好：即使有人绕过 entrypoint（自己覆盖 CMD），
@@ -103,12 +106,13 @@ COPY deploy/nginx/40-vigil-auth.sh /docker-entrypoint.d/40-vigil-auth.sh
 # 2) 删掉镜像自带的 default.conf —— 不删的话它和我们的 server 抢 80 端口。
 # 3) Windows 上 checkout 会带 CRLF，`#!/bin/sh\r` 会让脚本直接跑不起来；
 #    nginx 配置里混进 \r 也会在值末尾多出一个字符。统一清掉。
-RUN touch /etc/nginx/vigil-auth.conf \
+RUN touch /etc/nginx/vigil-proxy.conf /etc/nginx/vigil-auth.conf \
  && rm -f /etc/nginx/conf.d/default.conf \
  && sed -i 's/\r$//' \
       /etc/nginx/templates/default.conf.template \
-      /etc/nginx/vigil-proxy.conf \
+      /etc/nginx/templates/vigil-proxy.conf.template \
+      /docker-entrypoint.d/30-vigil-subst.sh \
       /docker-entrypoint.d/40-vigil-auth.sh \
- && chmod +x /docker-entrypoint.d/40-vigil-auth.sh
+ && chmod +x /docker-entrypoint.d/*.sh
 
 EXPOSE 80
