@@ -14,7 +14,7 @@
 #    变量会被当成 shell 环境变量抽成空串 —— 配置就废了。
 set -e
 
-SRC=/etc/nginx/templates/vigil-proxy.conf.template
+SRC=/etc/nginx/vigil-proxy.conf.template
 DST=/etc/nginx/vigil-proxy.conf
 
 if [ ! -f "$SRC" ]; then

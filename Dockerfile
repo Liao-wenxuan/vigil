@@ -92,12 +92,11 @@ COPY --from=build /app/packages/dashboard/dist /usr/share/nginx/html
 COPY --from=build /app/packages/sdk/dist /usr/share/nginx/html/sdk
 
 # 配置走「模板 + 启动时渲染」：管理 token 在容器启动时注入，不烘进镜像。
-# 官方镜像的 entrypoint 会把 /etc/nginx/templates/*.template 渲染到
-# /etc/nginx/conf.d/ —— 但**只**渲染到 conf.d/。
-# vigil-proxy.conf 是被 include 进 location 的片段，不能落进 conf.d/
-#（proxy_pass / set 在 http 层是非法指令），所以由 30-vigil-subst.sh 自己渲染。
+# ⚠️ vigil-proxy.conf **不能**放 /etc/nginx/templates/ —— 官方 20-envsubst
+#    会把它渲染进 conf.d/（proxy_pass/set 在 http 层非法，nginx 起不来）。
+#    它是被 include 进 location 的片段，由 30-vigil-subst.sh 自己渲染。
 COPY deploy/nginx/default.conf.template /etc/nginx/templates/default.conf.template
-COPY deploy/nginx/vigil-proxy.conf /etc/nginx/templates/vigil-proxy.conf.template
+COPY deploy/nginx/vigil-proxy.conf /etc/nginx/vigil-proxy.conf.template
 COPY deploy/nginx/30-vigil-subst.sh /docker-entrypoint.d/30-vigil-subst.sh
 COPY deploy/nginx/40-vigil-auth.sh /docker-entrypoint.d/40-vigil-auth.sh
 
@@ -110,7 +109,7 @@ RUN touch /etc/nginx/vigil-proxy.conf /etc/nginx/vigil-auth.conf \
  && rm -f /etc/nginx/conf.d/default.conf \
  && sed -i 's/\r$//' \
       /etc/nginx/templates/default.conf.template \
-      /etc/nginx/templates/vigil-proxy.conf.template \
+      /etc/nginx/vigil-proxy.conf.template \
       /docker-entrypoint.d/30-vigil-subst.sh \
       /docker-entrypoint.d/40-vigil-auth.sh \
  && chmod +x /docker-entrypoint.d/*.sh
