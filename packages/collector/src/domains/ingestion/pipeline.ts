@@ -118,7 +118,16 @@ export class IngestionPipeline {
    * 摄入行为事件（PV / 路由 / 点击 + 会话汇总）。
    */
   async ingestBehavior(project: ProjectRow, envelope: BehaviorEnvelope): Promise<IngestResult> {
+    // 空批可能只带 session 汇总、一条事件都没有 —— 不该消耗配额，
+    // 也不该因为「配额已满」把一个纯会话更新挡在门外。
+    const incoming = envelope.events?.length ?? 0
+    if (incoming > 0) await this.usage.assertWithinQuota(project, incoming)
+
     const result = await this.replay.ingestBehavior(project.id, envelope)
+
+    // 按**受理条数**记账，和错误路径一致。放在领域事务外：
+    // 配额是软闸门（防止打爆存储，不是计费单），不该为它扩大事务边界。
+    await this.usage.addEvents(project.id, result.accepted)
     return { accepted: result.accepted, dropped: 0 }
   }
 
@@ -186,6 +195,10 @@ export class IngestionPipeline {
 
     // 整批都失败是系统性故障，不能回 200 让客户端以为数据落库了
     if (accepted === 0 && firstError !== null) throw firstError
+
+    // 按受理条数记账 —— 被 SAVEPOINT 回滚的坏事务不算。
+    // 与错误路径一样放在事务外，理由见 ingestErrors 的注释。
+    await this.usage.addEvents(project.id, accepted)
 
     return { accepted, dropped }
   }

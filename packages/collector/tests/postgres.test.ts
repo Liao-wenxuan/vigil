@@ -68,6 +68,40 @@ async function createPgDb() {
 }
 
 describe('PostgreSQL 兼容性', () => {
+  it('迁移 v8 的用量回填在 PG 方言下能累加（INSERT…SELECT…ON CONFLICT）', async () => {
+    const { pg, db } = await createPgDb()
+    const tenancy = new TenancyService(db)
+    const org = await tenancy.createOrganization('PG 回填组织')
+    const created = await tenancy.createProject({
+      organizationId: org.id,
+      name: 'PG 回填应用'
+    })
+    const projectId = created.project.id
+
+    await db.run('UPDATE project_usage SET events_total = 7 WHERE project_id = ?', [projectId])
+    await db.run(
+      `INSERT INTO transactions (project_id, name, duration_ms, started_at, received_at)
+       VALUES (?, 'pg-tx', 100, ?, ?)`,
+      [projectId, 1_700_000_000_000, 1_700_000_000_000]
+    )
+    await db.run(
+      `INSERT INTO behavior_events (project_id, session_id, type, name, timestamp)
+       VALUES (?, 'pg-sess', 'pageview', '/pg', ?)`,
+      [projectId, 1_700_000_000_000]
+    )
+    await db.run('DELETE FROM schema_migrations WHERE version = 8')
+
+    const applied = await runMigrations(db, 'postgres', MIGRATIONS)
+    expect(applied).toContain(8)
+
+    const row = await db.get<{ events_total: number }>(
+      'SELECT events_total FROM project_usage WHERE project_id = ?',
+      [projectId]
+    )
+    expect(Number(row?.events_total)).toBe(9)
+    await pg.close()
+  })
+
   it('PG 方言能建出全部表', async () => {
     const { pg, db } = await createPgDb()
     const tables = await db.all<{ table_name: string }>(

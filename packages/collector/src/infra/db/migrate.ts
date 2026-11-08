@@ -451,6 +451,38 @@ export const MIGRATIONS: Migration[] = [
         'CREATE INDEX IF NOT EXISTS idx_alert_deliveries_pending ON alert_deliveries(status, next_attempt_at)'
       )
     }
+  },
+  {
+    version: 8,
+    name: 'backfill-usage-for-non-error-events',
+    async up(db) {
+      // 性能事务与行为事件此前**从未**计入 project_usage：
+      //   性能路径只做了配额检查、没记账；
+      //   行为路径连检查都没有。
+      // 修完之后配额第一次对这两类事件生效 —— 老库若不补存量，
+      // 等于凭空多出一整个配额。
+      //
+      // ⚠️ 只补这两张表。issue_events 的存量 v3 已经回填过，
+      //    再算一次会把错误事件重复计一遍。
+      // ⚠️ 用 DO UPDATE 而不是 DO NOTHING：v3 已经给每个项目建了计数行，
+      //    DO NOTHING 会让这次回填全部落空。
+      // ⚠️ `WHERE 1 = 1` 不能省 —— SQLite 解析
+      //    `INSERT ... SELECT ... ON CONFLICT` 时要求 SELECT 带 WHERE，
+      //    否则 ON 会被当成 JOIN 的 ON。
+      // ⚠️ schema_migrations 保证本版本只执行一次，所以累加天然幂等：
+      //    重复跑 runMigrations 不会再补一遍。
+      const now = Date.now()
+      for (const table of ['transactions', 'behavior_events']) {
+        await db.run(
+          `INSERT INTO project_usage (project_id, events_total, updated_at)
+           SELECT project_id, COUNT(*), ? FROM ${table} WHERE 1 = 1 GROUP BY project_id
+           ON CONFLICT (project_id) DO UPDATE SET
+             events_total = project_usage.events_total + excluded.events_total,
+             updated_at = excluded.updated_at`,
+          [now]
+        )
+      }
+    }
   }
 ]
 

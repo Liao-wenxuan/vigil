@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { buildApp } from '../src/app.js'
 import { openDb } from '../src/infra/db/client.js'
 import { TenancyService } from '../src/domains/tenancy/service.js'
-import { fp, makeEvent } from './helpers.js'
+import { fp, makeEvent, makeTransaction } from './helpers.js'
 
 /**
  * 配额。
@@ -50,6 +50,48 @@ function post(
       events: Array.from({ length: n }, (_, i) =>
         makeEvent({ fingerprint: fp(`q-${Date.now()}-${i}`), occurredAt: Date.now() + i })
       )
+    }
+  })
+}
+
+function postPerformance(
+  app: Awaited<ReturnType<typeof setup>>['app'],
+  runtimeKey: string,
+  slug: string,
+  n: number
+) {
+  return app.inject({
+    method: 'POST',
+    url: '/api/v1/performance',
+    headers: { 'x-vigil-token': runtimeKey },
+    payload: {
+      appId: slug,
+      transactions: Array.from({ length: n }, (_, i) =>
+        makeTransaction({ name: `/perf-${i}`, startedAt: 1_700_000_000_000 + i })
+      )
+    }
+  })
+}
+
+function postBehavior(
+  app: Awaited<ReturnType<typeof setup>>['app'],
+  runtimeKey: string,
+  slug: string,
+  n: number
+) {
+  return app.inject({
+    method: 'POST',
+    url: '/api/v1/behavior',
+    headers: { 'x-vigil-token': runtimeKey },
+    payload: {
+      appId: slug,
+      events: Array.from({ length: n }, (_, i) => ({
+        sessionId: 'sess-quota',
+        type: 'pageview',
+        name: `/page-${i}`,
+        url: `/page-${i}`,
+        timestamp: 1_700_000_000_000 + i
+      }))
     }
   })
 }
@@ -118,5 +160,54 @@ describe('配额', () => {
     expect(detail.statusCode).toBe(200)
     expect(detail.json().usage.eventsTotal).toBe(2)
     expect(detail.json().usage.eventQuota).toBe(1000)
+  })
+
+  it('性能事务计入配额，超限整批拒绝', async () => {
+    const { app, usage, project, runtimeKey } = await setup(3)
+
+    expect((await postPerformance(app, runtimeKey, project.slug, 2)).statusCode).toBe(200)
+    expect((await usage.snapshot(project)).eventsTotal).toBe(2)
+
+    const overflow = await postPerformance(app, runtimeKey, project.slug, 2)
+    expect(overflow.statusCode).toBe(429)
+    expect((await usage.snapshot(project)).eventsTotal).toBe(2)
+  })
+
+  it('行为事件计入配额，超限整批拒绝', async () => {
+    const { app, usage, project, runtimeKey } = await setup(3)
+
+    expect((await postBehavior(app, runtimeKey, project.slug, 2)).statusCode).toBe(200)
+    expect((await usage.snapshot(project)).eventsTotal).toBe(2)
+
+    const overflow = await postBehavior(app, runtimeKey, project.slug, 2)
+    expect(overflow.statusCode).toBe(429)
+    expect((await usage.snapshot(project)).eventsTotal).toBe(2)
+  })
+
+  it('三类事件共用同一个累计计数器', async () => {
+    const { app, usage, project, runtimeKey } = await setup(100)
+
+    expect((await post(app, runtimeKey, project.slug, 2)).statusCode).toBe(200)
+    expect((await postPerformance(app, runtimeKey, project.slug, 2)).statusCode).toBe(200)
+    expect((await postBehavior(app, runtimeKey, project.slug, 2)).statusCode).toBe(200)
+
+    expect((await usage.snapshot(project)).eventsTotal).toBe(6)
+  })
+
+  it('空行为批次不消耗配额，也不会被已满的配额挡住', async () => {
+    const { app, usage, project, runtimeKey } = await setup(1)
+
+    expect((await postBehavior(app, runtimeKey, project.slug, 1)).statusCode).toBe(200)
+
+    const empty = await app.inject({
+      method: 'POST',
+      url: '/api/v1/behavior',
+      headers: { 'x-vigil-token': runtimeKey },
+      payload: { appId: project.slug, events: [] }
+    })
+
+    expect(empty.statusCode).toBe(200)
+    expect(empty.json().accepted).toBe(0)
+    expect((await usage.snapshot(project)).eventsTotal).toBe(1)
   })
 })

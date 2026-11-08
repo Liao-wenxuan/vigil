@@ -264,6 +264,88 @@ describe('迁移 v3：用量计数器', () => {
  * ⚠️ 这个错在演示数据上**看不出来** —— 只有几十行时扫表比走索引还快。
  *    所以这里先造够行数，再看 `EXPLAIN QUERY PLAN` 怎么说。
  */
+/**
+ * v8：非错误事件的用量回填。
+ *
+ * 性能事务与行为事件此前从未计入 project_usage —— 配额修好之后，
+ * 老库必须补上存量，否则等于凭空多出一整个配额。
+ * 这里同时守两条：只补这两张表（不能重复计 issue_events）、
+ * 且迁移只能生效一次。
+ */
+describe('迁移 v8：非错误事件的用量回填', () => {
+  /** 造一个「v8 还没跑过、但已有两类存量」的库 */
+  async function legacyUsageDb() {
+    const { db, issues, project } = await setupDb()
+
+    // 3 条错误事件 —— v3 已经把它们计进计数器了
+    for (let i = 0; i < 3; i++) {
+      await issues.ingestEvent(
+        project.id,
+        makeEvent({ fingerprint: fp(`v8-old-${i}`), occurredAt: 1_700_000_000_000 + i })
+      )
+    }
+    await db.run('UPDATE project_usage SET events_total = 3 WHERE project_id = ?', [project.id])
+
+    for (let i = 0; i < 2; i++) {
+      await db.run(
+        `INSERT INTO transactions (project_id, name, duration_ms, started_at, received_at)
+         VALUES (?, ?, 120, ?, ?)`,
+        [project.id, `/tx-${i}`, 1_700_000_000_000 + i, 1_700_000_000_000 + i]
+      )
+    }
+    for (let i = 0; i < 4; i++) {
+      await db.run(
+        `INSERT INTO behavior_events (project_id, session_id, type, name, timestamp)
+         VALUES (?, 'sess-old', 'pageview', ?, ?)`,
+        [project.id, `/page-${i}`, 1_700_000_000_000 + i]
+      )
+    }
+
+    await db.run('DELETE FROM schema_migrations WHERE version = 8')
+    return { db, project }
+  }
+
+  async function total(db: Db, projectId: number): Promise<number> {
+    const row = await db.get<{ events_total: number }>(
+      'SELECT events_total FROM project_usage WHERE project_id = ?',
+      [projectId]
+    )
+    return Number(row?.events_total ?? 0)
+  }
+
+  it('只补性能与行为的存量，不重复计入已回填的错误事件', async () => {
+    const { db, project } = await legacyUsageDb()
+    const applied = await runMigrations(db, 'sqlite', MIGRATIONS)
+
+    expect(applied).toContain(8)
+    // 3（错误，v3 已计） + 2（事务） + 4（行为） = 9
+    // 若误把 issue_events 也扫一遍，这里会是 12
+    expect(await total(db, project.id)).toBe(9)
+    await db.close()
+  })
+
+  it('重复执行迁移不会把存量补两遍', async () => {
+    const { db, project } = await legacyUsageDb()
+    await runMigrations(db, 'sqlite', MIGRATIONS)
+    const first = await total(db, project.id)
+
+    const again = await runMigrations(db, 'sqlite', MIGRATIONS)
+    expect(again).not.toContain(8)
+    expect(await total(db, project.id)).toBe(first)
+    await db.close()
+  })
+
+  it('没有计数行的项目也能被补建（直接 SQL 插进来的老项目）', async () => {
+    const { db, project } = await legacyUsageDb()
+    await db.run('DELETE FROM project_usage WHERE project_id = ?', [project.id])
+
+    await runMigrations(db, 'sqlite', MIGRATIONS)
+    // 行被重建，值 = 2 + 4（计数行丢了，v3 不会重跑）
+    expect(await total(db, project.id)).toBe(6)
+    await db.close()
+  })
+})
+
 describe('迁移 v4：告警历史项目索引', () => {
   /** 把 `?` 换成字面量 0 —— EXPLAIN 要求绑定参数，绑 NULL 会让优化器把约束优化掉 */
   function inlineParams(sql: string): string {
