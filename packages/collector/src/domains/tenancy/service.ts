@@ -138,6 +138,60 @@ export class TenancyService {
     return row
   }
 
+  /** 列出一个组织下的所有团队 */
+  async listTeams(organizationId: number) {
+    return await this.db.all<{
+      id: number
+      organization_id: number
+      slug: string
+      name: string
+      created_at: number
+    }>('SELECT * FROM teams WHERE organization_id = ? ORDER BY id', [organizationId])
+  }
+
+  /** 改团队名（slug 可改，但要保证组织内唯一） */
+  async updateTeam(
+    id: number,
+    name: string,
+    slug?: string
+  ): Promise<{
+    id: number
+    organization_id: number
+    slug: string
+    name: string
+  }> {
+    const team = await this.getTeam(id)
+    const finalSlug = slug ?? team.slug
+    if (finalSlug !== team.slug) {
+      const clash = await this.db.get<{ id: number }>(
+        'SELECT id FROM teams WHERE organization_id = ? AND slug = ? AND id <> ?',
+        [team.organization_id, finalSlug, id]
+      )
+      if (clash) throw AppError.conflict(`团队 slug ${finalSlug} 已被占用`)
+    }
+    await this.db.run('UPDATE teams SET name = ?, slug = ? WHERE id = ?', [
+      name,
+      finalSlug,
+      id
+    ])
+    return await this.getTeam(id)
+  }
+
+  /** 删团队：team_members 跟着级联删，项目的 team_id 置空 */
+  async deleteTeam(id: number): Promise<void> {
+    await this.getTeam(id) // 不存在先 404，别静默
+    await this.db.run('DELETE FROM teams WHERE id = ?', [id])
+  }
+
+  /** 团队属于哪个组织 —— 鉴权做租户隔离时用 */
+  async organizationOfTeam(teamId: number): Promise<number | undefined> {
+    const row = await this.db.get<{ organization_id: number }>(
+      'SELECT organization_id FROM teams WHERE id = ?',
+      [teamId]
+    )
+    return row?.organization_id
+  }
+
   // ---- 成员 ----
 
   async createMember(
@@ -287,6 +341,47 @@ export class TenancyService {
       [projectId, memberId]
     )
     return row?.role
+  }
+
+  // ---- 团队成员（team_members）----
+
+  /**
+   * 把成员加进团队。
+   *
+   * ⚠️ 成员必须和团队同组织 —— 否则能把外人挂进别人的团队。
+   * 和 setProjectMember 同一套护栏。
+   */
+  async addTeamMember(teamId: number, memberId: number): Promise<void> {
+    const team = await this.getTeam(teamId)
+    const member = await this.getMember(memberId)
+    if (member.organization_id !== team.organization_id) {
+      throw AppError.forbidden('成员与团队不属于同一组织')
+    }
+    await this.db.run(
+      'INSERT INTO team_members (team_id, member_id) VALUES (?, ?) ON CONFLICT DO NOTHING',
+      [teamId, memberId]
+    )
+  }
+
+  async listTeamMembers(teamId: number) {
+    return await this.db.all<{
+      member_id: number
+      email: string
+      name: string
+      role: string
+    }>(
+      `SELECT tm.member_id, m.email, m.name, m.role
+       FROM team_members tm JOIN members m ON m.id = tm.member_id
+       WHERE tm.team_id = ? ORDER BY tm.member_id`,
+      [teamId]
+    )
+  }
+
+  async removeTeamMember(teamId: number, memberId: number): Promise<void> {
+    await this.db.run('DELETE FROM team_members WHERE team_id = ? AND member_id = ?', [
+      teamId,
+      memberId
+    ])
   }
 
   /** 项目属于哪个组织 —— 鉴权做租户隔离时用 */

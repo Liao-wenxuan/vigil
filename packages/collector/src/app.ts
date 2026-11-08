@@ -488,6 +488,105 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     }
   )
 
+  // ---- 团队 ----
+  //
+  // 团队是**组织级**的分组：读组织内任何人都能看，但创建 / 改名 / 删 /
+  // 调整成员都提到 org owner（MANAGE_PATH 已覆盖）。成员与团队必须同组织，
+  // 跨组织既读不到（targetOrganization 解析团队归属）也加不进（addTeamMember 校验）。
+
+  app.get('/api/v1/organizations/:organizationId/teams', admin, async (request) => {
+    const { organizationId } = request.params as { organizationId: string }
+    return { ok: true, teams: await tenancy.listTeams(Number(organizationId)) }
+  })
+
+  app.post(
+    '/api/v1/organizations/:organizationId/teams',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 128 },
+            slug: { type: 'string', maxLength: 64 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { organizationId } = request.params as { organizationId: string }
+      const body = request.body as { name: string; slug?: string }
+      const team = await tenancy.createTeam(Number(organizationId), body.name, body.slug)
+      return reply.code(201).send({ ok: true, team })
+    }
+  )
+
+  app.get('/api/v1/teams/:teamId', admin, async (request) => {
+    const { teamId } = request.params as { teamId: string }
+    return { ok: true, team: await tenancy.getTeam(Number(teamId)) }
+  })
+
+  app.put(
+    '/api/v1/teams/:teamId',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string', minLength: 1, maxLength: 128 },
+            slug: { type: 'string', maxLength: 64 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { teamId } = request.params as { teamId: string }
+      const body = request.body as { name: string; slug?: string }
+      const team = await tenancy.updateTeam(Number(teamId), body.name, body.slug)
+      return reply.code(200).send({ ok: true, team })
+    }
+  )
+
+  app.delete('/api/v1/teams/:teamId', admin, async (request) => {
+    const { teamId } = request.params as { teamId: string }
+    await tenancy.deleteTeam(Number(teamId))
+    return { ok: true }
+  })
+
+  app.get('/api/v1/teams/:teamId/members', admin, async (request) => {
+    const { teamId } = request.params as { teamId: string }
+    return { ok: true, members: await tenancy.listTeamMembers(Number(teamId)) }
+  })
+
+  app.post(
+    '/api/v1/teams/:teamId/members',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['memberId'],
+          properties: { memberId: { type: 'integer' } }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { teamId } = request.params as { teamId: string }
+      const body = request.body as { memberId: number }
+      await tenancy.addTeamMember(Number(teamId), Number(body.memberId))
+      return reply.code(201).send({ ok: true })
+    }
+  )
+
+  app.delete('/api/v1/teams/:teamId/members/:memberId', admin, async (request) => {
+    const { teamId, memberId } = request.params as { teamId: string; memberId: string }
+    await tenancy.removeTeamMember(Number(teamId), Number(memberId))
+    return { ok: true }
+  })
+
   app.get('/api/v1/organizations/:organizationId/audit-log', admin, async (request) => {
     const { organizationId } = request.params as { organizationId: string }
     const query = request.query as { limit?: string }

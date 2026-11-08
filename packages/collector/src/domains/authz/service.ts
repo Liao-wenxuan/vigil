@@ -62,9 +62,9 @@ const ORG_LEVEL: Record<OrgRole, number> = { member: 0, admin: 1, owner: 2 }
 
 type Action = 'read' | 'write' | 'manage' | 'superadmin'
 
-/** 成员 / 凭据 / 项目授权 / 维护任务：只有组织 owner 能动 */
+/** 成员 / 凭据 / 团队 / 项目授权 / 维护任务：只有组织 owner 能动 */
 const MANAGE_PATH =
-  /^\/api\/v1\/(organizations\/\d+\/members|members\/\d+\/keys|projects\/\d+\/members|maintenance\/)/
+  /^\/api\/v1\/(organizations\/\d+\/members|organizations\/\d+\/teams|members\/\d+\/keys|projects\/\d+\/members|teams\/\d+(\/members(\/\d+)?)?|maintenance\/)/
 
 /** 轮换项目密钥会让现有 SDK 立刻失效，权限提到 owner 级 */
 const ROTATE_KEY_PATH = /^\/api\/v1\/projects\/\d+\/keys\/rotate/
@@ -188,6 +188,8 @@ export class AuthzService {
     if (org) return Number(org[1])
     const member = path.match(/\/members\/(\d+)/)
     if (member) return await this.tenancy.organizationOfMember(Number(member[1]))
+    const team = path.match(/\/teams\/(\d+)/)
+    if (team) return await this.tenancy.organizationOfTeam(Number(team[1]))
     return undefined
   }
 
