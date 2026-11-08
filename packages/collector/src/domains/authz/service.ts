@@ -24,6 +24,12 @@ import type { TenancyService } from '../tenancy/service.js'
  * ⚠️ 兼容是硬约束：线上走的是 Basic Auth + nginx 注入 admin token，
  *    任何「必须先登录」的改造都会让面板当场全白，所以 admin token
  *    永远是第一等公民，成员凭据是**并存**的第二套，不是替代。
+ *
+ * ⚠️ 身份判定有**优先级**：admin token 压过成员令牌。
+ *    公开只读演示上线后，管理员的浏览器里同时有 admin token（Basic Auth
+ *    通过后由 nginx 注入）和演示令牌（前端 config.js 注入的）。
+ *    先认谁，谁就是这次请求的身份 —— 先认成员令牌的话，管理员会被降级
+ *    成只读账号：页面能开、数据能看，就是什么都改不了。
  */
 
 export type OrgRole = 'owner' | 'admin' | 'member'
