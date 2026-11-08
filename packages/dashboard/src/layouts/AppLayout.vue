@@ -23,7 +23,13 @@ import {
   Warning,
   Aim
 } from '@element-plus/icons-vue'
-import { listOrganizations, listProjects, MEMBER_TOKEN_STORAGE } from '../api/client'
+import {
+  fetchCurrentPrincipal,
+  listOrganizations,
+  listProjects,
+  MEMBER_TOKEN_STORAGE,
+  type CurrentPrincipal
+} from '../api/client'
 import {
   DEFAULT_TIME_RANGE,
   PANEL_CONTEXT,
@@ -168,15 +174,29 @@ context.setTimeRange = setTimeRange
 // 访客默认带「只读演示令牌」看演示数据（由 nginx 注入 window.VIGIL_DEMO_MEMBER_TOKEN）；
 // 拿到自己 vmk_ 令牌的人可以在这里登录，以成员身份看自己组织的数据。
 // 管理员走 Basic Auth，不经过这套 UI。
+//
+// ⚠️ 身份**以后端返回为准**，不靠 localStorage 猜。
+// 靠猜会出这种错：管理员在浏览器里登录了面板密码（Basic Auth），
+// 但 localStorage 里没有成员令牌，界面就会显示「只读演示」——
+// 实际上他是管理员。反过来，管理员的浏览器里往往**同时**存着
+// 演示令牌，光看令牌也判断不出真实权限。
 const userMemberToken = ref<string | null>(localStorage.getItem(MEMBER_TOKEN_STORAGE))
-const demoToken = (window as unknown as { VIGIL_DEMO_MEMBER_TOKEN?: string })
-  .VIGIL_DEMO_MEMBER_TOKEN
-const demoActive = computed(
-  () => !!demoToken && demoToken.length > 0 && !userMemberToken.value
-)
-const authMode = computed<'user' | 'demo' | 'none'>(() => {
+
+/** 后端认定的身份。null = 没登录成功（连只读演示都没生效） */
+const principal = ref<CurrentPrincipal | null>(null)
+
+/**
+ * 界面上的身份标签。
+ *
+ * - admin：面板登录（Basic Auth）成功 → 超管
+ * - user：用自己的成员令牌登录 → 显示脱敏后的令牌
+ * - demo：匿名访客用部署时注入的只读令牌 → 只读
+ * - none：什么都拿不到
+ */
+const authMode = computed<'admin' | 'user' | 'demo' | 'none'>(() => {
+  if (principal.value?.kind === 'superadmin') return 'admin'
   if (userMemberToken.value) return 'user'
-  if (demoActive.value) return 'demo'
+  if (principal.value?.kind === 'member') return 'demo'
   return 'none'
 })
 
@@ -188,6 +208,11 @@ const maskedUserToken = computed(() => {
   const t = userMemberToken.value ?? ''
   return t.length > 8 ? `${t.slice(0, 8)}…${t.slice(-4)}` : t
 })
+
+/** 面板登录后（Basic Auth）浏览器会带上凭据，重新问一次后端就能确认身份 */
+async function refreshPrincipal(): Promise<void> {
+  principal.value = await fetchCurrentPrincipal()
+}
 
 function loginWithToken(): void {
   const value = loginInput.value.trim()
@@ -264,6 +289,9 @@ onMounted(async () => {
   mediaQuery.addEventListener('change', syncNarrow)
 
   restoreTimeRange()
+  // 身份要先问清楚：面板登录（Basic Auth）和只读演示都走同一个 /api，
+  // 只有后端知道这次请求到底算谁。
+  await refreshPrincipal()
   await loadProjects()
   restartTimer()
 })
@@ -369,12 +397,15 @@ onUnmounted(() => {
             <el-switch v-model="autoRefresh" />
           </el-tooltip>
 
-          <!-- 成员身份：只读演示 / 个人登录 -->
+          <!-- 成员身份：只读演示 / 个人登录 / 管理员 -->
           <el-tag v-if="authMode === 'demo'" type="info" effect="plain" size="small">
             只读演示
           </el-tag>
           <el-tag v-else-if="authMode === 'user'" type="success" effect="plain" size="small">
             成员 {{ maskedUserToken }}
+          </el-tag>
+          <el-tag v-else-if="authMode === 'admin'" type="warning" effect="plain" size="small">
+            管理员
           </el-tag>
 
           <el-popover v-model:visible="loginOpen" :width="320" trigger="click" placement="bottom">

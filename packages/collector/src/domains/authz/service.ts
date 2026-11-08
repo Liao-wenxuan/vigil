@@ -108,22 +108,36 @@ export class AuthzService {
 
   async resolve(headers: FastifyRequest['headers']): Promise<Principal> {
     const authorization = headers.authorization
+    const adminToken = headers['x-vigil-admin-token']
+    const memberToken = headers['x-vigil-member-token']
     const bearer =
       typeof authorization === 'string' && authorization.startsWith('Bearer ')
         ? authorization.slice('Bearer '.length)
         : undefined
 
-    const candidates = [
-      headers['x-vigil-member-token'],
-      headers['x-vigil-admin-token'],
-      bearer
-    ].filter((value): value is string => typeof value === 'string' && value.length > 0)
+    const present = (value: string | string[] | undefined): value is string =>
+      typeof value === 'string' && value.length > 0
 
-    if (candidates.length === 0) throw AppError.unauthorized('缺少管理凭据')
+    if (!present(adminToken) && !present(memberToken) && !present(bearer)) {
+      throw AppError.unauthorized('缺少管理凭据')
+    }
 
-    for (const token of candidates) {
-      if (this.isAdminToken(token)) return SUPERADMIN
+    // ⚠️ 顺序有讲究：**管理员令牌必须压过成员令牌**。
+    //
+    // 公开只读演示上线后，浏览器里会同时存在两把凭据：
+    //   - 面板登录（Basic Auth 通过后由 nginx 注入的 admin token）
+    //   - 前端带的成员令牌（演示令牌或个人 vmk_）
+    //
+    // 谁先被认出来，谁就是这次请求的身份。管理员令牌先认 →
+    // 面板永远是管理员；反过来先认成员令牌 → 管理员会被降级成
+    // 只读演示账号，改不了任何东西（而且这是最隐蔽的一类故障：
+    // 页面能打开、数据能看，就是点不动）。
+    for (const token of [adminToken, bearer]) {
+      if (present(token) && this.isAdminToken(token)) return SUPERADMIN
+    }
 
+    for (const token of [memberToken, bearer]) {
+      if (!present(token)) continue
       const member = await this.tenancy.findMemberByKey(token)
       if (member) {
         return {

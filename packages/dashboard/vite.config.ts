@@ -59,5 +59,33 @@ export default defineConfig({
         }
       }
     }
+  },
+  /**
+   * preview（`vite preview`，跑**生产构建产物**）也要代理 /api。
+   *
+   * CI 的面板端到端验证跑的就是 preview 而不是 dev server。
+   * preview 默认会继承 server.proxy，但这个行为在不同 vite 版本 /
+   * 平台上并不一致 —— 少了代理，e2e 的接口调用就是 403，
+   * 而页面因为拿不到数据又不会报错，断言失败得非常费解。
+   *
+   * 所以这里**显式**再写一遍：preview 的代理配置不依赖版本行为。
+   */
+  preview: {
+    port: 5174,
+    strictPort: true,
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:4318',
+        changeOrigin: true,
+        configure(proxy) {
+          proxy.on('proxyReq', (proxyReq) => {
+            proxyReq.setHeader(
+              'x-vigil-admin-token',
+              process.env.VIGIL_ADMIN_TOKEN ?? 'vigil_admin_demo'
+            )
+          })
+        }
+      }
+    }
   }
 })

@@ -157,6 +157,34 @@ export async function listOrganizations(): Promise<OrganizationRow[]> {
   return body.organizations ?? []
 }
 
+/** 当前身份。用来在界面上说明「你现在是谁、能干什么」。 */
+export interface CurrentPrincipal {
+  kind: 'superadmin' | 'member'
+  actorType: 'system' | 'member'
+  organizationId: number | null
+  email: string | null
+  orgRole: 'owner' | 'admin' | 'member'
+}
+
+/**
+ * 问后端「我是谁」。
+ *
+ * 三条通道会给出三种答案：
+ *   - 匿名 + 只读演示令牌 → member（orgRole=member，只有读权限）
+ *   - 成员令牌           → member（orgRole 取决于该成员的组织角色）
+ *   - 面板登录           → superadmin
+ *
+ * 失败（401/403）时返回 null —— 没登录也是合法状态，别抛异常。
+ */
+export async function fetchCurrentPrincipal(): Promise<CurrentPrincipal | null> {
+  try {
+    const body = await get<{ principal: CurrentPrincipal | null }>('/me')
+    return body.principal ?? null
+  } catch {
+    return null
+  }
+}
+
 export function createOrganization(name: string): Promise<OrganizationRow> {
   return post<{ organization: OrganizationRow }>('/organizations', { name }).then(
     (body) => body.organization

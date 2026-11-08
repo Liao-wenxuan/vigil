@@ -134,6 +134,45 @@ describe('管理端鉴权：兼容与身份', () => {
     expect(all.json().organizations).toHaveLength(2)
     await ctx.db.close()
   })
+
+  /**
+   * 公开只读演示上线后，浏览器会同时带两把凭据：
+   *   - 面板登录成功后 nginx 注入的 admin token
+   *   - 前端 config.js 注入的只读演示令牌
+   *
+   * 管理员必须压过成员令牌 —— 否则管理员会被降级成只读账号，
+   * 症状是「页面能开、数据能看，就是什么都改不了」。
+   */
+  it('admin token 与成员令牌同时在场时，admin token 优先', async () => {
+    const ctx = await fixture()
+    const people = await member(ctx, 'member')
+
+    const response = await ctx.app.inject({
+      method: 'GET',
+      url: '/api/v1/me',
+      headers: {
+        'x-vigil-admin-token': ADMIN,
+        'x-vigil-member-token': people.key
+      }
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().principal).toMatchObject({ kind: 'superadmin' })
+    await ctx.db.close()
+  })
+
+  it('只有成员令牌时仍然按成员身份判定（不被 admin 通道误伤）', async () => {
+    const ctx = await fixture()
+    const people = await member(ctx, 'admin')
+
+    const response = await call(ctx, 'GET', '/api/v1/me', { key: people.key })
+    expect(response.statusCode).toBe(200)
+    expect(response.json().principal).toMatchObject({
+      kind: 'member',
+      orgRole: 'admin'
+    })
+    await ctx.db.close()
+  })
 })
 
 describe('权限矩阵与租户隔离', () => {

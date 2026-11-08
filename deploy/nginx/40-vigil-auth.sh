@@ -10,6 +10,12 @@
 # 必须永远成立。所以鉴权开不开，由这个脚本决定文件里有没有 auth_basic 指令：
 #   - 有密码  → 写入 auth_basic + 凭据文件
 #   - 没密码  → 留空文件（include 空文件等于什么都不加）
+#
+# ## 三个通道里这个文件管哪个
+#
+#   A. 匿名 + vmk_ 成员令牌 → 公开只读（@vigil_public_api，不含本文件）
+#   B. 匿名 + 无凭据        → 本文件（弹登录框）
+#   C. 通过 Basic Auth       → 本文件（登录成功后注入管理员令牌）
 set -e
 
 AUTH_CONF=/etc/nginx/vigil-auth.conf
@@ -38,9 +44,9 @@ if [ -n "${VIGIL_PANEL_PASSWORD:-}" ]; then
   echo "[vigil] 面板已启用登录保护（用户 $USER_NAME）"
 else
   echo "[vigil] ============================================================"
-  echo "[vigil]  ⚠️  未设置 VIGIL_PANEL_PASSWORD：面板没有任何登录保护。"
-  echo "[vigil]     这台机器如果公网可达，等于把全部错误数据（含用户行为"
-  echo "[vigil]     与会话回放）公开。请设置后重启 dashboard："
+  echo "[vigil]  ⚠️  未设置 VIGIL_PANEL_PASSWORD：面板的管理接口不校验身份。"
+  echo "[vigil]     任何人都能读走全部错误数据（含用户行为与会话回放）。"
+  echo "[vigil]     公网部署请务必设置："
   echo "[vigil]       echo 'VIGIL_PANEL_PASSWORD=<强密码>' >> .env"
   echo "[vigil]       docker compose up -d dashboard"
   echo "[vigil] ============================================================"
