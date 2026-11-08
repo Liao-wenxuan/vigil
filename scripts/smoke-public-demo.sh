@@ -37,15 +37,17 @@ check "GET /config.js (演示令牌注入)" 200 "$(code "$DOMAIN/config.js")"
 
 echo "[smoke] 2. 管理接口三条通道"
 # A：匿名 + 演示令牌 → 200 免登录只读
+# ⚠️ 路径要对：项目列表挂在组织下面（/organizations/:id/projects），
+#    没有裸的 /api/v1/projects —— 用错会拿到 404，那是路由不存在，不是鉴权坏了。
 DEMO_TOKEN="$(grep -E '^VIGIL_DEMO_MEMBER_TOKEN=' .env | cut -d= -f2-)"
 if [ -n "$DEMO_TOKEN" ]; then
   check "A 匿名+vmk_ 演示令牌 (期望 200)" 200 \
-    "$(code -H "x-vigil-member-token: $DEMO_TOKEN" "$DOMAIN/api/v1/projects")"
+    "$(code -H "x-vigil-member-token: $DEMO_TOKEN" "$DOMAIN/api/v1/organizations")"
 else
   echo "  ! .env 里没有 VIGIL_DEMO_MEMBER_TOKEN，跳过 A 通道"
 fi
 # B：匿名无凭据 → 401 弹登录框
-check "B 匿名无凭据 (期望 401)" 401 "$(code "$DOMAIN/api/v1/projects")"
+check "B 匿名无凭据 (期望 401)" 401 "$(code "$DOMAIN/api/v1/organizations")"
 
 echo "[smoke] 3. 身份识别"
 if [ -n "$DEMO_TOKEN" ]; then
