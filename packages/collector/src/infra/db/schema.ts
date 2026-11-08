@@ -27,6 +27,33 @@ export function projectUsageDdl(dialect: Dialect): string {
 }
 
 /**
+ * 成员 API 凭据。
+ *
+ * ## 为什么单独一张表
+ *
+ * 之前所有管理接口共用**一个** `VIGIL_ADMIN_TOKEN`：
+ * 谁拿到它谁就是全系统管理员，无法撤销单个人、无法按组织隔离、
+ * 也无法按项目限制只读。这是「能跑」和「能给一团队用」的分界线。
+ *
+ * 和 project_keys 同一套规矩：只存 sha256，明文只在签发时返回一次；
+ * 撤销 = 删一行，立即生效，不用轮换整站的 admin token。
+ *
+ * 单独抽成函数同样是因为**迁移要用同一份 DDL** ——
+ * 两边各写一份，迟早漂移成一新一旧。
+ */
+export function memberKeysDdl(dialect: Dialect): string {
+  return `CREATE TABLE IF NOT EXISTS member_keys (
+  id ${pk(dialect)},
+  member_id INTEGER NOT NULL REFERENCES members(id) ON DELETE CASCADE,
+  key_hash ${text(dialect)} NOT NULL UNIQUE,
+  label ${text(dialect)},
+  created_at ${ts(dialect)} NOT NULL,
+  last_used_at ${ts(dialect)}
+);
+CREATE INDEX IF NOT EXISTS idx_member_keys_hash ON member_keys(key_hash);`
+}
+
+/**
  * 告警投递死信表。
  *
  * 单独抽成函数是因为**迁移也要用同一份 DDL**：
@@ -167,6 +194,9 @@ CREATE TABLE IF NOT EXISTS project_members (
   role ${TEXT} NOT NULL DEFAULT 'reader',
   PRIMARY KEY (project_id, member_id)
 );
+
+-- 成员 API 凭据（RBAC）：可签发、可撤销、按组织隔离
+${memberKeysDdl(dialect)}
 
 -- 项目密钥：runtime（上报）与 upload（sourcemap）严格分离，只存哈希
 CREATE TABLE IF NOT EXISTS project_keys (

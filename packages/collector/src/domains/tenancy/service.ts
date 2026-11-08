@@ -183,6 +183,129 @@ export class TenancyService {
     ])
   }
 
+  // ---- 成员凭据与项目授权（RBAC）----
+
+  /**
+   * 给成员签发一把 API key。
+   *
+   * 明文**只在这次返回**，库里只存 sha256 —— 和 project_keys 同一套规矩。
+   * 前缀用 `vmk_` 与项目密钥区分，日志和截图里一眼能认出是哪类凭据。
+   */
+  async createMemberKey(
+    memberId: number,
+    label = '默认凭据'
+  ): Promise<{ id: number; key: string }> {
+    await this.getMember(memberId) // 成员不存在就 404，别签出孤儿凭据
+    const key = `vmk_${crypto.randomBytes(24).toString('hex')}`
+    const id = await this.db.insert(
+      'INSERT INTO member_keys (member_id, key_hash, label, created_at) VALUES (?, ?, ?, ?)',
+      [memberId, hashKey(key), label, Date.now()]
+    )
+    return { id, key }
+  }
+
+  /** 删除成员（级联删掉他的凭据与项目授权） */
+  async deleteMember(memberId: number): Promise<void> {
+    await this.db.run('DELETE FROM members WHERE id = ?', [memberId])
+  }
+
+  /** 列凭据（**不含哈希**，明文更是从来没存过） */
+  async listMemberKeys(memberId: number) {
+    return await this.db.all<{
+      id: number
+      label: string | null
+      created_at: number
+      last_used_at: number | null
+    }>(
+      'SELECT id, label, created_at, last_used_at FROM member_keys WHERE member_id = ? ORDER BY id',
+      [memberId]
+    )
+  }
+
+  /** 撤销凭据：删一行立即生效，不用轮换全站 admin token */
+  async revokeMemberKey(memberId: number, keyId: number): Promise<void> {
+    await this.db.run('DELETE FROM member_keys WHERE id = ? AND member_id = ?', [keyId, memberId])
+  }
+
+  /** 用明文查成员凭据（只查哈希） */
+  async findMemberByKey(key: string): Promise<
+    | {
+        id: number
+        organization_id: number
+        email: string
+        name: string
+        role: string
+      }
+    | undefined
+  > {
+    if (!key) return undefined
+    return await this.db.get(
+      `SELECT m.id, m.organization_id, m.email, m.name, m.role
+       FROM member_keys k JOIN members m ON m.id = k.member_id
+       WHERE k.key_hash = ? LIMIT 1`,
+      [hashKey(key)]
+    )
+  }
+
+  /** 设置成员在某个项目上的角色（重复调用 = 改角色） */
+  async setProjectMember(
+    projectId: number,
+    memberId: number,
+    role: 'reader' | 'editor' | 'owner'
+  ): Promise<void> {
+    // ⚠️ 成员必须和项目同组织 —— 否则能把外人挂进别人的项目
+    const project = await this.getProject(projectId)
+    const member = await this.getMember(memberId)
+    if (member.organization_id !== project.organization_id) {
+      throw AppError.forbidden('成员与项目不属于同一组织')
+    }
+
+    await this.db.run(
+      `INSERT INTO project_members (project_id, member_id, role) VALUES (?, ?, ?)
+       ON CONFLICT (project_id, member_id) DO UPDATE SET role = excluded.role`,
+      [projectId, memberId, role]
+    )
+  }
+
+  async listProjectMembers(projectId: number) {
+    return await this.db.all<{
+      member_id: number
+      email: string
+      name: string
+      role: string
+    }>(
+      `SELECT pm.member_id, m.email, m.name, pm.role
+       FROM project_members pm JOIN members m ON m.id = pm.member_id
+       WHERE pm.project_id = ? ORDER BY pm.member_id`,
+      [projectId]
+    )
+  }
+
+  async projectMemberRole(projectId: number, memberId: number): Promise<string | undefined> {
+    const row = await this.db.get<{ role: string }>(
+      'SELECT role FROM project_members WHERE project_id = ? AND member_id = ?',
+      [projectId, memberId]
+    )
+    return row?.role
+  }
+
+  /** 项目属于哪个组织 —— 鉴权做租户隔离时用 */
+  async organizationOfProject(projectId: number): Promise<number | undefined> {
+    const row = await this.db.get<{ organization_id: number }>(
+      'SELECT organization_id FROM projects WHERE id = ?',
+      [projectId]
+    )
+    return row?.organization_id
+  }
+
+  async organizationOfMember(memberId: number): Promise<number | undefined> {
+    const row = await this.db.get<{ organization_id: number }>(
+      'SELECT organization_id FROM members WHERE id = ?',
+      [memberId]
+    )
+    return row?.organization_id
+  }
+
   // ---- 项目 ----
 
   /**

@@ -400,3 +400,62 @@ kubectl -n vigil create secret generic vigil-postgres \
 | `/api/ready` 一直不通过 | PG 没起来或连接串不对 |
 | 容器反复重启 | 内存不够 —— PG 至少给 512MB |
 | 磁盘只涨不降 | `VIGIL_RETENTION_INTERVAL` 被设成 0，或项目的 `retention_days` 是 0（永久保留） |
+
+## 9. 成员凭据与权限（RBAC）
+
+`VIGIL_ADMIN_TOKEN` 继续是**超级管理员** —— 线上 Basic Auth + nginx 注入的用法
+一个字都没变。要给别人开账号，不必把全站 token 发出去：按人签发 `vmk_`
+凭据，可单独撤销，且只能访问自己组织的项目。
+
+### 角色
+
+| 层级 | 角色 | 能做什么 |
+|---|---|---|
+| 组织 | `member` | 读本组织数据；写操作要看项目角色 |
+| 组织 | `admin` | 本组织所有常规写操作 |
+| 组织 | `owner` | 额外能管成员、签发/撤销凭据、改项目授权、轮换密钥、跑维护任务 |
+| 项目 | `reader` / `editor` / `owner` | 覆盖组织 `member` 在该项目上的写权限（`editor` 及以上可写） |
+| 超级管理员 | `VIGIL_ADMIN_TOKEN` | 全部，包括**创建组织**（成员不能建组织） |
+
+跨组织访问一律 403，组织列表对成员只显示自己那一个组织。
+
+### 签发与撤销
+
+下面都用面板的 Basic Auth（`-u 用户名:密码`）以超级管理员身份操作。
+明文凭据**只在签发响应里出现一次**，库里只存 sha256。
+
+```bash
+# 1) 建成员，记下返回的 id
+curl -u "$PANEL_USER:$PANEL_PASSWORD" -X POST \
+  -H 'content-type: application/json' \
+  -d '{"email":"a@example.com","name":"张三","role":"member"}' \
+  https://vigil.example.com/api/v1/organizations/1/members
+
+# 2) 签凭据 → {"ok":true,"id":1,"key":"vmk_..."}
+curl -u "$PANEL_USER:$PANEL_PASSWORD" -X POST \
+  -H 'content-type: application/json' -d '{"label":"笔记本"}' \
+  https://vigil.example.com/api/v1/members/1/keys
+
+# 3) 给他在某个项目上的写权限（同一接口重复调用 = 改角色）
+curl -u "$PANEL_USER:$PANEL_PASSWORD" -X PUT \
+  -H 'content-type: application/json' -d '{"role":"editor"}' \
+  https://vigil.example.com/api/v1/projects/1/members/1
+```
+
+成员带 `x-vigil-member-token: vmk_...`（或 `Bearer vmk_...`）访问管理接口。
+`DELETE /api/v1/members/:memberId/keys/:keyId` 立即让该凭据失效，
+不用轮换全站 admin token。`GET /api/v1/me` 可确认当前身份。
+
+### 审计
+
+成功的管理端写操作会落进 `audit_log`：谁（`system` / `member`）、在哪个组织、
+对什么资源做了什么。按组织查：
+
+```bash
+curl -u "$PANEL_USER:$PANEL_PASSWORD" \
+  'https://vigil.example.com/api/v1/organizations/1/audit-log?limit=100'
+```
+
+只记请求方法 + 路径 + 响应状态，**不记请求体也不记响应体** ——
+建项目、签凭据的响应里有明文密钥，审计表不能变成第二个密钥库。
+GET 与失败请求（4xx）不落记录。

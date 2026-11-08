@@ -4,6 +4,7 @@ import { openDb, defaultDbPath, type Db } from './infra/db/client.js'
 import { openPostgres } from './infra/db/postgres.js'
 import { TokenBucketLimiter } from './infra/ratelimit.js'
 import { TenancyService, type ProjectRow } from './domains/tenancy/service.js'
+import { AuthzService } from './domains/authz/service.js'
 import { IssueService } from './domains/issues/service.js'
 import { PerformanceService } from './domains/performance/service.js'
 import { ArtifactService } from './domains/artifacts/service.js'
@@ -341,14 +342,176 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   // 管理接口（admin token）
   // ==========================================================
 
-  const admin = { preHandler: adminGuard(adminToken) }
+  const authz = new AuthzService(db, tenancy, adminToken)
+  const admin = { preHandler: adminGuard(authz) }
+
+  // ---- 审计 ----
+  //
+  // 用 onSend 而不是 onResponse：后者是 fire-and-forget，Fastify 不 await，
+  // 会出现「请求已返回、审计还没落库」——测试假 flaky，进程退出时还会丢记录。
+  // onSend 在发响应前执行且被 await，hook 里必须把 payload 原样返回。
+  //
+  // 放在所有管理路由**之前**注册：Fastify 的 hook 只对之后注册的路由生效。
+  // 上报接口与健康检查没有 vigilPrincipal，会被 recordAudit 直接跳过 ——
+  // 它们本来也不该往审计表里灌几百万条。
+  app.addHook('onSend', async (request, reply, payload) => {
+    const principal = request.vigilPrincipal
+    if (principal) {
+      try {
+        await authz.recordAudit(principal, request.method, request.url, reply.statusCode)
+      } catch (error) {
+        // 审计失败不能把成功的请求变成 500，更不能让进程崩
+        app.log.error({ err: error }, '[vigil] 审计写入失败')
+      }
+    }
+    return payload
+  })
+
+  // ---- 身份 / 成员 / 授权 ----
+
+  app.get('/api/v1/me', admin, async (request) => {
+    const principal = request.vigilPrincipal
+    return {
+      ok: true,
+      principal: principal
+        ? {
+            kind: principal.kind,
+            actorType: principal.actorType,
+            organizationId: principal.organizationId,
+            email: principal.kind === 'member' ? principal.email : null,
+            orgRole: principal.kind === 'member' ? principal.orgRole : 'owner'
+          }
+        : null
+    }
+  })
+
+  app.get('/api/v1/organizations/:organizationId/members', admin, async (request) => {
+    const { organizationId } = request.params as { organizationId: string }
+    return { ok: true, members: await tenancy.listMembers(Number(organizationId)) }
+  })
+
+  app.post(
+    '/api/v1/organizations/:organizationId/members',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['email', 'name'],
+          properties: {
+            email: { type: 'string', minLength: 3, maxLength: 200 },
+            name: { type: 'string', minLength: 1, maxLength: 128 },
+            role: { type: 'string', enum: ['owner', 'admin', 'member'] }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { organizationId } = request.params as { organizationId: string }
+      const body = request.body as {
+        email: string
+        name: string
+        role?: 'owner' | 'admin' | 'member'
+      }
+      const member = await tenancy.createMember(
+        Number(organizationId),
+        body.email,
+        body.name,
+        body.role ?? 'member'
+      )
+      return reply.code(201).send({ ok: true, member })
+    }
+  )
+
+  app.delete('/api/v1/organizations/:organizationId/members/:memberId', admin, async (request) => {
+    const { memberId } = request.params as { memberId: string }
+    await tenancy.deleteMember(Number(memberId))
+    return { ok: true }
+  })
+
+  app.get('/api/v1/members/:memberId/keys', admin, async (request) => {
+    const { memberId } = request.params as { memberId: string }
+    return { ok: true, keys: await tenancy.listMemberKeys(Number(memberId)) }
+  })
+
+  app.post(
+    '/api/v1/members/:memberId/keys',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          properties: { label: { type: 'string', maxLength: 128 } }
+        }
+      }
+    },
+    async (request, reply) => {
+      const { memberId } = request.params as { memberId: string }
+      const body = (request.body ?? {}) as { label?: string }
+      const created = await tenancy.createMemberKey(Number(memberId), body.label ?? '默认凭据')
+      // 明文只在这一个响应里出现，库里只有哈希
+      return reply.code(201).send({ ok: true, id: created.id, key: created.key })
+    }
+  )
+
+  app.delete('/api/v1/members/:memberId/keys/:keyId', admin, async (request) => {
+    const { memberId, keyId } = request.params as { memberId: string; keyId: string }
+    await tenancy.revokeMemberKey(Number(memberId), Number(keyId))
+    return { ok: true }
+  })
+
+  app.get('/api/v1/projects/:projectId/members', admin, async (request) => {
+    const { projectId } = request.params as { projectId: string }
+    return { ok: true, members: await tenancy.listProjectMembers(Number(projectId)) }
+  })
+
+  app.put(
+    '/api/v1/projects/:projectId/members/:memberId',
+    {
+      ...admin,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['role'],
+          properties: { role: { type: 'string', enum: ['reader', 'editor', 'owner'] } }
+        }
+      }
+    },
+    async (request) => {
+      const { projectId, memberId } = request.params as {
+        projectId: string
+        memberId: string
+      }
+      const body = request.body as { role: 'reader' | 'editor' | 'owner' }
+      await tenancy.setProjectMember(Number(projectId), Number(memberId), body.role)
+      return { ok: true }
+    }
+  )
+
+  app.get('/api/v1/organizations/:organizationId/audit-log', admin, async (request) => {
+    const { organizationId } = request.params as { organizationId: string }
+    const query = request.query as { limit?: string }
+    const parsed = Number.parseInt(query.limit ?? '100', 10)
+    return {
+      ok: true,
+      entries: await authz.listAudit(Number(organizationId), Number.isFinite(parsed) ? parsed : 100)
+    }
+  })
 
   // ---- 组织与项目 ----
 
-  app.get('/api/v1/organizations', admin, async () => ({
-    ok: true,
-    organizations: await tenancy.listOrganizations()
-  }))
+  app.get('/api/v1/organizations', admin, async (request) => {
+    const principal = request.vigilPrincipal
+    const organizations = await tenancy.listOrganizations()
+    // 成员只能看到自己的组织；超级管理员看全部
+    return {
+      ok: true,
+      organizations:
+        principal?.kind === 'member'
+          ? organizations.filter((org) => org.id === principal.organizationId)
+          : organizations
+    }
+  })
 
   app.post(
     '/api/v1/organizations',
@@ -1214,28 +1377,17 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
   }
 }
 
-/** 管理端鉴权 */
-function adminGuard(adminToken: string) {
-  const expected = crypto.createHash('sha256').update(adminToken, 'utf8').digest('hex')
-
+/**
+ * 管理端 preHandler：身份解析 + 权限判定 + 把身份交给 onResponse 写审计。
+ *
+ * 40 多个路由共用这一个 guard，权限规则集中在 `AuthzService.requiredAction`，
+ * 不逐路由声明 —— 漏配一个就是一次越权，而且没有任何测试会报警。
+ */
+function adminGuard(authz: AuthzService) {
   return async (request: FastifyRequest, _reply: FastifyReply): Promise<void> => {
-    const header = request.headers['x-vigil-admin-token']
-    const authorization = request.headers.authorization
-
-    let provided: string | undefined
-    if (typeof header === 'string') {
-      provided = header
-    } else if (typeof authorization === 'string' && authorization.startsWith('Bearer ')) {
-      provided = authorization.slice('Bearer '.length)
-    }
-
-    if (!provided) throw AppError.unauthorized('缺少管理 token')
-
-    const actual = crypto.createHash('sha256').update(provided, 'utf8').digest('hex')
-    // 常量时间比较：逐字节比较的时间差可以泄漏 token 前缀
-    if (!crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected))) {
-      throw AppError.forbidden('管理 token 不匹配')
-    }
+    const principal = await authz.resolve(request.headers)
+    await authz.authorize(principal, request.method, request.url)
+    request.vigilPrincipal = principal
   }
 }
 

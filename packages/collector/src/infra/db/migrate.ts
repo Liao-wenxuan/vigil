@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { buildSchema, projectUsageDdl, sloDdl, alertDeliveryDdl } from './schema.js'
+import { buildSchema, projectUsageDdl, memberKeysDdl, sloDdl, alertDeliveryDdl } from './schema.js'
 import type { Db } from './types.js'
 import { ts as tsType, type Dialect } from './dialect.js'
 
@@ -482,6 +482,18 @@ export const MIGRATIONS: Migration[] = [
           [now]
         )
       }
+    }
+  },
+  {
+    version: 9,
+    name: 'member-api-keys',
+    async up(db, dialect) {
+      // 成员凭据表：可签发、可撤销、按组织隔离、带项目级角色。
+      //
+      // ⚠️ 新库走 v1 的 buildSchema 时这张表**已经建好了** ——
+      //    所以 DDL 必须 IF NOT EXISTS，否则新库迁移会撞「表已存在」。
+      //    共用同一份 memberKeysDdl，避免建表与迁移两边漂移。
+      await db.exec(memberKeysDdl(dialect))
     }
   }
 ]

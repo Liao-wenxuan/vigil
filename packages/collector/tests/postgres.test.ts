@@ -68,6 +68,40 @@ async function createPgDb() {
 }
 
 describe('PostgreSQL 兼容性', () => {
+  it('成员凭据与项目授权在 PG 上能签发、查哈希、改角色、撤销', async () => {
+    const { pg, db } = await createPgDb()
+    const tenancy = new TenancyService(db)
+    const org = await tenancy.createOrganization('PG 权限组织')
+    const created = await tenancy.createMember(org.id, 'pg-owner@example.com', 'PG 所有者', 'owner')
+    const project = await tenancy.createProject({ organizationId: org.id, name: 'PG 权限项目' })
+
+    const { id, key } = await tenancy.createMemberKey(created.id, 'pg-key')
+    const found = await tenancy.findMemberByKey(key)
+    expect(found?.id).toBe(created.id)
+    expect(found?.role).toBe('owner')
+
+    // 只存哈希；复合主键的 ON CONFLICT 在 PG 上也要能改角色
+    const rows = await db.all<{ key_hash: string }>('SELECT key_hash FROM member_keys')
+    expect(rows).toHaveLength(1)
+    expect(rows[0].key_hash).not.toContain(key)
+
+    await tenancy.setProjectMember(project.project.id, created.id, 'editor')
+    await tenancy.setProjectMember(project.project.id, created.id, 'owner')
+    const roles = await tenancy.listProjectMembers(project.project.id)
+    expect(roles).toEqual([
+      {
+        member_id: created.id,
+        email: 'pg-owner@example.com',
+        name: 'PG 所有者',
+        role: 'owner'
+      }
+    ])
+
+    await tenancy.revokeMemberKey(created.id, id)
+    expect(await tenancy.findMemberByKey(key)).toBeUndefined()
+    await pg.close()
+  })
+
   it('迁移 v8 的用量回填在 PG 方言下能累加（INSERT…SELECT…ON CONFLICT）', async () => {
     const { pg, db } = await createPgDb()
     const tenancy = new TenancyService(db)
