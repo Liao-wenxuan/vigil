@@ -22,8 +22,8 @@
 | **性能 RUM** | Web Vitals（LCP/CLS/INP/TTFB）、长任务/TBT、接口 span、路由事务 |
 | **错误与性能关联** | 报错事件带上**当刻的 LCP/FCP/长任务数** |
 | **告警引擎** | 7 类规则 × 5 种通道，带去重静默（避免告警疲劳） |
-| **多租户** | 组织 → 团队 → 项目 → 环境 / 版本，三层隔离 |
-| **安全** | 双密钥分离、采集端脱敏、sourcemap 不出服务端 |
+| **多租户** | 组织 / 项目 / 环境 / 版本，三层隔离（团队层已建模待暴露） |
+| **安全** | 双密钥分离、采集端脱敏、sourcemap 不出服务端、角色鉴权与审计日志 |
 
 **SLO 与错误预算** —— 目标、达标率、预算消耗、燃烧率，支持多窗口多燃烧率告警，
 并可用 `npm run slo:gate` 做成发布门禁。
@@ -48,16 +48,27 @@
 
 ---
 
+## 在线 Demo
+
+已经部署在 **[https://vigil.bscjs.top](https://vigil.bscjs.top)**：面板、自托管 SDK（`/sdk/index.iife.js`）、
+上报接口全部在线运行，数据落在真实的 PostgreSQL 上。
+
+管理面板需要登录凭据。仓库是开源的，**明文密码不会写进 README** —— 体验凭据见作者 GitHub 主页 / 简历。
+想接自己的前端试上报，把 `Vigil.init` 的 `endpoint` 换成上面的地址即可，SDK 脚本就是 `/sdk/index.iife.js`。
+
+---
+
 ## 规模
 
 | | |
 |---|---|
-| 单元测试 | **285** 条（Collector 210 + SDK 75） |
+| 单元测试 | **320** 条（Collector 245 + SDK 75） |
 | 端到端断言 | **90** 条（数据链路 33 + 面板渲染 57） |
-| 自动闸门 | **5** 个（界面设计 / 查询计划 / 摄入往返 / 租户隔离 / 发布准备） |
+| 自动闸门 | **5** 个脚本、共 **24** 条判据（界面设计 15 / 查询计划 1 / 摄入往返 6 / 租户隔离 1 / 发布准备 1）；另有 57 条面板渲染断言 + 33 条数据链路断言 |
 | 领域 | 11 个（租户 · 问题 · 性能 · 告警 · SLO · 制品 · 回放 · 行为 · 摄入 · 趋势 · 留存） |
-| 数据库表 | **30** 张 + **48** 个索引（一张代码同时适配 SQLite 与 PostgreSQL） |
+| 数据库表 | **31** 张 + **39** 个索引（一张代码同时适配 SQLite 与 PostgreSQL） |
 | SDK 产物 | 核心 43KB · 回放独立入口 279KB（不进核心） |
+| 部署 | Docker Compose（Collector + Dashboard + PostgreSQL），Caddy 反向代理 + Let's Encrypt 证书，已在 `https://vigil.bscjs.top` 上线 |
 
 ---
 
@@ -67,7 +78,7 @@
 ┌──────────────┐  /collect（错误·全量）    ┌──────────────────────┐
 │              │ ─────────────────────────▶ │                      │
 │   浏览器页面  │  /performance（性能·采样）  │   Vigil Collector    │
-│  @vigil/sdk  │ ─────────────────────────▶ │  Fastify + SQLite    │
+│  @vigil/sdk  │ ─────────────────────────▶ │  Fastify（SQLite / PostgreSQL 双库） │
 │              │  /behavior（行为+回放）      │  模块化单体           │
 └──────────────┘ ─────────────────────────▶ └──────────┬───────────┘
          │                                                 │
@@ -147,10 +158,10 @@ CLI 直连数据库：不设 `DATABASE_URL` 时写 SQLite 文件，设了就走 
   <!-- ⚠️ 放 <head> 同步加载：ESM 的 module script 是 defer 的，
        初始化会晚于首屏静态资源的加载失败（那样一条都收不到） -->
   <!-- 自托管时就是 /sdk/index.iife.js（容器已经在提供它） -->
-  <script src="https://vigil.example.com/sdk/index.iife.js"></script>
+  <script src="https://vigil.bscjs.top/sdk/index.iife.js"></script>
   <script>
     Vigil.init({
-      endpoint: 'https://vigil.example.com/api/v1/collect',
+      endpoint: 'https://vigil.bscjs.top/api/v1/collect',
       appId: 'shop-miniapp',
       token: 'vsk_xxx',
       release: '1.4.2',
@@ -246,12 +257,12 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 285 条单元测试（Collector 210 + SDK 75）
+npm run test              # 320 条单元测试（Collector 245 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
-npm run verify:dashboard  # 55 条面板渲染断言
+npm run verify:dashboard  # 57 条面板渲染断言
 npm run audit:ui          # 15 条界面设计闸门（见下）
 npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走索引）
-npm run audit:ingest      # 2 条摄入预算闸门（每条事件 ≤ 3 次往返，每批 ≤ 1 次提交）
+npm run audit:ingest      # 6 条摄入预算闸门（错误/性能/行为三通道的往返与提交预算）
 npm run audit:scope       # 1 条租户隔离闸门（每条语句都带租户范围）
 npm run audit:publish     # 1 条发布准备闸门（tarball 内容与依赖位置）
 npm run slo:gate -- --project 1   # SLO 发布闸门（预算耗尽 → 退出码 1）
@@ -307,6 +318,9 @@ npm run lint
 |---|---|---|
 | 每条事件的 DB 往返 | 3 次 | 找 Issue / 写明细兼查重 / 更新聚合计数 |
 | 每批（20 条）的提交 | 1 次 | 整批一个事务，不是每条一次 |
+
+> 早期版本只监控错误通道，性能/行为通道的逐条提交裸奔了很久都不知情 — 现在闸门覆盖
+> 错误、性能、行为三通道共 6 条判据，任何一条退化成逐条写都会让 CI 变红。
 
 ```
 1. 找 Issue            SELECT issues WHERE fingerprint
@@ -497,6 +511,22 @@ Vue 捕获和全局捕获到同一个错误，必须是**同一条**。
 
 计数行与项目同时创建 —— 等到第一次上报才补建的话，
 那一次仍然要 `COUNT(*)` 才知道起点，正是这张表要消除的成本。
+
+### 角色鉴权与审计日志
+
+管理端早期只有一个全局 `VIGIL_ADMIN_TOKEN`，40 多个路由共用一个 `preHandler` —— 没有成员、没有
+角色、审计表躺着没人写。现在接上了：
+
+- **超级管理员**：原 admin token 升级而来，语义不变，线上零改动。
+- **成员凭据**：`member_keys` 表只存 sha256（`vmk_` 前缀），明文只在签发响应出现一次；
+  撤销 = 删一行立即失效，不用轮换全站 token。可签发、可撤销、按组织隔离、带项目角色。
+- **角色矩阵**：组织 `owner > admin > member`，项目 `owner > editor > reader`。
+  读 = 同组织成员；写 = 组织 admin 或该项目 editor+；管成员 / 凭据 / 项目授权 / 维护 = 组织 owner；
+  **创建组织只有超管**。跨组织一律 403，组织列表对普通成员只显示自己那个。
+- **审计**：成功的写操作落 `audit_log`，记谁 / 哪个组织 / 对什么资源做了什么。
+  **不记请求体也不记响应体** —— 签凭据的响应里有明文密钥，审计表不能变成第二个密钥库。
+
+权限规则集中在 `requiredAction(method, path)` 一处，逐路由声明漏配一个就是越权，还没人会报警。
 
 ### 保留策略：存储必须有上界
 
@@ -783,7 +813,7 @@ docker compose pull && docker compose up -d
 
 - [x] L1 错误监控全链路（SDK → Collector → 聚合 → 还原 → 查询）
 - [x] Issue 完整生命周期（状态机 + 活动流 + 回归检测）
-- [x] 多租户模型（组织/团队/项目/环境/版本）+ 双密钥
+- [x] 多租户模型（组织 / 项目 / 环境 / 版本，三层隔离）+ 双密钥（`teams` 表已建、`createTeam` 已实现，路由尚未暴露，见「待做」）
 - [x] 告警引擎（7 类规则 × 5 种通道 + 去重静默 + 异步投递 + 失败重试与死信留档）
 - [x] 性能 RUM（Web Vitals / 长任务 / span / 路由事务 / 分位数）
 - [x] 错误与性能关联
@@ -793,10 +823,11 @@ docker compose pull && docker compose up -d
 - [x] 管理面板（总览/问题/详情/性能/**回放**/**行为**/告警/**SLO**/设置，9 路由）
 - [x] **PostgreSQL 支持**（同一套领域代码，SQLite / PG 双库，PG 上有真库测试）
 - [x] **SLO 与错误预算**（分步 SLI / 预算消耗 / 燃烧率 / 多窗口多燃烧率）
+- [x] **角色鉴权与审计日志**（成员凭据 + 组织/项目角色矩阵 + 写操作审计落库，admin token 升级为超级管理员）
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 285 条单元测试 + 33 条数据链路断言 + 57 条面板断言 + 15 条界面闸门 + 5 条闸门（性能/隔离/发布准备）
+- [x] 320 条单元测试（Collector 245 + SDK 75）+ 33 条数据链路断言 + 57 条面板断言 + 15 条界面闸门 + 5 条性能/隔离/发布准备闸门
 
 待做：
 
@@ -804,3 +835,8 @@ docker compose pull && docker compose up -d
       实际发布需要 npm 账号与 token
 - [ ] PostgreSQL 高可用（当前是单副本 StatefulSet；抗单点要上流复制或托管实例）
 - [ ] 告警通道：邮件需要 `nodemailer`（已装，配置 SMTP 后可用）
+- [ ] 面板接入 per-user 登录（后端 RBAC 与审计已就绪，面板当前仍走全局 admin token，
+      需动 nginx Basic Auth 登录链路 + Vue 会话，是独立一轮工程）
+- [ ] 团队路由暴露（`teams` / `team_members` 表与 `createTeam` 已实现，路由与面板未接）
+- [ ] 中文 slug 转写（项目名含中文时生成的 slug 不带转写，纯展示问题）
+- [ ] 公开只读 Demo 账号（利用刚做的 `reader` 角色起一个只读成员，让访客无需私聊即可体验）
