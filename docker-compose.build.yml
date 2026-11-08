@@ -1,0 +1,19 @@
+# 本地开发时叠加这个文件，才会自己编译镜像。
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+#
+# ⚠️ 生产服务器**不要**带这个文件 —— 见 docker-compose.yml 顶部说明。
+#    它内存不够跑 vite + tsc + node-gyp，构建只在 CI 或开发机上做。
+
+services:
+  collector:
+    build:
+      context: .
+      target: collector
+    image: vigil/collector:local
+
+  dashboard:
+    build:
+      context: .
+      target: dashboard
+    image: vigil/dashboard:local

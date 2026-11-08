@@ -1,7 +1,11 @@
-# 本地 / 私有化部署
+# 服务器部署：镜像由 CI 构建好推到 GHCR，这里**只拉取**。
 #
-#   docker compose up --build
+#   docker compose pull && docker compose up -d
 #   → 面板与接口统一入口  http://localhost:8080
+#
+# ⚠️ 不要在服务器上跑 `docker compose up --build`（或 build）：
+#    小内存机器上编译 vite + tsc + node-gyp 会把它压死。
+#    本地开发要自己构建，叠加 docker-compose.build.yml。
 #
 # 只有一个对外入口（dashboard 的 nginx）：
 # 它同时负责静态资源、SPA 回退、/api 反代、管理 token 注入和面板登录。
@@ -36,10 +40,8 @@ services:
       start_period: 10s
 
   collector:
-    build:
-      context: .
-      target: collector
-    image: vigil/collector:local
+    # CI 构建并推送（.github/workflows/images.yml），服务器只 pull
+    image: ghcr.io/liao-wenxuan/vigil-collector:main
     restart: unless-stopped
     depends_on:
       postgres:
@@ -78,10 +80,7 @@ services:
       start_period: 15s
 
   dashboard:
-    build:
-      context: .
-      target: dashboard
-    image: vigil/dashboard:local
+    image: ghcr.io/liao-wenxuan/vigil-dashboard:main
     restart: unless-stopped
     depends_on:
       collector:

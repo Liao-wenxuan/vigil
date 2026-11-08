@@ -758,9 +758,13 @@ docs/
 
 ```bash
 cp .env.example .env     # 填 VIGIL_ADMIN_TOKEN / VIGIL_PANEL_PASSWORD / PG 密码
-docker compose up --build
+docker compose pull && docker compose up -d
 # → 统一入口  http://localhost:8080（面板 + API + SDK 全在这一个口）
 ```
+
+镜像由 CI 构建推送到 GHCR，服务器**只拉不编译**（小内存机器本地构建会压垮它）。
+本地开发要自己编镜像，叠加构建文件：
+`docker compose -f docker-compose.yml -f docker-compose.build.yml up --build`。
 
 - `Dockerfile` 多阶段，两个 target（collector / dashboard）
 - 只有一个对外入口：面板的 nginx 负责静态资源、SPA 回退、`/api` 反代、

@@ -10,11 +10,17 @@
 ```bash
 git clone <repo> vigil && cd vigil
 cp .env.example .env      # 填四个值（见第 2 节）
-docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
 
 完事。**统一入口在 `:8080`** —— 面板、管理 API、SDK 上报、SDK 静态文件
 全走这一个口。采集服务不占宿主机端口。
+
+> ⚠️ **服务器上不要跑 `docker compose build` 或 `up --build`。**
+> 镜像由 GitHub Actions 编译好推到 GHCR（见 `.github/workflows/images.yml`），
+> 服务器只负责拉。1.6GB 内存的机器上跑 vite + tsc + node-gyp，
+> 会把机器压到连 SSH 都进不去 —— 已经发生过一次，最后是控制台强制重启。
+> 本地开发要自己编译，才用 `-f docker-compose.build.yml`（见第 3 节）。
 
 ---
 
@@ -129,11 +135,22 @@ nginx 会为每个 `/api` 请求自动带上管理 token —— 也就是说
 ## 3. 启动
 
 ```bash
-docker compose up -d --build
+docker compose pull && docker compose up -d
 docker compose ps
 ```
 
 三个容器：`postgres` / `collector` / `dashboard`。
+
+**镜像来自 GHCR**，由 CI 在 push 到 main 时构建推送。第一次部署前确认
+`.github/workflows/images.yml` 已经跑过一次，且两个包（vigil-collector /
+vigil-dashboard）的可见性允许服务器拉取（私有包需要先在服务器上
+`docker login ghcr.io`）。
+
+本地开发想自己编译镜像，才叠加构建文件：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+```
 
 启动顺序是 compose 自己管的：PG 健康检查通过 → 采集服务起来 → 面板起来。
 
@@ -307,8 +324,10 @@ gunzip < vigil-2026-10-29.sql.gz | docker compose exec -T postgres psql -U vigil
 
 ```bash
 git pull
-docker compose up -d --build
+docker compose pull && docker compose up -d
 ```
+
+镜像是 CI 构建的版本，`git pull` 只更新清单和配置，**不会重新编译**。
 
 采集服务是**无状态**的，滚动更新时旧 Pod 直接停掉即可，没有数据迁移要做
 （数据库 schema 由服务启动时的迁移自动处理）。
