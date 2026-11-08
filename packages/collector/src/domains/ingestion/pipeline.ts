@@ -124,6 +124,23 @@ export class IngestionPipeline {
 
   /**
    * 摄入性能事务。
+   *
+   * ## 整批一个事务，每条一个 SAVEPOINT
+   *
+   * 旧实现逐条调 `PerformanceService.ingestTransaction`，而领域方法内部
+   * 自带 `db.transaction` —— 一批 20 条就是 **20 次 COMMIT**。
+   * 在 PostgreSQL 部署下每次提交都是一次网络往返 + 一次 fsync。
+   *
+   * 这里在外层包一个事务，`Db.transaction` 检测到嵌套会自动降级为
+   * 「直接跑、靠外层提交」（SQLite 与 PG 两种实现都支持），
+   * 于是整批只剩 1 次提交。每条仍套 SAVEPOINT，
+   * 保证一条坏事务不会把同批其余事务一起带走。
+   *
+   * ## 环境 / 版本按每条自身解析，但相同值只查一次库
+   *
+   * 旧实现把**第一条**的 context 套给整批，一批里混了不同环境或版本
+   * 就会记错维度。改成逐条解析，再用 Map 去重 —— 一批通常只有一两种值，
+   * 所以 DB 往返数不变（每批最多 2 次），正确性却回来了。
    */
   async ingestPerformance(
     project: ProjectRow,
@@ -134,19 +151,43 @@ export class IngestionPipeline {
 
     await this.usage.assertWithinQuota(project, transactions.length)
 
-    const context = {
-      environmentId: await this.resolveEnvironmentId(
-        project.id,
-        envelope.transactions[0]?.environment
-      ),
-      releaseId: await this.resolveReleaseId(project.id, envelope.transactions[0]?.release)
-    }
+    let accepted = 0
+    let dropped = 0
+    let firstError: unknown = null
 
-    for (const transaction of transactions) {
-      await this.performance.ingestTransaction(project.id, transaction, context)
-    }
+    await this.db.transaction(async () => {
+      const environments = new Map<string, number | undefined>()
+      const releases = new Map<string, number | undefined>()
 
-    return { accepted: transactions.length, dropped: 0 }
+      for (const [index, transaction] of transactions.entries()) {
+        try {
+          await this.db.savepoint(`tx_${index}`, async () => {
+            const context = {
+              environmentId: await this.resolveCached(
+                environments,
+                transaction.environment,
+                (slug) => this.resolveEnvironmentId(project.id, slug)
+              ),
+              releaseId: await this.resolveCached(releases, transaction.release, (version) =>
+                this.resolveReleaseId(project.id, version)
+              )
+            }
+            await this.performance.ingestTransaction(project.id, transaction, context)
+            accepted++
+          })
+        } catch (error) {
+          // 单条失败不影响整批
+          dropped++
+          if (firstError === null) firstError = error
+          console.error(`[vigil] 第 ${index} 条性能事务摄入失败:`, error)
+        }
+      }
+    })
+
+    // 整批都失败是系统性故障，不能回 200 让客户端以为数据落库了
+    if (accepted === 0 && firstError !== null) throw firstError
+
+    return { accepted, dropped }
   }
 
   /**
@@ -187,6 +228,24 @@ export class IngestionPipeline {
       [projectId, version]
     )
     return row?.id
+  }
+
+  /**
+   * 同一批里重复的 slug 只查一次库。
+   *
+   * 用 `has()` 而不是 `get()` 判空 —— 查不到的值（undefined）也要缓存，
+   * 否则一批 20 条都带同一个未知环境时会重复查 20 次。
+   */
+  private async resolveCached(
+    cache: Map<string, number | undefined>,
+    key: string | undefined,
+    lookup: (key: string) => Promise<number | undefined>
+  ): Promise<number | undefined> {
+    if (!key) return undefined
+    if (cache.has(key)) return cache.get(key)
+    const id = await lookup(key)
+    cache.set(key, id)
+    return id
   }
 }
 

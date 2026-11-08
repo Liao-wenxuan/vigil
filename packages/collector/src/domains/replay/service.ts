@@ -58,22 +58,29 @@ export class ReplayService {
     if (events.length === 0 && !envelope.session) return { accepted: 0 }
 
     return await this.db.transaction(async () => {
-      for (const event of events) {
+      // 一条多行 VALUES 写完一批行为事件。
+      // 旧实现逐条 INSERT —— 一批 20 条在 PG 上就是 20 次网络往返；
+      // 批量写让它固定成 1 次（每批 100 条 × 9 参数 = 900 < 999 上限）。
+      const CHUNK = 100
+      for (let offset = 0; offset < events.length; offset += CHUNK) {
+        const chunk = events.slice(offset, offset + CHUNK)
+        const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
+        const params = chunk.flatMap((event) => [
+          projectId,
+          event.sessionId ?? envelope.session?.sessionId ?? 'unknown',
+          event.userId ?? envelope.session?.userId ?? null,
+          event.type,
+          event.name,
+          event.url ?? null,
+          event.timestamp,
+          event.durationMs ?? null,
+          writeJson(event.data ?? null)
+        ])
         await this.db.run(
           `INSERT INTO behavior_events
              (project_id, session_id, user_id, type, name, url, timestamp, duration_ms, data_json)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            projectId,
-            event.sessionId ?? envelope.session?.sessionId ?? 'unknown',
-            event.userId ?? envelope.session?.userId ?? null,
-            event.type,
-            event.name,
-            event.url ?? null,
-            event.timestamp,
-            event.durationMs ?? null,
-            writeJson(event.data ?? null)
-          ]
+           VALUES ${placeholders}`,
+          params
         )
       }
 

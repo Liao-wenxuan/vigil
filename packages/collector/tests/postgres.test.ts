@@ -318,6 +318,59 @@ describe('PostgreSQL 兼容性', () => {
     expect(rows[0]?.n).toBe(1)
     await pg.close()
   })
+
+  it('批量多行 VALUES 在 PG 上能一次写入多个 span 与行为事件', async () => {
+    const { pg, db } = await createPgDb()
+    const tenancy = new TenancyService(db)
+    const performance = new PerformanceService(db)
+    const replay = new ReplayService(db)
+    const org = await tenancy.createOrganization('PG 批量组织')
+    const project = await tenancy.createProject({
+      organizationId: org.id,
+      name: 'PG 批量应用',
+      slug: 'pg-batch'
+    })
+
+    // 8 个 span = 80 个占位符，专门压一下 `?` → `$1..$80` 的翻译
+    const tx = await performance.ingestTransaction(
+      project.project.id,
+      makeTransaction({
+        spans: Array.from({ length: 8 }, (_, i) => ({
+          name: `span-${i}`,
+          type: 'custom',
+          durationMs: 10 + i
+        }))
+      })
+    )
+    expect(tx.spans).toBe(8)
+    const spanRows = await db.all<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM spans WHERE transaction_id = ?',
+      [tx.transactionId]
+    )
+    expect(Number(spanRows[0]?.n)).toBe(8)
+
+    // 20 条行为事件 = 180 个占位符，跨方言的多行 VALUES
+    const events = Array.from({ length: 20 }, (_, i) => ({
+      sessionId: 's-pg-batch',
+      type: 'pageview',
+      name: `/page-${i}`,
+      url: `https://a.com/page-${i}`,
+      timestamp: 1_700_000_000_000 + i
+    }))
+    const result = await replay.ingestBehavior(project.project.id, {
+      appId: 'pg-batch',
+      sdk: { name: '@vigil/sdk', version: '0.1.0' },
+      events
+    } as never)
+    expect(result.accepted).toBe(20)
+    const behaviorRows = await db.all<{ n: number }>(
+      'SELECT COUNT(*) AS n FROM behavior_events WHERE project_id = ?',
+      [project.project.id]
+    )
+    expect(Number(behaviorRows[0]?.n)).toBe(20)
+
+    await pg.close()
+  })
 })
 
 /**

@@ -152,31 +152,39 @@ export class PerformanceService {
 
       const transactionId = insertedId
 
-      let spanCount = 0
-      for (const span of event.spans ?? []) {
+      // 一条多行 VALUES 写完所有 span。
+      //
+      // 逐条 INSERT 时，一个带 8 个 span 的事务在 PG 上就是 8 次网络往返；
+      // 批量写让它固定成 1 次（每批最多 90 个 span ——
+      // 10 个参数/行 × 90 = 900，留在 SQLite 的 999 参数上限以内）。
+      const spans = event.spans ?? []
+      const SPAN_CHUNK = 90
+      for (let offset = 0; offset < spans.length; offset += SPAN_CHUNK) {
+        const chunk = spans.slice(offset, offset + SPAN_CHUNK)
+        const placeholders = chunk.map(() => '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').join(', ')
+        const params = chunk.flatMap((span) => [
+          transactionId,
+          projectId,
+          span.name,
+          // 老客户端可能不发 type —— 兜底成 custom，别让它把整批事务弄挂
+          span.type ?? 'custom',
+          Math.round(span.durationMs),
+          span.startedAt ?? null,
+          span.statusCode ?? null,
+          span.url ?? null,
+          span.sizeBytes ?? null,
+          span.initiatorType ?? null
+        ])
         await this.db.run(
           `INSERT INTO spans
              (transaction_id, project_id, name, type, duration_ms, started_at,
               status_code, url, size_bytes, initiator_type)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            transactionId,
-            projectId,
-            span.name,
-            // 老客户端可能不发 type —— 兜底成 custom，别让它把整批事务弄挂
-            span.type ?? 'custom',
-            Math.round(span.durationMs),
-            span.startedAt ?? null,
-            span.statusCode ?? null,
-            span.url ?? null,
-            span.sizeBytes ?? null,
-            span.initiatorType ?? null
-          ]
+           VALUES ${placeholders}`,
+          params
         )
-        spanCount++
       }
 
-      return { transactionId, spans: spanCount }
+      return { transactionId, spans: spans.length }
     })
   }
 

@@ -34,7 +34,10 @@ describe('Issue 状态机', () => {
   describe('收到事件', () => {
     it('累加次数并更新最后出现时间', () => {
       const now = Date.now()
-      const result = transition(state({ count: 3, userCount: 2 }), {
+      // state() 默认把 lastSeen 设成「当前时间」——如果它比 now 晚 1ms，
+      // transition 里的 Math.max(lastSeen, now) 就会取到那个更晚的值，
+      // 断言会随机失败。显式给一个早于 now 的 lastSeen，让断言只测状态机语义。
+      const result = transition(state({ count: 3, userCount: 2, lastSeen: now - 1000 }), {
         type: 'event_received',
         now,
         userIsNew: false
