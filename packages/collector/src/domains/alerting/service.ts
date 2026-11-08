@@ -377,15 +377,32 @@ export class AlertingService {
     )
   }
 
+  /** 列投递记录（按状态过滤） */
+  async listDeliveries(
+    projectId: number,
+    status: 'all' | 'pending' | 'dead' | 'sent' = 'dead',
+    limit = 50
+  ): Promise<AlertDelivery[]> {
+    const rows =
+      status === 'all'
+        ? await this.db.all<DeliveryRow>(
+            `SELECT * FROM alert_deliveries
+             WHERE project_id = ?
+             ORDER BY updated_at DESC LIMIT ?`,
+            [projectId, limit]
+          )
+        : await this.db.all<DeliveryRow>(
+            `SELECT * FROM alert_deliveries
+             WHERE project_id = ? AND status = ?
+             ORDER BY updated_at DESC LIMIT ?`,
+            [projectId, status, limit]
+          )
+    return rows.map(toDelivery)
+  }
+
   /** 列死信（按时间倒序） */
   async listDeadDeliveries(projectId: number, limit = 50): Promise<AlertDelivery[]> {
-    const rows = await this.db.all<DeliveryRow>(
-      `SELECT * FROM alert_deliveries
-       WHERE project_id = ? AND status = 'dead'
-       ORDER BY updated_at DESC LIMIT ?`,
-      [projectId, limit]
-    )
-    return rows.map(toDelivery)
+    return await this.listDeliveries(projectId, 'dead', limit)
   }
 
   /** 取一条投递（重放用） */

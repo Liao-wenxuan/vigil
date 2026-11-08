@@ -1101,9 +1101,12 @@ export async function buildApp(options: BuildAppOptions): Promise<BuiltApp> {
     const { projectId } = request.params as { projectId: string }
     const query = request.query as Record<string, string | undefined>
     const limit = query.limit ? Math.min(200, Math.max(1, Number(query.limit))) : 50
+    const status = query.status
+    const scope: 'all' | 'pending' | 'dead' | 'sent' =
+      status === 'all' || status === 'pending' || status === 'sent' ? status : 'dead'
     return {
       ok: true,
-      deliveries: await alerting.listDeadDeliveries(Number(projectId), limit)
+      deliveries: await alerting.listDeliveries(Number(projectId), scope, limit)
     }
   })
 

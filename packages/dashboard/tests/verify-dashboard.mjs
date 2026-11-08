@@ -797,6 +797,10 @@ await ingest(
   {},
   { 'x-vigil-admin-token': adminToken }
 )
+// ⚠️ 查**全部状态**的投递记录 ——
+//    一轮投递失败只会把它排到后面重试，要 6 轮才转入「死信」。
+//    断言「已有投递记录」是确定的；断言「已经是死信」要看累积状态，不确定。
+const allDeliveries = await api(`/projects/${project.id}/alert-deliveries?status=all`)
 const deliveriesBody = await api(`/projects/${project.id}/alert-deliveries`)
 const slosBody = await api(`/projects/${project.id}/slos`)
 const orgsBody = await api('/organizations')
@@ -1224,8 +1228,8 @@ check(
 )
 check(
   '投递失败留了档（发不出去的通知没丢）',
-  (deliveriesBody.deliveries ?? []).length > 0,
-  `${(deliveriesBody.deliveries ?? []).length} 条死信`
+  (allDeliveries.deliveries ?? []).length > 0,
+  `${(allDeliveries.deliveries ?? []).length} 条投递记录`
 )
 
 const ruleTypeText = (await page.locator('[data-panel="告警规则"]').textContent()) ?? ''
