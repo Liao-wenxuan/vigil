@@ -9,6 +9,9 @@
       href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%2319191b'/><rect x='9' y='9' width='14' height='14' rx='3' fill='%23c6ca4c'/></svg>"
     />
     <title>Vigil · 错误监控</title>
+    <!-- 只读演示令牌：由 nginx 启动脚本注入 window.VIGIL_DEMO_MEMBER_TOKEN。
+         必须在主 bundle 之前加载，面板启动时才能读到。 -->
+    <script src="/config.js"></script>
   </head>
   <body>
     <div id="app"></div>

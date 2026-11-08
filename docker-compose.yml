@@ -95,11 +95,17 @@ services:
       #    envsubst 连**不带花括号**的 $VAR 也会替换。
       # ⚠️ 结尾的 $$ 是 compose 的转义（否则它会把 $' 当成插值），
       #    传给容器的是 ^VIGIL_ADMIN_TOKEN$
-      NGINX_ENVSUBST_FILTER: '^VIGIL_ADMIN_TOKEN$$'
+      #    这里额外放行 VIGIL_PANEL_PASSWORD：/api 的 Basic Auth 开关
+      #    由它在模板里决定（设了密码才要求登录，没设则公开）。
+      NGINX_ENVSUBST_FILTER: '^VIGIL_ADMIN_TOKEN$|^VIGIL_PANEL_PASSWORD$'
       # 面板登录（Basic Auth）。公网部署**必须**设，否则面板等于无密码后台：
       # 任何知道域名的人都能读走全部错误数据、会话回放和用户行为。
       VIGIL_PANEL_USER: ${VIGIL_PANEL_USER:-admin}
       VIGIL_PANEL_PASSWORD: ${VIGIL_PANEL_PASSWORD:-}
+      # 只读演示令牌：匿名访客免登录即可看演示数据（前端从 /config.js 读取）。
+      # 由部署时 seed-demo-member.sh 写入 .env，值是一把 org=1 / project=1 的
+      # reader 成员凭据（vmk_…），后端按 RBAC 只给读权限。
+      VIGIL_DEMO_MEMBER_TOKEN: ${VIGIL_DEMO_MEMBER_TOKEN:-}
     ports:
       - '8080:80'
 

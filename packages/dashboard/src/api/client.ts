@@ -3,8 +3,14 @@
  *
  * ## 鉴权
  *
- * 管理 token **不在前端**。Vite dev server 的代理层会把它注入到
- * `/api` 请求头上（见 vite.config.ts），所以这里不需要、也不允许带 token。
+ * 管理员 token（超级管理员）**不在前端** —— 由 nginx 在通过 Basic Auth 后
+ * 注入到 `/api` 请求头（见 deploy/nginx/）。这里只负责**成员凭据**
+ * （`vmk_…`，含只读演示令牌）：
+ *
+ * - 用户在面板里登录的令牌存在 localStorage（`MEMBER_TOKEN_STORAGE`）
+ * - 部署时注入的只读演示令牌存在 `window.VIGIL_DEMO_MEMBER_TOKEN`
+ *
+ * 两者都没有时，请求不带成员头，由 nginx 决定是否要求 Basic Auth。
  *
  * ## 错误
  *
@@ -50,6 +56,25 @@ import type {
 
 const BASE = '/api/v1'
 
+/**
+ * 成员凭据（vmk_…）来源，按优先级：
+ *
+ * 1. 用户自己在面板里登录的令牌（localStorage `vigil.memberToken`）
+ * 2. 部署时注入的**只读演示令牌**（`window.VIGIL_DEMO_MEMBER_TOKEN`，
+ *    由 nginx 启动脚本写进 /config.js）—— 让访客免登录即可看演示数据
+ *
+ * 管理员走的是另一套：nginx 在通过 Basic Auth 后注入 `x-vigil-admin-token`，
+ * 前端不碰它。所以这里只负责「成员 / 演示」这一类凭据。
+ */
+export const MEMBER_TOKEN_STORAGE = 'vigil.memberToken'
+
+function resolveMemberToken(): string | null {
+  const user = localStorage.getItem(MEMBER_TOKEN_STORAGE)
+  if (user && user.length > 0) return user
+  const demo = (window as unknown as { VIGIL_DEMO_MEMBER_TOKEN?: string }).VIGIL_DEMO_MEMBER_TOKEN
+  return demo && demo.length > 0 ? demo : null
+}
+
 export class ApiError extends Error {
   readonly status: number
 
@@ -69,11 +94,13 @@ interface ApiEnvelope {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response
   try {
+    const memberToken = resolveMemberToken()
     response = await fetch(`${BASE}${path}`, {
       ...init,
       headers: {
         Accept: 'application/json',
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(memberToken ? { 'x-vigil-member-token': memberToken } : {}),
         ...(init?.headers ?? {})
       }
     })

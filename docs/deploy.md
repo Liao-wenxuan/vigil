@@ -101,6 +101,7 @@ cp .env.example .env
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `VIGIL_PANEL_USER` | `admin` | 面板登录用户名 |
+| `VIGIL_DEMO_MEMBER_TOKEN` | 不设 | **只读演示令牌**。设了之后面板免登录即可看演示数据（见下方「公开只读 Demo」）。值是 `scripts/seed-demo-member.sh` 生成的一把 org=1 / project=1 的 `reader` 成员 `vmk_` 凭据，由面板的 nginx 启动脚本写进前端 `/config.js` |
 | `VIGIL_RETENTION_INTERVAL` | `3600` | 保留策略执行间隔（秒）。**设 0 会关掉清理**，表就只增不减 |
 | `VIGIL_PG_POOL_MAX` | `10` | 单副本连接池上限。**副本数 × 这个值必须小于 PG 的 `max_connections`** |
 | `VIGIL_PG_STATEMENT_TIMEOUT_MS` | `15000` | 单条语句超时。没有它，一个写错的查询能占死连接池，整个服务假死 |
@@ -111,6 +112,29 @@ cp .env.example .env
 保留策略会裁掉 `issue_events` / `replay_events` / `behavior_events` /
 `transactions` / `replay_sessions` 里超期的行，**用量计数器不回退** ——
 配额记的是「累计摄入量」，不能靠等过期洗回来。
+
+### 公开只读 Demo
+
+想让访客**免登录**就能看演示数据，起一把只读成员凭据并透传给前端：
+
+```bash
+# 在服务器 /opt/vigil 下：种一个 org=1 / project=1 的 reader 成员，
+# 并把明文 vmk_ 令牌写进 .env 的 VIGIL_DEMO_MEMBER_TOKEN（幂等，可重跑）
+sh scripts/seed-demo-member.sh
+
+# 把同一把令牌交给面板容器（让它经 nginx 写进 /config.js）
+echo 'VIGIL_DEMO_MEMBER_TOKEN='"$(grep '^VIGIL_DEMO_MEMBER_TOKEN=' .env | cut -d= -f2-)" >> .env
+
+docker compose pull && docker compose up -d dashboard
+```
+
+面板启动后，nginx 的 `50-vigil-demo-config.sh` 把令牌写进 `/config.js`，
+前端在加载时读 `window.VIGIL_DEMO_MEMBER_TOKEN`，对 `/api` 带上
+`x-vigil-member-token`。后端按 RBAC 只给**读**权限（成员 org 角色 `member`
++ 项目角色 `reader`，任何写操作都 403）。
+
+⚠️ 这把令牌是**公开的只读凭据**，危害上限就是「被人看了眼演示数据」，
+所以可以放心写进前端；它不能改任何东西、也看不到其他组织。
 
 手动触发一次（磁盘告急时不用等整点）：
 

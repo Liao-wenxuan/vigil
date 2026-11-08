@@ -53,7 +53,13 @@
 已经部署在 **[https://vigil.bscjs.top](https://vigil.bscjs.top)**：面板、自托管 SDK（`/sdk/index.iife.js`）、
 上报接口全部在线运行，数据落在真实的 PostgreSQL 上。
 
-管理面板需要登录凭据。仓库是开源的，**明文密码不会写进 README** —— 体验凭据见作者 GitHub 主页 / 简历。
+**免登录即可体验只读面板**：打开就是演示项目 `demo-web` 的真实数据，全程只读（不能改、不能删、看不到其他组织）。
+这是一把 org=1 / project=1 的 `reader` 成员凭据，由部署侧的 nginx 启动脚本注入前端，后端按 RBAC 收紧到只读。
+
+- 想要**写权限 / 看自己组织的数据**：在面板顶栏「登录成员」里贴入你自己的 `vmk_` 成员令牌。
+- 想要**全功能后台**：在浏览器弹出的登录框输入面板密码（管理员，Basic Auth）。
+
+仓库是开源的，**管理员密码与成员私钥都不写进 README** —— 体验凭据见作者 GitHub 主页 / 简历。
 想接自己的前端试上报，把 `Vigil.init` 的 `endpoint` 换成上面的地址即可，SDK 脚本就是 `/sdk/index.iife.js`。
 
 ---
@@ -835,8 +841,9 @@ docker compose pull && docker compose up -d
       实际发布需要 npm 账号与 token
 - [ ] PostgreSQL 高可用（当前是单副本 StatefulSet；抗单点要上流复制或托管实例）
 - [ ] 告警通道：邮件需要 `nodemailer`（已装，配置 SMTP 后可用）
-- [ ] 面板接入 per-user 登录（后端 RBAC 与审计已就绪，面板当前仍走全局 admin token，
-      需动 nginx Basic Auth 登录链路 + Vue 会话，是独立一轮工程）
-- [ ] 团队路由暴露（`teams` / `team_members` 表与 `createTeam` 已实现，路由与面板未接）
+- [x] 面板接入 per-user 登录（后端 RBAC 与审计已就绪；面板现在可在顶栏用 `vmk_` 成员令牌登录，
+      只读演示令牌由 nginx 启动脚本注入 `/config.js`，访客免登录即可看演示）
+- [x] 团队路由暴露（`teams` / `team_members` 表的 CRUD 与成员管理路由已暴露，租户隔离在鉴权层兜底）
 - [ ] 中文 slug 转写（项目名含中文时生成的 slug 不带转写，纯展示问题）
-- [ ] 公开只读 Demo 账号（利用刚做的 `reader` 角色起一个只读成员，让访客无需私聊即可体验）
+- [x] 公开只读 Demo 账号（org=1 / project=1 起了一个 `reader` 成员，令牌经 nginx 注入前端，
+      访客无需私聊即可在 https://vigil.bscjs.top 体验只读面板）

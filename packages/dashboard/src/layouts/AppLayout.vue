@@ -23,7 +23,7 @@ import {
   Warning,
   Aim
 } from '@element-plus/icons-vue'
-import { listOrganizations, listProjects } from '../api/client'
+import { listOrganizations, listProjects, MEMBER_TOKEN_STORAGE } from '../api/client'
 import {
   DEFAULT_TIME_RANGE,
   PANEL_CONTEXT,
@@ -162,6 +162,49 @@ context.selectProject = selectProject
 context.selectOrganization = selectOrganization
 context.requestRefresh = requestRefresh
 context.setTimeRange = setTimeRange
+
+// ---- 成员凭据（只读演示 / 个人登录）----
+//
+// 访客默认带「只读演示令牌」看演示数据（由 nginx 注入 window.VIGIL_DEMO_MEMBER_TOKEN）；
+// 拿到自己 vmk_ 令牌的人可以在这里登录，以成员身份看自己组织的数据。
+// 管理员走 Basic Auth，不经过这套 UI。
+const userMemberToken = ref<string | null>(localStorage.getItem(MEMBER_TOKEN_STORAGE))
+const demoToken = (window as unknown as { VIGIL_DEMO_MEMBER_TOKEN?: string })
+  .VIGIL_DEMO_MEMBER_TOKEN
+const demoActive = computed(
+  () => !!demoToken && demoToken.length > 0 && !userMemberToken.value
+)
+const authMode = computed<'user' | 'demo' | 'none'>(() => {
+  if (userMemberToken.value) return 'user'
+  if (demoActive.value) return 'demo'
+  return 'none'
+})
+
+const loginOpen = ref(false)
+const loginInput = ref('')
+
+/** 把 vmk_ 遮成 vmk_****abcd，避免令牌全文泄露在界面上 */
+const maskedUserToken = computed(() => {
+  const t = userMemberToken.value ?? ''
+  return t.length > 8 ? `${t.slice(0, 8)}…${t.slice(-4)}` : t
+})
+
+function loginWithToken(): void {
+  const value = loginInput.value.trim()
+  if (!value) return
+  if (!value.startsWith('vmk_')) {
+    window.alert('成员令牌应以 vmk_ 开头')
+    return
+  }
+  localStorage.setItem(MEMBER_TOKEN_STORAGE, value)
+  // 换身份后整个面板重新拉数据，最简单也最不容易漏
+  window.location.reload()
+}
+
+function logoutMember(): void {
+  localStorage.removeItem(MEMBER_TOKEN_STORAGE)
+  window.location.reload()
+}
 
 watch(
   () => context.projectId,
@@ -325,6 +368,38 @@ onUnmounted(() => {
           <el-tooltip content="每 10 秒自动刷新当前页数据" placement="bottom">
             <el-switch v-model="autoRefresh" />
           </el-tooltip>
+
+          <!-- 成员身份：只读演示 / 个人登录 -->
+          <el-tag v-if="authMode === 'demo'" type="info" effect="plain" size="small">
+            只读演示
+          </el-tag>
+          <el-tag v-else-if="authMode === 'user'" type="success" effect="plain" size="small">
+            成员 {{ maskedUserToken }}
+          </el-tag>
+
+          <el-popover v-model:visible="loginOpen" :width="320" trigger="click" placement="bottom">
+            <template #reference>
+              <el-button v-if="authMode !== 'user'" size="small">登录成员</el-button>
+              <el-button v-else size="small" @click="logoutMember">退出</el-button>
+            </template>
+            <div class="member-login">
+              <p class="member-login-tip">
+                粘贴你的 <code>vmk_</code> 成员令牌，以成员身份查看自己组织的数据。
+                管理员请在浏览器弹出的登录框输入面板密码。
+              </p>
+              <el-input
+                v-model="loginInput"
+                size="small"
+                placeholder="vmk_…"
+                @keyup.enter="loginWithToken"
+              />
+              <div class="member-login-actions">
+                <el-button size="small" @click="loginOpen = false">取消</el-button>
+                <el-button type="primary" size="small" @click="loginWithToken">登录</el-button>
+              </div>
+            </div>
+          </el-popover>
+
           <el-button :icon="Refresh" @click="refreshAll">刷新</el-button>
         </div>
       </header>
@@ -550,6 +625,33 @@ onUnmounted(() => {
   align-items: center;
   gap: var(--vigil-space-3);
   flex: 0 0 auto;
+}
+
+/* ---- 成员登录弹层 ---- */
+.member-login {
+  display: flex;
+  flex-direction: column;
+  gap: var(--vigil-space-3);
+}
+
+.member-login-tip {
+  margin: 0;
+  font-size: var(--vigil-text-2xs);
+  line-height: 1.5;
+  color: var(--vigil-text-3);
+}
+
+.member-login-tip code {
+  font-family: var(--vigil-mono);
+  background: var(--vigil-bg-2);
+  padding: 0 4px;
+  border-radius: 4px;
+}
+
+.member-login-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--vigil-space-2);
 }
 
 /* ---- 时间范围 ---- */

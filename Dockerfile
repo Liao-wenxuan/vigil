@@ -99,6 +99,7 @@ COPY deploy/nginx/default.conf.template /etc/nginx/templates/default.conf.templa
 COPY deploy/nginx/vigil-proxy.conf /etc/nginx/vigil-proxy.conf.template
 COPY deploy/nginx/30-vigil-subst.sh /docker-entrypoint.d/30-vigil-subst.sh
 COPY deploy/nginx/40-vigil-auth.sh /docker-entrypoint.d/40-vigil-auth.sh
+COPY deploy/nginx/50-vigil-demo-config.sh /docker-entrypoint.d/50-vigil-demo-config.sh
 
 # 1) 占位文件先建好：即使有人绕过 entrypoint（自己覆盖 CMD），
 #    `include` 也不会因为文件不存在让 nginx 起不来。
@@ -112,6 +113,7 @@ RUN touch /etc/nginx/vigil-proxy.conf /etc/nginx/vigil-auth.conf \
       /etc/nginx/vigil-proxy.conf.template \
       /docker-entrypoint.d/30-vigil-subst.sh \
       /docker-entrypoint.d/40-vigil-auth.sh \
+      /docker-entrypoint.d/50-vigil-demo-config.sh \
  && chmod +x /docker-entrypoint.d/*.sh
 
 EXPOSE 80

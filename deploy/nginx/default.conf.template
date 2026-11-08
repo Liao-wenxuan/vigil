@@ -1,11 +1,31 @@
 # 管理面板的 nginx 配置（**模板**）
 #
-# 容器启动时 `20-envsubst-on-templates.sh` 会把 `${VIGIL_ADMIN_TOKEN}`
-# 替换成环境变量里的真实值，渲染到 /etc/nginx/conf.d/default.conf。
+# 容器启动时 `20-envsubst-on-templates.sh` 会把下面两个占位符替换成环境变量：
+#   - ${VIGIL_ADMIN_TOKEN}   超级管理员令牌（只在通过 Basic Auth 后注入）
+#   - ${VIGIL_PANEL_PASSWORD} 面板密码（决定是否对 /api 要求 Basic Auth）
 #
-# ⚠️ 只替换这一个变量（见 compose 里的 NGINX_ENVSUBST_FILTER）。
-#    不加过滤的话，`$host` / `$uri` 这些 nginx 变量会被 shell
-#    当成环境变量抽成空串 —— 结果是一堆看不懂的 404。
+# ⚠️ 只替换这两个变量（见 compose 里的 NGINX_ENVSUBST_FILTER）。
+#    不加过滤会把 `$host` / `$uri` 这些 nginx 变量当成环境变量抽成空串。
+
+# ==========================================================
+# 令牌注入的两条规则（http 层变量，供 location 内引用）
+# ==========================================================
+# 超级管理员令牌：只有通过 Basic Auth（nginx 变量 $remote_user 非空）
+# 才注入。匿名请求拿不到它 —— 否则「公开只读演示」会被当全站管理员。
+map $remote_user $vigil_admin_token {
+    default "";
+    "~.+"   "${VIGIL_ADMIN_TOKEN}";
+}
+
+# /api 是否需要 Basic Auth：
+#   - 带了成员令牌（vmk_）的请求放行，后端按 RBAC 判定（只读演示走这条）
+#   - 否则按面板密码开关：设了密码 → 要求登录；没设 → 公开
+map $http_x_vigil_member_token $vigil_api_auth {
+    "~^vmk_" off;
+    # 设了面板密码 → 要求 Basic Auth；没设 → 空串（等价于 off，公开）
+    # ⚠️ 必须带引号：否则密码为空时这里会变成 `default ;` 直接报语法错
+    default "${VIGIL_PANEL_PASSWORD:+Restricted}";
+}
 
 server {
     listen 80;
@@ -15,35 +35,30 @@ server {
     index index.html;
 
     # sourcemap 上传上限（采集服务的 bodyLimit 就是 64MB）。
-    # nginx 默认 1MB —— 不放开的话上传会在这一层被 413 掉，
-    # 而采集服务的日志里一条记录都没有，排查会绕很远。
     client_max_body_size 64m;
 
     # ==========================================================
     # SDK 上报：必须公开访问
     # ==========================================================
-    # 这四条**不能** include vigil-auth.conf —— 上报来自用户的浏览器，
-    # 没法带上面板的登录凭据。它们靠项目密钥（vsk_）鉴权。
-    # ⚠️ 用 `=` 精确匹配：前缀匹配会把 /api/v1/collect/xxx 也放出去。
     location = /api/v1/collect      { include /etc/nginx/vigil-proxy.conf; }
     location = /api/v1/performance  { include /etc/nginx/vigil-proxy.conf; }
     location = /api/v1/behavior     { include /etc/nginx/vigil-proxy.conf; }
     location = /api/v1/sourcemaps   { include /etc/nginx/vigil-proxy.conf; }
 
     # ==========================================================
-    # 管理接口：注入 token + 面板登录保护
+    # 管理接口：成员令牌放行，否则要求面板登录（Basic Auth）
     # ==========================================================
+    # 匿名 + 携带 vmk_ 成员令牌 → auth_basic off，后端按 RBAC 给只读/成员权限。
+    # 管理员在浏览器弹出的登录框输入面板密码 → $remote_user 非空 → 注入 admin token。
     location /api/ {
-        include /etc/nginx/vigil-auth.conf;
+        auth_basic $vigil_api_auth;
+        auth_basic_user_file /etc/nginx/.htpasswd;
         include /etc/nginx/vigil-proxy.conf;
     }
 
     # ==========================================================
     # SDK 浏览器产物：必须公开
     # ==========================================================
-    # 业务页面直接 <script src> 引它，不可能带面板登录凭据。
-    # 文件不带 hash，所以缓存只给 1 小时 —— 给 1y immutable 的话
-    # 发版后客户端会一直用旧 SDK，且没有任何办法让它们刷新。
     location /sdk/ {
         expires 1h;
         add_header Cache-Control "public, max-age=3600";
@@ -51,24 +66,26 @@ server {
     }
 
     # ==========================================================
-    # 面板静态资源
+    # 面板静态资源（**公开**，访客免登录即可加载；数据靠成员令牌只读）
     # ==========================================================
     location /assets/ {
-        include /etc/nginx/vigil-auth.conf;
         expires 1y;
         add_header Cache-Control "public, immutable";
     }
 
+    # 只读演示令牌（config.js）也公开，且不被 SPA 回退吞掉
+    location = /config.js {
+        add_header Cache-Control "public, max-age=300";
+    }
+
     # index.html 不缓存：否则发版后用户拿到的还是旧的资源引用
     location = /index.html {
-        include /etc/nginx/vigil-auth.conf;
         add_header Cache-Control "no-store, must-revalidate";
     }
 
-    # 面板是单页应用：所有前端路由回退到 index.html，
-    # 由 vue-router 解析。直接 404 的话刷新 /issues/123 会白屏。
+    # 面板是单页应用：所有前端路由回退到 index.html，由 vue-router 解析。
+    # 公开访问 —— 数据层才区分匿名/成员/管理员。
     location / {
-        include /etc/nginx/vigil-auth.conf;
         try_files $uri $uri/ /index.html;
     }
 
