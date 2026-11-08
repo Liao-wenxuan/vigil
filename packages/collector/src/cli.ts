@@ -1,6 +1,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openDb } from './infra/db/client.js'
+import { openPostgres } from './infra/db/postgres.js'
 import { TenancyService } from './domains/tenancy/service.js'
 
 /**
@@ -12,7 +13,10 @@ import { TenancyService } from './domains/tenancy/service.js'
  *   npm --prefix packages/collector run cli -- release add 1 1.4.2
  *   npm --prefix packages/collector run cli -- list
  *
- * 直接操作数据库文件，不需要 Collector 在跑 —— 初始化流程更短。
+ * 直接连库（SQLite 文件或 PostgreSQL），不需要 Collector 在跑 ——
+ * 初始化流程更短。容器里用不了 CLI 的话，也可以直接调管理 API：
+ *   POST /api/v1/organizations
+ *   POST /api/v1/organizations/:id/projects
  */
 const args = process.argv.slice(2)
 const command = args[0]
@@ -37,7 +41,19 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 const dbPath =
   argValue('db') ?? process.env.VIGIL_DB_PATH ?? path.join(REPO_ROOT, 'data', 'vigil.db')
 
-const db = await openDb(dbPath)
+/**
+ * ⚠️ PostgreSQL 部署必须走 DATABASE_URL。
+ *
+ * 之前这里无条件 `openDb(dbPath)`：容器里设了 DATABASE_URL，
+ * CLI 却照样新建一个空的 SQLite 文件，打印「组织已创建」「密钥如下」，
+ * 而采集服务读的是 PG —— 一条都看不到，全程不报错。
+ * 静默写错库比直接失败难查十倍，所以优先认连接串。
+ *
+ * openPostgres 默认会跑一次迁移（幂等），这样即使 Collector 还没启动过，
+ * CLI 也能独立完成初始化。
+ */
+const databaseUrl = process.env.DATABASE_URL
+const db = databaseUrl ? await openPostgres(databaseUrl) : await openDb(dbPath)
 const tenancy = new TenancyService(db)
 
 function printUsage(): void {
@@ -50,7 +66,10 @@ function printUsage(): void {
   release add <项目ID> <版本> [commitSha]
   list                                  列出组织与项目
 
-环境变量 VIGIL_DB_PATH 指定数据库路径（默认 ./data/vigil.db）`)
+环境变量：
+  DATABASE_URL       PostgreSQL 连接串。设了就走 PG（容器部署必须设）
+  VIGIL_DB_PATH      SQLite 文件路径（默认 ./data/vigil.db）
+  --db <路径>        命令行覆盖 SQLite 路径，优先级最高`)
 }
 
 try {

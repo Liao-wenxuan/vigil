@@ -319,3 +319,55 @@ describe('PostgreSQL 兼容性', () => {
     await pg.close()
   })
 })
+
+/**
+ * PG 部署的初始化路径。
+ *
+ * CLI 以前只会 openDb(SQLite)，在容器里建出一个谁都不读的空库。
+ * 这组测试保证 TenancyService 在**真 PG** 上也能建组织 / 项目 /
+ * 密钥 / 用量行 —— 也就是 REST 管理接口背后实际走的那条链路。
+ */
+describe('PostgreSQL 上的租户初始化', () => {
+  it('能建组织、项目，密钥只存哈希且用量行自动建好', async () => {
+    const { pg, db } = await createPgDb()
+    const tenancy = new TenancyService(db)
+
+    const org = await tenancy.createOrganization('PG 组织')
+    expect(org.id).toBeGreaterThan(0)
+
+    const created = await tenancy.createProject({
+      organizationId: org.id,
+      name: 'PG 应用',
+      retentionDays: 30,
+      eventQuota: 5000
+    })
+    expect(created.project.id).toBeGreaterThan(0)
+    expect(created.runtimeKey).toMatch(/^vsk_/)
+    expect(created.uploadKey).toMatch(/^vup_/)
+
+    // 两把密钥都不能以明文落在库里
+    const keys = await db.all<{ kind: string; key_hash: string }>(
+      'SELECT kind, key_hash FROM project_keys WHERE project_id = ? ORDER BY kind',
+      [created.project.id]
+    )
+    expect(keys).toHaveLength(2)
+    expect(keys.map((k) => k.kind)).toEqual(['runtime', 'upload'])
+    for (const key of keys) {
+      expect(key.key_hash).toMatch(/^[a-f0-9]{64}$/)
+      expect(key.key_hash).not.toContain(created.runtimeKey)
+      expect(key.key_hash).not.toContain(created.uploadKey)
+    }
+
+    // 计数器从 0 起步：老库回填是迁移 v3 的事，新项目必须由 createProject 建行
+    const usage = await db.get<{ events_total: number }>(
+      'SELECT events_total FROM project_usage WHERE project_id = ?',
+      [created.project.id]
+    )
+    expect(Number(usage?.events_total)).toBe(0)
+
+    const projects = await tenancy.listProjects(org.id)
+    expect(projects.some((p) => p.id === created.project.id)).toBe(true)
+
+    await pg.close()
+  })
+})

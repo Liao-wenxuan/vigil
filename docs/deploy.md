@@ -190,16 +190,41 @@ npm run smoke:deploy
 
 ### 4.1 建项目、拿上报密钥
 
+容器部署走**管理接口**（面板那层 nginx 会自动注入管理 token，
+你只要过面板登录就行）：
+
 ```bash
-docker compose exec collector node packages/collector/dist/cli.js \
-  org create "我的组织"
-# 用返回的组织 ID 建项目
-docker compose exec collector node packages/collector/dist/cli.js \
-  project create 1 "我的应用"
+set -a && . ./.env && set +a     # 载入 VIGIL_PANEL_USER / VIGIL_PANEL_PASSWORD
+
+# 1) 建组织，记下返回的 id
+curl -s -u "$VIGIL_PANEL_USER:$VIGIL_PANEL_PASSWORD" \
+  -H 'content-type: application/json' \
+  -d '{"name":"我的组织"}' \
+  http://127.0.0.1:8080/api/v1/organizations
+# → {"ok":true,"organization":{"id":1,"slug":"...","name":"我的组织", ...}}
+
+# 2) 用上一步的 id 建项目
+curl -s -u "$VIGIL_PANEL_USER:$VIGIL_PANEL_PASSWORD" \
+  -H 'content-type: application/json' \
+  -d '{"name":"我的应用"}' \
+  http://127.0.0.1:8080/api/v1/organizations/1/projects
+# → {"ok":true,"project":{...},"runtimeKey":"vsk_...","uploadKey":"vup_..."}
 ```
 
-建项目时会输出 `runtimeKey`（`vsk_` 开头）—— **只显示这一次**，
-数据库里只存哈希。丢了就轮换。
+`project.slug` 就是 SDK 里的 `appId`。两个密钥**只返回这一次**，
+库里只存哈希，丢了只能轮换。
+
+⚠️ **别在宿主机上直接跑 CLI 来初始化容器部署。** CLI 是直连数据库的，
+宿主机没有 `DATABASE_URL`，它会自己在当前目录建一个空的 SQLite 文件，
+打印「项目已创建」，而采集服务读的是 PostgreSQL —— 一条都看不见，
+而且不报任何错。CLI 要用的话，必须在 collector **容器内**执行：
+
+```bash
+docker compose exec -T collector node /app/packages/collector/dist/cli.js list
+```
+
+CLI 现在会优先认 `DATABASE_URL`（PG），没设才回退到 SQLite 文件。
+本地单机开发（不设 `DATABASE_URL`）照旧用 README 里的 `npm run cli`。
 
 ### 4.2 业务页面引 SDK
 

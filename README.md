@@ -135,6 +135,9 @@ npm --prefix packages/collector run cli -- env add 1 production "生产环境" -
 npm --prefix packages/collector run cli -- release add 1 1.4.2
 ```
 
+CLI 直连数据库：不设 `DATABASE_URL` 时写 SQLite 文件，设了就走 PostgreSQL
+（容器部署见 `docs/deploy.md` 第 4.1 节，推荐直接用管理接口建项目）。
+
 ---
 
 ## 接入 SDK

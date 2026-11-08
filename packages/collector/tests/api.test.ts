@@ -481,3 +481,116 @@ describe('HTTP 接口', () => {
     })
   })
 })
+
+/**
+ * 创建组织 / 项目的管理接口。
+ *
+ * 这一组守的是「不做手工 SQL 也能初始化一个 PG 部署」：
+ * 容器里 CLI 连错库是静默的，管理 API 必须是唯一可信的入口。
+ */
+describe('创建组织与项目（管理接口）', () => {
+  it('POST /organizations 创建后能列出来', async () => {
+    const { app } = await setup()
+
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations',
+      headers: adminHeader,
+      payload: { name: '线上组织' }
+    })
+    expect(created.statusCode).toBe(201)
+    const org = created.json().organization
+    expect(org.id).toBeGreaterThan(0)
+    expect(org.name).toBe('线上组织')
+    expect(org.slug).toBeTruthy()
+
+    const list = await app.inject({
+      method: 'GET',
+      url: '/api/v1/organizations',
+      headers: adminHeader
+    })
+    expect(list.json().organizations.some((o: { id: number }) => o.id === org.id)).toBe(true)
+  })
+
+  it('同名组织重复创建是幂等的，不产生第二行', async () => {
+    const { app } = await setup()
+
+    const first = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations',
+      headers: adminHeader,
+      payload: { name: '同名组织' }
+    })
+    const second = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations',
+      headers: adminHeader,
+      payload: { name: '同名组织' }
+    })
+
+    expect(second.json().organization.id).toBe(first.json().organization.id)
+  })
+
+  it('缺 name 返回 400，不带 admin token 返回 401', async () => {
+    const { app } = await setup()
+
+    const invalid = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations',
+      headers: adminHeader,
+      payload: {}
+    })
+    expect(invalid.statusCode).toBe(400)
+
+    const unauthorized = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations',
+      payload: { name: '不该被创建' }
+    })
+    // 没带 token = 401（未认证）；带了但不对 = 403（没权限）。
+    // 这两个码别写反，网关层会按它区分「要弹登录」还是「要拒绝」。
+    expect(unauthorized.statusCode).toBe(401)
+  })
+
+  it('REST 创建的项目，返回的 runtimeKey 立刻能上报并查到 issue', async () => {
+    const { app } = await setup()
+
+    const org = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations',
+      headers: adminHeader,
+      payload: { name: '端到端组织' }
+    })
+    const project = await app.inject({
+      method: 'POST',
+      url: `/api/v1/organizations/${org.json().organization.id}/projects`,
+      headers: adminHeader,
+      payload: { name: '端到端应用' }
+    })
+    expect(project.statusCode).toBe(201)
+    const { runtimeKey } = project.json()
+    expect(runtimeKey).toMatch(/^vsk_/)
+    const slug = project.json().project.slug
+
+    const ingest = await app.inject({
+      method: 'POST',
+      url: '/api/v1/collect',
+      headers: { 'x-vigil-key': runtimeKey },
+      payload: {
+        appId: slug,
+        token: runtimeKey,
+        events: [makeEvent({ fingerprint: fp('rest-created-project') })]
+      }
+    })
+    expect(ingest.statusCode).toBe(200)
+    expect(ingest.json().accepted).toBe(1)
+
+    const issues = await app.inject({
+      method: 'GET',
+      url: `/api/v1/projects/${project.json().project.id}/issues`,
+      headers: adminHeader
+    })
+    expect(issues.json().total).toBe(1)
+    expect(issues.json().issues[0].fingerprint).toBe(fp('rest-created-project'))
+  })
+})
