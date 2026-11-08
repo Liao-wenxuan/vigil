@@ -78,8 +78,28 @@ async function request(pathname, init = {}) {
 
 console.log(`\n[Vigil 部署冒烟] ${BASE}\n`)
 
+/**
+ * 等面板就绪。
+ *
+ * `docker compose up -d` 返回时容器已是 Up，但 nginx worker 可能还没起来 ——
+ * 实测撞过一次：容器 03:21:36 才 start worker，冒烟在这之前发出的第一条
+ * `GET /` 拿到 ECONNREFUSED（脚本记成 HTTP 0），于是报一次假红。
+ *
+ * ⚠️ 只在「连不上」或 5xx 时重试。拿到 401 / 403 / 404 说明服务已经活了，
+ *    那是配置或鉴权问题，必须立刻交给断言判定，不能被等待掩盖。
+ */
+async function waitForPanel(timeoutMs = 30_000) {
+  const deadline = Date.now() + timeoutMs
+  let last = await request('/')
+  while ((last.status === 0 || last.status >= 500) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 1_000))
+    last = await request('/')
+  }
+  return last
+}
+
 // ---- 1. 面板可达 ----
-const panel = await request('/')
+const panel = await waitForPanel()
 check('面板可访问', panel.status === 200, `HTTP ${panel.status}`)
 
 // ---- 2. 面板登录真的生效（不是摆设）----
