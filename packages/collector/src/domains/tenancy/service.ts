@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import { pinyin } from 'pinyin-pro'
 import type { Db } from '../../infra/db/client.js'
 import { fromBool, toBool } from '../../infra/db/dialect.js'
 import { AppError } from '../../shared/errors.js'
@@ -169,18 +170,24 @@ export class TenancyService {
       )
       if (clash) throw AppError.conflict(`团队 slug ${finalSlug} 已被占用`)
     }
-    await this.db.run('UPDATE teams SET name = ?, slug = ? WHERE id = ?', [
+    // ⚠️ 写语句自带组织范围 —— 隔离不能只依赖鉴权层「记得」校验过。
+    //    租户隔离闸门会扫管理端所有 SQL，裸 `WHERE id = ?` 会被判违规。
+    await this.db.run('UPDATE teams SET name = ?, slug = ? WHERE id = ? AND organization_id = ?', [
       name,
       finalSlug,
-      id
+      id,
+      team.organization_id
     ])
     return await this.getTeam(id)
   }
 
   /** 删团队：team_members 跟着级联删，项目的 team_id 置空 */
   async deleteTeam(id: number): Promise<void> {
-    await this.getTeam(id) // 不存在先 404，别静默
-    await this.db.run('DELETE FROM teams WHERE id = ?', [id])
+    const team = await this.getTeam(id) // 不存在先 404，别静默
+    await this.db.run('DELETE FROM teams WHERE id = ? AND organization_id = ?', [
+      id,
+      team.organization_id
+    ])
   }
 
   /** 团队属于哪个组织 —— 鉴权做租户隔离时用 */
@@ -260,7 +267,11 @@ export class TenancyService {
 
   /** 删除成员（级联删掉他的凭据与项目授权） */
   async deleteMember(memberId: number): Promise<void> {
-    await this.db.run('DELETE FROM members WHERE id = ?', [memberId])
+    const member = await this.getMember(memberId) // 不存在先 404，别静默
+    await this.db.run('DELETE FROM members WHERE id = ? AND organization_id = ?', [
+      memberId,
+      member.organization_id
+    ])
   }
 
   /** 列凭据（**不含哈希**，明文更是从来没存过） */
@@ -629,12 +640,26 @@ export class TenancyService {
   }
 }
 
-/** 名字转 slug（中文保留，英文转小写） */
+/**
+ * 名字转 slug：汉字转拼音，其余非 ASCII 字符替换成连字符。
+ *
+ * slug 同时是 SDK 上报的 `appId`。留着中文会让 URL、日志、文件名里全是
+ * 百分号编码，跨系统传递时也容易被二次转义 —— 所以转成 ASCII。
+ *
+ * ⚠️ 只转**单个汉字**，不能把整段丢给 `type: 'array'`：
+ *    pinyin-pro 会把 "Vue3" 拆成 V/u/e/3，英文单词就散了。
+ * 只影响**新建**的资源，库里已有的 slug 一个字都不动（不跑回填）。
+ */
+const HAN_CHAR = /[\u3400-\u9fff]/u
+
 export function slugify(name: string): string {
-  const slug = name
+  const transliterated = Array.from(name)
+    .map((char) => (HAN_CHAR.test(char) ? ` ${pinyin(char, { toneType: 'none' })} ` : char))
+    .join('')
+  const slug = transliterated
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9一-龥]+/g, '-')
+    .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
   return slug || `project-${Date.now().toString(36)}`
 }

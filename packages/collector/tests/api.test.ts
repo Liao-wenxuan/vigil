@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { buildApp } from '../src/app.js'
 import { openDb } from '../src/infra/db/client.js'
-import { TenancyService } from '../src/domains/tenancy/service.js'
+import { TenancyService, slugify } from '../src/domains/tenancy/service.js'
 import { fp, makeEvent } from './helpers.js'
 
 const ADMIN = 'admin_test_token'
@@ -592,5 +592,60 @@ describe('创建组织与项目（管理接口）', () => {
     })
     expect(issues.json().total).toBe(1)
     expect(issues.json().issues[0].fingerprint).toBe(fp('rest-created-project'))
+  })
+})
+
+describe('中文名 slug 转写', () => {
+  it('纯中文转成拼音连字符，不再留中文', () => {
+    expect(slugify('线上应用')).toBe('xian-shang-ying-yong')
+    expect(slugify('购物小程序')).toBe('gou-wu-xiao-cheng-xu')
+  })
+
+  it('中英混排不会把英文单词拆成单字母', () => {
+    // pinyin-pro 的 type:'array' 会把 "Vue3" 拆成 V/u/e/3 —— 逐字转汉字才不会
+    expect(slugify('Vue3 项目')).toBe('vue3-xiang-mu')
+  })
+
+  it('原有英文行为保持不变（大小写 / 符号 / 首尾裁切）', () => {
+    expect(slugify('  My Cool App!  ')).toBe('my-cool-app')
+    expect(slugify('Release 1.4.2')).toBe('release-1-4-2')
+  })
+
+  it('全符号或空串 → 稳定的 ASCII 回退，不会返回空 slug', () => {
+    expect(slugify('!!!')).toMatch(/^project-[a-z0-9]+$/)
+    expect(slugify('')).toMatch(/^project-[a-z0-9]+$/)
+  })
+
+  it('各种中文名生成的 slug 全是 ASCII（可直接当 appId / 放进 URL）', () => {
+    for (const name of ['接口验证-线上', '内容 平台 v2', '前端组', '日本語テスト']) {
+      expect(slugify(name)).toMatch(/^[a-z0-9-]+$/)
+      expect(slugify(name).length).toBeGreaterThan(0)
+    }
+  })
+
+  it('REST 建中文名项目：slug 是拼音，且立刻能拿它上报', async () => {
+    const { app } = await setup()
+    const created = await app.inject({
+      method: 'POST',
+      url: '/api/v1/organizations/1/projects',
+      headers: adminHeader,
+      payload: { name: '中文演示应用' }
+    })
+    expect(created.statusCode).toBe(201)
+    const slug: string = created.json().project.slug
+    expect(slug).toBe('zhong-wen-yan-shi-ying-yong')
+
+    const ingest = await app.inject({
+      method: 'POST',
+      url: '/api/v1/collect',
+      headers: { 'x-vigil-key': created.json().runtimeKey },
+      payload: {
+        appId: slug,
+        token: created.json().runtimeKey,
+        events: [makeEvent({ fingerprint: fp('chinese-slug') })]
+      }
+    })
+    expect(ingest.statusCode).toBe(200)
+    expect(ingest.json().accepted).toBe(1)
   })
 })

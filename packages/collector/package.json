@@ -19,7 +19,8 @@
     "@vigil/protocol": "*",
     "better-sqlite3": "^13.0.3",
     "fastify": "^5.2.0",
-    "nodemailer": "^7.0.0"
+    "nodemailer": "^7.0.0",
+    "pinyin-pro": "^3.29.5"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.12",
