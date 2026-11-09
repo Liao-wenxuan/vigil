@@ -30,7 +30,7 @@ body:
       description: 跑了哪些命令，输出是什么
       placeholder: |
         npm run typecheck  ✓
-        npm run test       ✓ 285 条
+        npm run test       ✓ 337 条
         npm run audit:ui  ✓
     validations:
       required: true

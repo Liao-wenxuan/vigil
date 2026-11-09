@@ -781,13 +781,16 @@ CI 跑的是 `npm ci`，lockfile 不同步会直接失败。
 ## 部署
 
 ```bash
-docker compose up --build    # 面板 :8080，接口 :4318
+docker compose pull && docker compose up -d    # 面板 :8080，接口 :4318
 ```
 
 - `Dockerfile` 多阶段，两个 target（collector / dashboard）
 - `deploy/k8s/` 有 namespace / postgres / deployment / service / ingress / HPA / PDB
-- `docker compose up --build` 一把起全套（面板 + 接口 + PostgreSQL）
-- ⚠️ **本机 Docker 跑不起来，镜像没有实跑验证过**（缺 WSL2）
+- **镜像由 CI 推 GHCR，服务器只拉不编译**；本地要自己编才叠加
+  `docker compose -f docker-compose.yml -f docker-compose.build.yml up --build`
+- ✅ **镜像已在生产实跑**（`vigil.bscjs.top` 三容器 healthy，
+  部署冒烟 5/5 + 公开只读三通道冒烟 6/6）。本机 Docker 因缺 WSL2 起不来，
+  那只是**本地**限制，别再据此写「容器未验证」
 - ✅ **多副本已可行**：采集服务用 PG 时是无状态的，`replicas: 2` + HPA 成立
 - ⚠️ **PG 本身是单副本 StatefulSet** —— 它是单点。抗单点要上流复制或用托管实例
 

@@ -22,7 +22,7 @@
 | **性能 RUM** | Web Vitals（LCP/CLS/INP/TTFB）、长任务/TBT、接口 span、路由事务 |
 | **错误与性能关联** | 报错事件带上**当刻的 LCP/FCP/长任务数** |
 | **告警引擎** | 7 类规则 × 5 种通道，带去重静默（避免告警疲劳） |
-| **多租户** | 组织 / 项目 / 环境 / 版本，三层隔离（团队层已建模待暴露） |
+| **多租户** | 组织 / 团队 / 项目 / 环境 / 版本，三层隔离；团队 CRUD 与成员管理路由已暴露，跨组织一律 403 |
 | **安全** | 双密钥分离、采集端脱敏、sourcemap 不出服务端、角色鉴权与审计日志 |
 
 **SLO 与错误预算** —— 目标、达标率、预算消耗、燃烧率，支持多窗口多燃烧率告警，
@@ -59,6 +59,9 @@
 - 想要**写权限 / 看自己组织的数据**：在面板顶栏「登录成员」里贴入你自己的 `vmk_` 成员令牌。
 - 想要**全功能后台**：在浏览器弹出的登录框输入面板密码（管理员，Basic Auth）。
 
+三条通道（静态公开 / 匿名无凭据 401 / 只读令牌 200 且写入 403）在服务器上
+可用 `npm run smoke:public` 一键验，脚本 `scripts/smoke-public-demo.sh`。
+
 仓库是开源的，**管理员密码与成员私钥都不写进 README** —— 体验凭据见作者 GitHub 主页 / 简历。
 想接自己的前端试上报，把 `Vigil.init` 的 `endpoint` 换成上面的地址即可，SDK 脚本就是 `/sdk/index.iife.js`。
 
@@ -68,9 +71,9 @@
 
 | | |
 |---|---|
-| 单元测试 | **320** 条（Collector 245 + SDK 75） |
+| 单元测试 | **337** 条（Collector 262 + SDK 75） |
 | 端到端断言 | **90** 条（数据链路 33 + 面板渲染 57） |
-| 自动闸门 | **5** 个脚本、共 **24** 条判据（界面设计 15 / 查询计划 1 / 摄入往返 6 / 租户隔离 1 / 发布准备 1）；另有 57 条面板渲染断言 + 33 条数据链路断言 |
+| 自动闸门 | **5** 个脚本、共 **24** 条判据（界面设计 15 / 查询计划 1 / 摄入往返 6 / 租户隔离 1 / 发布准备 1），**全部接入 CI 双 job**；另有 57 条面板渲染断言 + 33 条数据链路断言 |
 | 领域 | 11 个（租户 · 问题 · 性能 · 告警 · SLO · 制品 · 回放 · 行为 · 摄入 · 趋势 · 留存） |
 | 数据库表 | **31** 张 + **39** 个索引（一张代码同时适配 SQLite 与 PostgreSQL） |
 | SDK 产物 | 核心 43KB · 回放独立入口 279KB（不进核心） |
@@ -263,10 +266,11 @@ init({
 **全部用数字验证，不看截图。**
 
 ```bash
-npm run test              # 320 条单元测试（Collector 245 + SDK 75）
+npm run test              # 337 条单元测试（Collector 262 + SDK 75）
 npm run verify            # 33 条端到端断言（真 Chromium → 真 HTTP → 真 SQLite）
 npm run verify:dashboard  # 57 条面板渲染断言
-npm run audit:ui          # 15 条界面设计闸门（见下）
+npm run audit:all         # 一键：播种演示库 + 查询计划 / 租户隔离 / 摄入预算
+npm run audit:ui          # 15 条界面设计闸门（需先起面板，见下）
 npm run audit:plans       # 1 条查询计划闸门（所有热查询必须走索引）
 npm run audit:ingest      # 6 条摄入预算闸门（错误/性能/行为三通道的往返与提交预算）
 npm run audit:scope       # 1 条租户隔离闸门（每条语句都带租户范围）
@@ -275,6 +279,22 @@ npm run slo:gate -- --project 1   # SLO 发布闸门（预算耗尽 → 退出�
 npm run typecheck
 npm run lint
 ```
+
+⚠️ `audit:plans` / `audit:scope` **依赖演示库里的真实数据**（要打真实写接口、
+把增长表放大到 2 万行），干净仓库里直接跑会报「找不到 data/vigil.db」。
+`npm run audit:all` 会先 `seed:demo -- --reset`。`audit:ui` 要对着跑起来的面板
+（`npm run dev:dashboard` 或 `vite preview`），CI 里挂在 dashboard job 的
+同一个 step 里跑 —— 后台服务和测试必须同生共死，换个 step 服务就被杀。
+
+**五个闸门全部挂在 CI 上**，不是「本地我跑过就算」：`ci` job 跑查询计划、
+摄入预算、租户隔离、发布准备；`dashboard` job 在面板服务还活着的同一个 step
+里跑界面设计 15 条。查询计划与租户隔离在 CI 里由 `seed:demo` 先播种 ——
+干净 runner 上连 `data/` 都不存在，不播种的话闸门根本跑不起来。
+
+租户隔离闸门不只扫老路由：身份 / 成员 / 凭据 / 团队 / 审计这批 v0.5 新增接口
+也全在清单里。写语句一律要求自带 `organization_id = ?` / `project_id = ?`；
+只有「按主键解析租户归属」「主键点查单行」「JOIN 关联范围」三类 SELECT
+按结构豁免，豁免条数与理由会在结果里逐条打印，不放水也不静默。
 
 ### 界面设计闸门
 
@@ -410,7 +430,9 @@ npm run slo:gate -- --all               # 查所有项目
 | 1 | 被 SLO 阻断（不要发版） |
 | 2 | 闸门自己跑不起来（数据库连不上） |
 
-接进 CI 就是一条发布门禁：**预算烧光就别发版**。
+CI 里挂了一层 `slo:gate -- --all` 冒烟（干净 runner 没库 → 跳过），
+只保证脚本不会悄悄烂掉。**真正接成发布门禁还得让流水线读得到项目库**，
+这一步没做（见「待做」）—— 别把「冒烟通过」当成「发布被守住」。
 判定策略是纯函数（`domains/slo/gate.ts`），有 9 条单元测试盯着 ——
 「什么情况阻断发布」是业务规则，不该只活在命令行里。
 
@@ -426,7 +448,6 @@ GET    /api/v1/projects/:projectId/slos/:sloId/budget   # 预算消耗趋势
 ```
 
 面板上有一页「SLO 与预算」：状态、预算条（还能烧多少）、燃烧率窗口。
-```
 
 <details>
 <summary>总览页静帧</summary>
@@ -769,17 +790,20 @@ packages/
       api/client.ts  类型化 API 客户端
       theme.css      设计 token（字阶 / 间距 / 动效 / 焦点环）
 scripts/
-  verify-pipeline.ts    端到端闭环验证
-  verify-dashboard.mjs  面板渲染验证
-  audit-ui.mjs          界面设计闸门
-  audit-query-plans.ts  查询计划闸门（热查询必须走索引）
-  audit-ingest-calls.ts 摄入往返预算闸门
-  audit-tenant-scope.ts 租户隔离闸门
-  audit-publish.ts      发布准备闸门
-  slo-gate.ts           SLO 发布闸门（预算耗尽就非零退出）
-  seed-demo.ts          演示数据种子
-  smoke-deploy.mjs     部署冒烟（验证容器拓扑）
-  upload-sourcemaps.mjs CI 里上传 sourcemap
+  verify-pipeline.ts      端到端闭环验证
+  audit-ui.mjs            界面设计闸门
+  audit-query-plans.ts    查询计划闸门（热查询必须走索引）
+  audit-ingest-calls.ts   摄入往返预算闸门
+  audit-tenant-scope.ts   租户隔离闸门（含 RBAC / 团队新路由）
+  audit-publish.ts        发布准备闸门
+  slo-gate.ts             SLO 发布闸门（预算耗尽就非零退出）
+  seed-demo.ts            演示数据种子（闸门的前置依赖）
+  seed-demo-member.sh     线上种只读演示成员并签发 vmk_
+  smoke-deploy.mjs        部署冒烟（验证容器拓扑）
+  smoke-public-demo.sh    线上三通道冒烟（匿名 / 只读 / 管理员）
+  upload-sourcemaps.mjs   CI 里上传 sourcemap
+packages/dashboard/tests/
+  verify-dashboard.mjs    面板渲染验证（57 条断言）
 deploy/
   nginx/        面板的 nginx 配置
   k8s/          namespace / deployment / service / ingress / hpa / pdb
@@ -807,8 +831,9 @@ docker compose pull && docker compose up -d
   **管理 token 注入**和面板登录（Basic Auth）。采集服务不占宿主机端口
 - `deploy/k8s/` 含 namespace / deployment / service / ingress / HPA / PDB
   （⚠️ 这条路径未实跑，已知两处问题见 `docs/deploy.md`）
-- ⚠️ **容器实跑未验证**（本机 Docker 因缺 WSL2 起不来）
-  容器拓扑（同源 + token 注入 + SPA 回退）已用等价代理跑过 57 条面板断言
+- ✅ **容器已在生产实跑**：`https://vigil.bscjs.top` 三容器 healthy，
+  部署冒烟 5/5、公开只读三通道冒烟 6/6、面板 e2e 57/57。
+  本机 Docker 曾因缺 WSL2 起不来，但那只是**本地**限制，线上路径已验证
 - ⚠️ **多副本前必须换 PostgreSQL** —— SQLite 是单文件，多进程写会锁竞争
 
 ---
@@ -819,7 +844,7 @@ docker compose pull && docker compose up -d
 
 - [x] L1 错误监控全链路（SDK → Collector → 聚合 → 还原 → 查询）
 - [x] Issue 完整生命周期（状态机 + 活动流 + 回归检测）
-- [x] 多租户模型（组织 / 项目 / 环境 / 版本，三层隔离）+ 双密钥（`teams` 表已建、`createTeam` 已实现，路由尚未暴露，见「待做」）
+- [x] 多租户模型（组织 / 团队 / 项目 / 环境 / 版本，三层隔离）+ 双密钥 + 团队 CRUD / 成员管理路由
 - [x] 告警引擎（7 类规则 × 5 种通道 + 去重静默 + 异步投递 + 失败重试与死信留档）
 - [x] 性能 RUM（Web Vitals / 长任务 / span / 路由事务 / 分位数）
 - [x] 错误与性能关联
@@ -833,7 +858,13 @@ docker compose pull && docker compose up -d
 - [x] Docker / K8s 部署形态（含 PostgreSQL StatefulSet，多副本清单自洽）
 - [x] **保留策略执行器**（按项目 retention_days 分批裁剪，存储有界）
 - [x] **配额计数表**（热路径不再 COUNT 全表）
-- [x] 320 条单元测试（Collector 245 + SDK 75）+ 33 条数据链路断言 + 57 条面板断言 + 15 条界面闸门 + 5 条性能/隔离/发布准备闸门
+- [x] **公开只读 Demo 与 per-user 登录**（nginx 三通道 + 面板顶栏 `vmk_` 成员登录；
+      访客免登录看演示数据，管理员凭据优先于演示令牌，不会被降级成只读）
+- [x] **团队路由与成员管理**（CRUD 8 条，跨组织在鉴权层与 SQL 范围双重拦截）
+- [x] **GHCR 零编译部署**（CI 构建推镜像，服务器只 `pull && up -d`；1.6GB 机器不再 build）
+- [x] **五个闸门全部接入 CI**（查询计划 / 摄入预算 / 租户隔离 / 界面设计 / 发布准备）
+- [x] **中文名 slug 转写**（汉字转拼音，appId 全 ASCII；只影响新建，已有 slug 不回填）
+- [x] 337 条单元测试（Collector 262 + SDK 75）+ 33 条数据链路断言 + 57 条面板断言 + 15 条界面闸门 + 5 条性能/隔离/发布准备闸门
 
 待做：
 
@@ -841,9 +872,6 @@ docker compose pull && docker compose up -d
       实际发布需要 npm 账号与 token
 - [ ] PostgreSQL 高可用（当前是单副本 StatefulSet；抗单点要上流复制或托管实例）
 - [ ] 告警通道：邮件需要 `nodemailer`（已装，配置 SMTP 后可用）
-- [x] 面板接入 per-user 登录（后端 RBAC 与审计已就绪；面板现在可在顶栏用 `vmk_` 成员令牌登录，
-      只读演示令牌由 nginx 启动脚本注入 `/config.js`，访客免登录即可看演示）
-- [x] 团队路由暴露（`teams` / `team_members` 表的 CRUD 与成员管理路由已暴露，租户隔离在鉴权层兜底）
-- [ ] 中文 slug 转写（项目名含中文时生成的 slug 不带转写，纯展示问题）
-- [x] 公开只读 Demo 账号（org=1 / project=1 起了一个 `reader` 成员，令牌经 nginx 注入前端，
-      访客无需私聊即可在 https://vigil.bscjs.top 体验只读面板）
+- [ ] SLO 接进**真实**发布流水线（CI 目前只有空库冒烟，挡不住发布；需要让流水线读得到项目库）
+- [ ] 团队管理页面（后端 8 条路由已就绪，面板还没有对应 UI）
+- [ ] k8s 清单两处已知问题与实跑验证（见 `docs/deploy.md` 第 7 节）

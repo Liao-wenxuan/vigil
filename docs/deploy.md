@@ -36,23 +36,31 @@ systemctl enable --now docker
 
 ### 1.2 域名与 HTTPS
 
-面板**绝对不要裸奔在公网上** —— 它带着管理 token 的读权限，
-一旦被拿到，攻击者可以读走全部错误数据（里面往往有用户标识、URL 路径
-和完整的会话回放）。
+面板**必须上 HTTPS，管理接口必须有登录保护**。错误数据里往往有用户标识、
+URL 路径和完整的会话回放，明文传输等于把用户隐私复制一份到公网上。
 
-面板自己有一套 Basic Auth（见第 2 节的 `VIGIL_PANEL_PASSWORD`），
-但那是**共用口令**，不是账号体系 —— 外网暴露时仍然必须上 HTTPS：
-token 和回放数据在传输中不能是明文。
+容器内的 nginx 已经把入口拆成三条通道（见第 2 节「公开只读 Demo」）：
+静态资源与 `/config.js` 公开、匿名无凭据访问 `/api` 要 Basic Auth、
+带 `vmk_` 只读令牌走公开只读通道。所以「公开」的只是**一把只读演示凭据**，
+不是整个管理后台。Basic Auth 是共用口令、不是账号体系，HTTPS 仍然必须。
 
-用宿主机 Nginx 反代 + Let's Encrypt：
+宿主机用 Caddy 反代 + Let's Encrypt（线上 `vigil.bscjs.top` 就是这套）：
 
 ```bash
-apt install -y nginx certbot python3-certbot-nginx
-certbot --nginx -d vigil.example.com
+apt install -y caddy
+# /etc/caddy/Caddyfile
+# vigil.example.com {
+#   encode gzip
+#   reverse_proxy 127.0.0.1:8080
+# }
+systemctl reload caddy
 ```
 
-宿主机这层的配置（容器内那份 `deploy/nginx/default.conf.template`
-只管容器内部的事）：
+⚠️ 补上 DNS 之后 Caddy **不会立刻重试**签发：连续失败会进入最长 6 小时的退避，
+要 `systemctl reload caddy` 打断它（实测踩过一次，白等了半天）。
+
+宿主机这层用 Nginx 也可以，配置等价（容器内那份
+`deploy/nginx/default.conf.template` 只管容器内部的事）：
 
 ```nginx
 server {
@@ -148,9 +156,11 @@ curl -u admin:$VIGIL_PANEL_PASSWORD -X POST \
 它由面板的 nginx 在服务端注入，**不出现在前端 bundle，也不出现在浏览器的
 网络面板里** —— 所以泄露渠道只有镜像、`.env` 和宿主机。
 
-⚠️ **`VIGIL_PANEL_PASSWORD` 不设，面板就是无密码后台。**
-nginx 会为每个 `/api` 请求自动带上管理 token —— 也就是说
-「知道域名」等于「拿到完整管理权限」。容器启动日志里会有一条醒目警告。
+⚠️ **`VIGIL_PANEL_PASSWORD` 不设，管理接口就是无密码后台。**
+没设密码时 `auth_basic off`，匿名无凭据打到 `/api/` 也会走到代理那一步、
+被注入管理 token —— 「知道域名」等于「拿到完整管理权限」。
+只读演示通道走的是另一条 named location（不注入 admin token），
+所以设不设面板密码都不影响它的只读性。容器启动日志里会有一条醒目警告。
 
 ⚠️ `.env` **不要提交进 git**。仓库的 `.gitignore` 已经排除了它。
 
@@ -195,8 +205,10 @@ curl -I http://127.0.0.1:8080/sdk/index.iife.js
 `/api/ready` 和 `/api/health` 的区别：前者**真的查数据库**。
 PG 还没就绪时就返回失败 —— 这是「就绪探针」该干的事。
 
-⚠️ `curl http://127.0.0.1:8080/` 返回 **401 是正常的** —— 那是面板登录在拦。
-带 `-u` 之后才是 200。
+`/` 与 `/config.js` 是**静态公开**的（访客免登录看演示数据），应当返回 200；
+数据边界在 `/api`：匿名无凭据访问
+`curl http://127.0.0.1:8080/api/v1/organizations` 返回 **401** 才是对的
+（设了面板密码时会弹登录框），带 `-u` 之后是 200。
 
 ### 部署冒烟（强烈建议）
 
@@ -224,6 +236,17 @@ npm run smoke:deploy
 ```
 
 第 3 条是最关键的那条：它同时验证了「nginx 注入了 token」和「数据库连得上」。
+
+只读 Demo 的**三条通道**另有一份冒烟，在**服务器** `/opt/vigil` 下跑
+（脚本要读 `.env` 里的演示令牌，故意不带 Basic Auth 凭据）：
+
+```bash
+npm run smoke:public
+# 等价于 sh scripts/smoke-public-demo.sh https://vigil.example.com
+```
+
+6 条断言：面板外壳与 `/config.js` 公开 200 / 匿名带 `vmk_` 演示令牌 200 /
+匿名无凭据 401 / 演示令牌身份是 `member` / 演示令牌建项目 403。
 
 ---
 
@@ -483,3 +506,21 @@ curl -u "$PANEL_USER:$PANEL_PASSWORD" \
 只记请求方法 + 路径 + 响应状态，**不记请求体也不记响应体** ——
 建项目、签凭据的响应里有明文密钥，审计表不能变成第二个密钥库。
 GET 与失败请求（4xx）不落记录。
+
+### 团队
+
+团队是**组织级**分组，CRUD 与成员管理共 8 条路由；创建 / 改名 / 删 /
+调整成员都提到组织 `owner`：
+
+```bash
+curl -u "$PANEL_USER:$PANEL_PASSWORD" -X POST \
+  -H 'content-type: application/json' -d '{"name":"前端组"}' \
+  https://vigil.example.com/api/v1/organizations/1/teams
+
+curl -u "$PANEL_USER:$PANEL_PASSWORD" \
+  https://vigil.example.com/api/v1/teams/1/members
+```
+
+成员与团队必须同组织：跨组织既读不到（鉴权层解析团队归属），
+也加不进（`addTeamMember` 校验）。写语句自带 `organization_id = ?` ——
+隔离不依赖调用链记得校验。面板目前还没有团队管理页，见 README「待做」。
