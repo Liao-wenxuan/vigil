@@ -768,10 +768,15 @@ onUnmounted(() => {
 }
 
 /**
- * 窄屏：顶栏塞不下「时间范围」四个字了。
+ * 窄屏：顶栏塞不下「时间范围」四个字了 —— 标签冗余，选择器里写着
+ * 「最近 7 天」，意思已经自明。
  *
- * 320px 下多出的 48px 横向溢出就是它造成的 ——
- * 标签本身是冗余的：选择器里写着「最近 7 天」，意思已经自明。
+ * ⚠️ 更正旧注释：早期 320px 只多出 48px，是标签造成的；v0.5 加了
+ *    「身份标签 + 登录成员」之后，右侧固定宽度涨到约 464px，
+ *    溢出变成 464 − 视口宽（320→+144 / 375→+89 / 414→+50 / 768→0），
+ *    八个页面一起挂 —— 因为顶栏是共用外壳。
+ *    根因是 .topbar-actions 的 `flex: 0 0 auto` 死不收缩。
+ *    所以窄屏改成**换行**而不是继续藏控件：功能一个不少，宽度不再硬撑。
  */
 @media (max-width: 768px) {
   .range-label {
@@ -780,6 +785,26 @@ onUnmounted(() => {
 
   .range-select {
     width: 112px;
+  }
+
+  .topbar {
+    height: auto;
+    min-height: 56px;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    gap: var(--vigil-space-2);
+    padding: var(--vigil-space-2) var(--vigil-space-3);
+  }
+
+  .crumbs,
+  .topbar-actions {
+    width: 100%;
+  }
+
+  .topbar-actions {
+    flex-wrap: wrap;
+    gap: var(--vigil-space-2);
   }
 }
 </style>
