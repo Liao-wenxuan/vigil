@@ -808,8 +808,10 @@ deploy/
   nginx/        面板的 nginx 配置
   k8s/          namespace / deployment / service / ingress / hpa / pdb
 docs/
-  integration.md   接入文档
-  deploy.md       上线指南
+  integration.md          接入文档
+  deploy.md               上线指南
+  interview.md            面试问答手册（项目决策、追问链、诚实边界）
+  build-from-scratch.md   从零到一的建造记录（阶段 / 决策 / 踩坑）
 ```
 
 ---
