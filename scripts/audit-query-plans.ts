@@ -51,12 +51,17 @@ const GROWTH_TABLES = [
   'audit_log'
 ]
 
+/** v0.5 新增的路由用的真实 id —— 用假 id 只会 404，一条 SQL 都探不到 */
+type AuditIds = { orgId: number; teamId: number; memberId: number }
+
 /** 管理端只读接口清单 */
 function readEndpoints(
   projectId: string,
-  issueId: number | undefined
+  issueId: number | undefined,
+  ids: AuditIds
 ): { path: string; method: 'GET' | 'POST' }[] {
   const p = `/api/v1/projects/${projectId}`
+  const o = `/api/v1/organizations/${ids.orgId}`
   return [
     { path: '/api/v1/organizations', method: 'GET' },
     { path: `${p}/stats`, method: 'GET' },
@@ -80,7 +85,24 @@ function readEndpoints(
     { path: `${p}/transactions?since=1700000000000&until=1800000000000`, method: 'GET' },
     { path: `${p}/behavior/summary?since=1700000000000&until=1800000000000`, method: 'GET' },
     { path: `${p}/sessions?since=1700000000000&until=1800000000000`, method: 'GET' },
-    { path: `${p}/alert-incidents?since=1700000000000&until=1800000000000`, method: 'GET' }
+    { path: `${p}/alert-incidents?since=1700000000000&until=1800000000000`, method: 'GET' },
+    // ---- v0.5 RBAC / 团队 / 审计 / SLO 的只读接口 ----
+    // audit_log 也在增长表里：放大到 2 万行后，缺索引会在这里露出来。
+    { path: '/api/v1/me', method: 'GET' },
+    { path: `${o}/members`, method: 'GET' },
+    { path: `${o}/teams`, method: 'GET' },
+    { path: `${o}/audit-log`, method: 'GET' },
+    { path: `${o}/projects`, method: 'GET' },
+    { path: `/api/v1/teams/${ids.teamId}`, method: 'GET' },
+    { path: `/api/v1/teams/${ids.teamId}/members`, method: 'GET' },
+    { path: `/api/v1/members/${ids.memberId}/keys`, method: 'GET' },
+    { path: `${p}/members`, method: 'GET' },
+    { path: `${p}`, method: 'GET' },
+    { path: `${p}/slos`, method: 'GET' },
+    { path: `${p}/slos/1`, method: 'GET' },
+    { path: `${p}/slos/1/budget`, method: 'GET' },
+    { path: `${p}/alert-deliveries?status=all`, method: 'GET' },
+    { path: `${p}/issues/${issueId ?? 1}/replay`, method: 'GET' }
   ]
 }
 
@@ -106,7 +128,11 @@ function inlineParams(sql: string): string {
 
 type Recorded = { sql: string; params: unknown[] | Record<string, unknown> | undefined }
 
-async function collectSql(projectId: string, issueId: number | undefined): Promise<Recorded[]> {
+async function collectSql(
+  projectId: string,
+  issueId: number | undefined,
+  ids: AuditIds
+): Promise<Recorded[]> {
   const base = await openDb(defaultDbPath(), { migrate: false })
   const recorded: Recorded[] = []
 
@@ -135,7 +161,7 @@ async function collectSql(projectId: string, issueId: number | undefined): Promi
   }
 
   const { app } = await buildApp({ db: spy, adminToken: ADMIN_TOKEN })
-  for (const ep of readEndpoints(projectId, issueId)) {
+  for (const ep of readEndpoints(projectId, issueId, ids)) {
     const res = await app.inject({
       method: ep.method,
       url: ep.path,
@@ -239,11 +265,21 @@ async function main() {
     ? (real.prepare('SELECT id FROM issues WHERE project_id = ? LIMIT 1').get(project.id) as
         { id: number } | undefined)
     : undefined
+  const org = project
+    ? (real.prepare('SELECT organization_id AS id FROM projects WHERE id = ?').get(project.id) as
+        { id: number } | undefined)
+    : undefined
+  const team = real.prepare('SELECT id FROM teams LIMIT 1').get() as { id: number } | undefined
+  const member = real.prepare('SELECT id FROM members LIMIT 1').get() as { id: number } | undefined
   real.close()
   if (!project) throw new Error('库里没有项目，先跑 npm run seed:demo')
 
   console.log('① 插桩记录实际执行的 SQL…')
-  const recorded = await collectSql(String(project.id), firstIssue?.id)
+  const recorded = await collectSql(String(project.id), firstIssue?.id, {
+    orgId: org?.id ?? 1,
+    teamId: team?.id ?? 1,
+    memberId: member?.id ?? 1
+  })
   const selects = recorded.filter((r) => /^\s*select/i.test(r.sql))
   const unique = new Map<string, string>()
   for (const r of selects) unique.set(r.sql, r.sql)

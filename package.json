@@ -31,8 +31,10 @@
     "audit:scope": "tsx scripts/audit-tenant-scope.ts",
     "audit:publish": "tsx scripts/audit-publish.ts",
     "slo:gate": "tsx scripts/slo-gate.ts",
+    "audit:all": "npm run seed:demo -- --reset && npm run audit:plans && npm run audit:scope && npm run audit:ingest",
     "prepare": "husky",
-    "smoke:deploy": "node scripts/smoke-deploy.mjs"
+    "smoke:deploy": "node scripts/smoke-deploy.mjs",
+    "smoke:public": "sh scripts/smoke-public-demo.sh"
   },
   "devDependencies": {
     "@commitlint/cli": "^19.6.0",

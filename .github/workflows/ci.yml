@@ -52,6 +52,21 @@ jobs:
       - name: slo 闸门冒烟
         run: npm run slo:gate -- --all
 
+      # 查询计划与租户隔离闸门**必须对着真实数据跑**：前者要把增长表
+      # 放大到 2 万行才能看出扫描退化，后者要打真实写接口才能检查写语句。
+      # CI 是干净环境，data/ 都没被 git 跟踪，所以先播种。
+      #
+      # ⚠️ 顺序不能挪到 slo:gate 之前 —— 种子里有一条「预算已烧完」的 SLO，
+      #    先播种会让发布闸门按「预算耗尽」退出 1，把 CI 无端染红。
+      - name: 播种演示库（闸门依赖真实数据）
+        run: npm run seed:demo -- --reset
+
+      - name: 查询计划闸门（热查询必须走索引）
+        run: npm run audit:plans
+
+      - name: 租户隔离闸门（每条语句自带租户范围）
+        run: npm run audit:scope
+
       - name: 安装浏览器
         run: npx playwright install --with-deps chromium
 
@@ -104,3 +119,4 @@ jobs:
           npx vite preview packages/dashboard --port 5174 --strictPort &
           node scripts/wait-for.mjs http://127.0.0.1:4318/api/health http://localhost:5174/
           node packages/dashboard/tests/verify-dashboard.mjs --url http://localhost:5174
+          npm run audit:ui
